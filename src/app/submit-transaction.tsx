@@ -1,4 +1,5 @@
 import { config } from "@/constants/config";
+import { colors } from "@/constants/theme";
 import { api } from "@/services/api";
 import { formatCurrency } from "@/utils/formatCurrency";
 import { Ionicons } from "@expo/vector-icons";
@@ -21,22 +22,6 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-const THEME = {
-  background: "#0A0A0B",
-  surface: "#16161A",
-  surfaceInput: "#0D0D0F",
-  accent: "#AAFF00",
-  accentDim: "rgba(170, 255, 0, 0.15)",
-  primaryText: "#F4F4F5",
-  secondaryText: "#71717A",
-  tertiaryText: "#52525B",
-  border: "#27272A",
-  borderLight: "#3F3F46",
-  error: "#EF4444",
-  warning: "#F59E0B",
-  uploadBoxBg: "#111113",
-};
-
 interface RateResponse {
   rate?: number;
 }
@@ -47,10 +32,12 @@ export default function SubmitTransactionScreen() {
     coin = "USDT",
     network = "TRC20",
     amount: amountParam = "",
+    rate: rateParam = "0",
   } = useLocalSearchParams<{
     coin?: string;
     network?: string;
     amount?: string;
+    rate?: string;
   }>();
 
   const [amount, setAmount] = useState(amountParam || "");
@@ -62,6 +49,7 @@ export default function SubmitTransactionScreen() {
 
   const coinSymbol = (coin || "USDT").toUpperCase();
   const coinId = coinSymbol.toLowerCase();
+  const passedRate = parseFloat(rateParam) || 0;
 
   const { data: rateData } = useQuery({
     queryKey: ["rate", coinId],
@@ -73,21 +61,23 @@ export default function SubmitTransactionScreen() {
         return { rate: 0 };
       }
     },
+    // Use the rate passed from the convert screen while the fresh fetch is in flight
+    placeholderData: passedRate > 0 ? { rate: passedRate } : undefined,
   });
 
-  const rate = rateData?.rate ?? 0;
+  const rate = rateData?.rate ?? passedRate;
   const amountNum = useMemo(
     () => parseFloat(amount.replace(/,/g, "")) || 0,
     [amount],
   );
   const amountNaira = useMemo(
-    () => (rate && amountNum > 0 ? amountNum * rate : 0),
+    () => (rate > 0 && amountNum > 0 ? amountNum * rate : 0),
     [rate, amountNum],
   );
   const amountNairaDisplay =
-    amountNaira > 0 ? formatCurrency(amountNaira, "NGN", true) : "—";
+    amountNaira > 0 ? formatCurrency(amountNaira, "NGN", true) : rate === 0 ? "Loading rate…" : "—";
 
-  const canSubmit = amountNum > 0 && proofImage !== null;
+  const canSubmit = amountNum > 0 && proofImage !== null && rate > 0;
 
   const pickImage = async () => {
     try {
@@ -115,127 +105,6 @@ export default function SubmitTransactionScreen() {
   };
 
   const removeImage = () => setProofImage(null);
-
-  /*   const handleSubmit = async () => {
-    if (!canSubmit || isSubmitting) return;
-    setSubmitError("");
-    setIsSubmitting(true);
-    try {
-      const formData = new FormData();
-      formData.append("coin", coinSymbol);
-      formData.append("network", network || "");
-      formData.append("amountCrypto", String(amountNum));
-      formData.append("amountNaira", String(Math.ceil(amountNaira)));
-      formData.append("rateAtTime", String(rate));
-      if (transactionHash.trim())
-        formData.append("transactionHash", transactionHash.trim());
-
-      if (proofImage?.uri) {
-        const filename = proofImage.uri.split("/").pop() || "proof.jpg";
-        const match = /\.(jpe?g|png|webp)$/i.exec(filename);
-        const mime = match ? `image/${match[1].toLowerCase()}` : "image/jpeg";
-        formData.append("proofImage", {
-          uri: proofImage.uri,
-          name: filename,
-          type: mime,
-        } as unknown as Blob);
-      }
-
-      await api.post("/transactions", formData, { timeout: 30000 });
-      setShowSuccessModal(true);
-    } catch (err: unknown) {
-      let message = "Failed to submit. Please try again.";
-      const ax = err as {
-        response?: { data?: { message?: string }; status?: number };
-        message?: string;
-        code?: string;
-      };
-      if (ax.response) {
-        message =
-          ax.response?.data?.message ??
-          (ax.response?.status === 401
-            ? "Please log in to submit proof."
-            : message);
-      } else if (
-        ax.message === "Network Error" ||
-        ax.code === "ECONNABORTED" ||
-        ax.code === "ERR_NETWORK"
-      ) {
-        message =
-          `No response from server (${config.apiUrl}). Check that the backend is running. On a physical device, set EXPO_PUBLIC_API_URL to your computer's IP (e.g. http://192.168.1.1:5000).`;
-      } else if (ax.message && typeof ax.message === "string") {
-        message = ax.message;
-      }
-      setSubmitError(message);
-    } finally {
-      setIsSubmitting(false);
-    }
-  }; */
-
-  // Replace your entire handleSubmit function in submit-transaction.tsx with this:
-
-  /*   const handleSubmit = async () => {
-    if (!canSubmit || isSubmitting) return;
-    setSubmitError("");
-    setIsSubmitting(true);
-    try {
-      const formData = new FormData();
-      formData.append("coin", coinSymbol);
-      formData.append("network", network || "");
-      formData.append("amountCrypto", String(amountNum));
-      formData.append("amountNaira", String(Math.ceil(amountNaira)));
-      formData.append("rateAtTime", String(rate));
-      if (transactionHash.trim())
-        formData.append("transactionHash", transactionHash.trim());
-
-      if (proofImage?.uri) {
-        const filename = proofImage.uri.split("/").pop() || "proof.jpg";
-        const match = /\.(jpe?g|png|webp)$/i.exec(filename);
-        const mime = match ? `image/${match[1].toLowerCase()}` : "image/jpeg";
-        formData.append("proofImage", {
-          uri: proofImage.uri,
-          name: filename,
-          type: mime,
-        } as unknown as Blob);
-      }
-
-      // ✅ Use native fetch — axios silently drops FormData+file on Android
-      const { useAuthStore } = await import("@/store/authStore");
-      const token = useAuthStore.getState().token;
-
-      const response = await fetch(`${config.apiUrl}/api/v1/transactions`, {
-        method: "POST",
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          // ⚠️ Do NOT set Content-Type — fetch sets it automatically with the correct boundary
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const message =
-          errorData?.message ??
-          (response.status === 401
-            ? "Please log in to submit proof."
-            : "Failed to submit. Please try again.");
-        setSubmitError(message);
-        return;
-      }
-
-      setShowSuccessModal(true);
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      setSubmitError(
-        e?.message
-          ? `Error: ${e.message}`
-          : `No response from server (${config.apiUrl}). Check that the backend is running.`,
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
-  }; */
-  // Replace your handleSubmit function in submit-transaction.tsx with this:
 
   const handleSubmit = async () => {
     if (!canSubmit || isSubmitting) return;
@@ -266,7 +135,7 @@ export default function SubmitTransactionScreen() {
         } as unknown as Blob);
       }
 
-      // ✅ XMLHttpRequest handles local file:// and content:// URIs on Android
+      // XHR handles local file:// and content:// URIs correctly on Android
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", `${config.apiUrl}/api/v1/transactions`);
@@ -274,7 +143,6 @@ export default function SubmitTransactionScreen() {
         if (token) {
           xhr.setRequestHeader("Authorization", `Bearer ${token}`);
         }
-        // Do NOT set Content-Type — XHR sets multipart/form-data boundary automatically
 
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
@@ -317,7 +185,7 @@ export default function SubmitTransactionScreen() {
 
   const closeSuccessAndGoToHistory = () => {
     setShowSuccessModal(false);
-    router.replace("/(tabs)/history");
+    router.replace("/(tabs)/(main)/history");
   };
 
   return (
@@ -340,7 +208,7 @@ export default function SubmitTransactionScreen() {
               hitSlop={12}
               activeOpacity={0.8}
             >
-              <Ionicons name="arrow-back" size={22} color={THEME.primaryText} />
+              <Ionicons name="arrow-back" size={22} color={colors.primaryText} />
             </TouchableOpacity>
             <View style={styles.headerCenter}>
               <Text style={styles.title}>Submit Proof</Text>
@@ -377,7 +245,7 @@ export default function SubmitTransactionScreen() {
                 value={amount}
                 onChangeText={setAmount}
                 placeholder="0.00"
-                placeholderTextColor={THEME.tertiaryText}
+                placeholderTextColor={colors.tertiaryText}
                 keyboardType="decimal-pad"
               />
               <View style={styles.amountBadge}>
@@ -386,7 +254,9 @@ export default function SubmitTransactionScreen() {
             </View>
             <View style={styles.receiveRow}>
               <Text style={styles.summaryLabel}>You will receive</Text>
-              <Text style={styles.receiveValue}>{amountNairaDisplay}</Text>
+              <Text style={[styles.receiveValue, rate === 0 && styles.receiveValueMuted]}>
+                {amountNairaDisplay}
+              </Text>
             </View>
           </View>
 
@@ -420,7 +290,7 @@ export default function SubmitTransactionScreen() {
                       <Ionicons
                         name="close"
                         size={18}
-                        color={THEME.primaryText}
+                        color={colors.primaryText}
                       />
                     </View>
                   </TouchableOpacity>
@@ -431,7 +301,7 @@ export default function SubmitTransactionScreen() {
                     <Ionicons
                       name="cloud-upload-outline"
                       size={40}
-                      color={THEME.secondaryText}
+                      color={colors.secondaryText}
                     />
                   </View>
                   <Text style={styles.uploadTitle}>
@@ -457,7 +327,7 @@ export default function SubmitTransactionScreen() {
               value={transactionHash}
               onChangeText={setTransactionHash}
               placeholder="e.g. 0x1234abcd..."
-              placeholderTextColor={THEME.tertiaryText}
+              placeholderTextColor={colors.tertiaryText}
               autoCapitalize="none"
               autoCorrect={false}
             />
@@ -469,7 +339,7 @@ export default function SubmitTransactionScreen() {
               <Ionicons
                 name="warning-outline"
                 size={18}
-                color={THEME.warning}
+                color={colors.pending}
               />
               <Text style={styles.noticeTitle}>Before submitting</Text>
             </View>
@@ -495,13 +365,17 @@ export default function SubmitTransactionScreen() {
               <ActivityIndicator size="small" color="#000000" />
             ) : (
               <>
-                <Text style={styles.submitBtnText}>Submit transaction</Text>
-                <Ionicons
-                  name="arrow-forward"
-                  size={20}
-                  color="#000000"
-                  style={styles.submitBtnIcon}
-                />
+                <Text style={styles.submitBtnText}>
+                  {rate === 0 ? "Loading rate…" : "Submit transaction"}
+                </Text>
+                {rate > 0 && (
+                  <Ionicons
+                    name="arrow-forward"
+                    size={20}
+                    color="#000000"
+                    style={styles.submitBtnIcon}
+                  />
+                )}
               </>
             )}
           </TouchableOpacity>
@@ -518,7 +392,7 @@ export default function SubmitTransactionScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalIconWrap}>
-              <Ionicons name="checkmark-circle" size={64} color={THEME.accent} />
+              <Ionicons name="checkmark-circle" size={64} color={colors.primaryAccent} />
             </View>
             <Text style={styles.modalTitle}>Transaction Submitted!</Text>
             <Text style={styles.modalMessage}>
@@ -540,7 +414,7 @@ export default function SubmitTransactionScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: THEME.background },
+  safe: { flex: 1, backgroundColor: colors.primaryBackground },
   keyboard: { flex: 1 },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24 },
@@ -549,7 +423,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 12,
-    backgroundColor: THEME.surface,
+    backgroundColor: colors.surface,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 12,
@@ -559,10 +433,10 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 26,
     fontWeight: "800",
-    color: THEME.primaryText,
+    color: colors.primaryText,
     letterSpacing: -0.5,
   },
-  subtitle: { fontSize: 14, color: THEME.secondaryText, marginTop: 4 },
+  subtitle: { fontSize: 14, color: colors.secondaryText, marginTop: 4 },
   sectionLabelWrap: {
     flexDirection: "row",
     alignItems: "center",
@@ -572,22 +446,22 @@ const styles = StyleSheet.create({
   sectionLabel: {
     fontSize: 11,
     fontWeight: "600",
-    color: THEME.secondaryText,
+    color: colors.secondaryText,
     textTransform: "uppercase",
     letterSpacing: 1.2,
   },
   optionalPill: {
     fontSize: 10,
     fontWeight: "600",
-    color: THEME.secondaryText,
+    color: colors.secondaryText,
     textTransform: "uppercase",
     letterSpacing: 0.5,
   },
   card: {
-    backgroundColor: THEME.surface,
+    backgroundColor: colors.surface,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: colors.border,
     padding: 20,
     marginBottom: 20,
     ...Platform.select({
@@ -602,7 +476,7 @@ const styles = StyleSheet.create({
   },
   cardSubtitle: {
     fontSize: 13,
-    color: THEME.secondaryText,
+    color: colors.secondaryText,
     marginBottom: 16,
     lineHeight: 18,
   },
@@ -612,21 +486,21 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     marginBottom: 14,
   },
-  summaryLabel: { fontSize: 14, color: THEME.secondaryText, fontWeight: "500" },
+  summaryLabel: { fontSize: 14, color: colors.secondaryText, fontWeight: "500" },
   badge: {
-    backgroundColor: THEME.accentDim,
+    backgroundColor: colors.accentDim,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 10,
   },
-  badgeMuted: { backgroundColor: THEME.borderLight },
-  badgeText: { fontSize: 13, fontWeight: "700", color: THEME.primaryText },
+  badgeMuted: { backgroundColor: colors.borderLight },
+  badgeText: { fontSize: 13, fontWeight: "700", color: colors.primaryText },
   amountInputWrap: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: THEME.surfaceInput,
+    backgroundColor: colors.surfaceInput,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: colors.border,
     borderRadius: 14,
     paddingHorizontal: 16,
     paddingVertical: 14,
@@ -636,12 +510,12 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 20,
     fontWeight: "700",
-    color: THEME.primaryText,
+    color: colors.primaryText,
     paddingVertical: 0,
     paddingHorizontal: 0,
   },
   amountBadge: {
-    backgroundColor: THEME.borderLight,
+    backgroundColor: colors.borderLight,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 10,
@@ -650,7 +524,7 @@ const styles = StyleSheet.create({
   amountBadgeText: {
     fontSize: 13,
     fontWeight: "700",
-    color: THEME.primaryText,
+    color: colors.primaryText,
   },
   receiveRow: {
     flexDirection: "row",
@@ -658,16 +532,17 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingTop: 14,
     borderTopWidth: 1,
-    borderTopColor: THEME.border,
+    borderTopColor: colors.border,
   },
-  receiveValue: { fontSize: 18, fontWeight: "800", color: THEME.accent },
+  receiveValue: { fontSize: 18, fontWeight: "800", color: colors.primaryAccent },
+  receiveValueMuted: { color: colors.secondaryText, fontSize: 14, fontWeight: "500" },
   uploadBox: {
     height: 200,
     borderRadius: 16,
     borderWidth: 2,
     borderStyle: "dashed",
-    borderColor: THEME.border,
-    backgroundColor: THEME.uploadBoxBg,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceInput,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -675,13 +550,13 @@ const styles = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: THEME.surfaceInput,
+    backgroundColor: colors.surface,
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 12,
   },
-  uploadTitle: { fontSize: 15, fontWeight: "600", color: THEME.secondaryText },
-  uploadHint: { fontSize: 12, color: THEME.tertiaryText, marginTop: 4 },
+  uploadTitle: { fontSize: 15, fontWeight: "600", color: colors.secondaryText },
+  uploadHint: { fontSize: 12, color: colors.tertiaryText, marginTop: 4 },
   previewWrap: {
     width: "100%",
     height: "100%",
@@ -700,21 +575,21 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   hashInput: {
-    backgroundColor: THEME.surfaceInput,
+    backgroundColor: colors.surfaceInput,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: colors.border,
     borderRadius: 14,
     padding: 14,
     fontSize: 14,
-    color: THEME.primaryText,
+    color: colors.primaryText,
   },
   noticeCard: {
-    backgroundColor: THEME.surface,
+    backgroundColor: colors.surface,
     borderRadius: 16,
     borderLeftWidth: 4,
-    borderLeftColor: THEME.warning,
+    borderLeftColor: colors.pending,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: colors.border,
     padding: 18,
     marginBottom: 24,
   },
@@ -724,10 +599,10 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 10,
   },
-  noticeTitle: { fontSize: 14, fontWeight: "700", color: THEME.warning },
+  noticeTitle: { fontSize: 14, fontWeight: "700", color: colors.pending },
   noticeText: {
     fontSize: 13,
-    color: THEME.secondaryText,
+    color: colors.secondaryText,
     marginBottom: 6,
     lineHeight: 18,
   },
@@ -736,12 +611,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
-    backgroundColor: THEME.accent,
+    backgroundColor: colors.primaryAccent,
     borderRadius: 14,
     height: 56,
     ...Platform.select({
       ios: {
-        shadowColor: THEME.accent,
+        shadowColor: colors.primaryAccent,
         shadowOffset: { width: 0, height: 4 },
         shadowOpacity: 0.3,
         shadowRadius: 8,
@@ -749,12 +624,12 @@ const styles = StyleSheet.create({
       android: { elevation: 4 },
     }),
   },
-  submitBtnDisabled: { backgroundColor: THEME.secondaryText, opacity: 0.6 },
+  submitBtnDisabled: { backgroundColor: colors.secondaryText, opacity: 0.6 },
   submitBtnText: { fontSize: 16, fontWeight: "700", color: "#000000" },
   submitBtnIcon: { marginLeft: 0 },
   errorText: {
     fontSize: 14,
-    color: THEME.error,
+    color: colors.error,
     marginTop: 12,
     textAlign: "center",
   },
@@ -767,14 +642,14 @@ const styles = StyleSheet.create({
     padding: 24,
   },
   modalCard: {
-    backgroundColor: THEME.surface,
+    backgroundColor: colors.surface,
     borderRadius: 24,
     padding: 32,
     width: "100%",
     maxWidth: 340,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: colors.border,
     ...Platform.select({
       ios: {
         shadowColor: "#000",
@@ -789,19 +664,19 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 22,
     fontWeight: "800",
-    color: THEME.primaryText,
+    color: colors.primaryText,
     marginBottom: 12,
     textAlign: "center",
   },
   modalMessage: {
     fontSize: 15,
-    color: THEME.secondaryText,
+    color: colors.secondaryText,
     textAlign: "center",
     marginBottom: 28,
     lineHeight: 22,
   },
   modalBtn: {
-    backgroundColor: THEME.accent,
+    backgroundColor: colors.primaryAccent,
     borderRadius: 14,
     paddingVertical: 16,
     paddingHorizontal: 28,

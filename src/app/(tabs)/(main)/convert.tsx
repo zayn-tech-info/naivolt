@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -73,18 +73,21 @@ export default function ConvertScreen() {
   const router = useRouter();
   const { hasBankDetails, isLoading: bankLoading } = useHasBankDetails();
   const [selectedCoinId, setSelectedCoinId] = useState<WalletCoinId>('usdt');
-  const [cryptoInput, setCryptoInput] = useState('0.00');
+  const [cryptoInput, setCryptoInput] = useState('');
   const [copied, setCopied] = useState(false);
+  const bankAlertShown = useRef(false);
 
   useEffect(() => {
     if (bankLoading) return;
-    if (!hasBankDetails) {
-      router.replace('/(tabs)/(main)/profile');
-      setTimeout(() => {
-        Alert.alert(BANK_DETAILS_ALERT_TITLE, BANK_DETAILS_ALERT_MESSAGE, [
-          { text: 'OK', style: 'cancel' },
-        ]);
-      }, 100);
+    if (!hasBankDetails && !bankAlertShown.current) {
+      bankAlertShown.current = true;
+      Alert.alert(BANK_DETAILS_ALERT_TITLE, BANK_DETAILS_ALERT_MESSAGE, [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: 'Add Bank Account',
+          onPress: () => router.replace('/(tabs)/(main)/profile'),
+        },
+      ]);
     }
   }, [hasBankDetails, bankLoading, router]);
 
@@ -132,12 +135,17 @@ export default function ConvertScreen() {
   };
 
   const handleSubmitProof = () => {
+    if (cryptoAmount <= 0) {
+      Alert.alert('Enter amount', `Please enter the amount of ${selectedCoin.symbol} you sent before continuing.`);
+      return;
+    }
     router.push({
       pathname: '/submit-transaction',
       params: {
         amount: String(cryptoAmount),
         coin: selectedCoin.symbol,
         network: selectedCoin.network,
+        rate: String(rate),
       },
     });
   };
@@ -227,11 +235,6 @@ export default function ConvertScreen() {
                 placeholderTextColor={BRAND.tertiaryText}
                 keyboardType="decimal-pad"
                 editable={!rateLoading}
-                onFocus={() => {
-                  if (cryptoInput === '0.00') {
-                    setCryptoInput('');
-                  }
-                }}
               />
               <View style={[styles.calcAssetBadge, { backgroundColor: selectedCoin.color }]}>
                 <Text style={styles.calcAssetText}>{selectedCoin.symbol}</Text>
