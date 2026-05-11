@@ -7,9 +7,14 @@ const profileRoutes = require("./src/routes/profile.routes");
 const bankAccountRoutes = require("./src/routes/bankAccount.routes");
 const banksRoutes = require("./src/routes/banks.routes");
 const adminRoutes = require("./src/routes/admin.routes");
+const webhookRoutes = require("./src/routes/webhook.routes");
 
 const app = express();
 app.use(cors());
+
+// Webhook must be registered before express.json() — needs raw body for signature verification
+app.use("/api/v1/webhooks", webhookRoutes);
+
 app.use(express.json());
 
 app.get("/", (req, res) => {

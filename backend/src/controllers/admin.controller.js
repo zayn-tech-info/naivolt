@@ -2,6 +2,7 @@ const Transaction = require("../models/transaction.model");
 const User = require("../models/user.model");
 const BankAccount = require("../models/bankAccount.model");
 const { successResponse, errorResponse } = require("../utils/apiResponse");
+const { createTransferRecipient, initiateTransfer } = require("../services/paystack.service");
 
 const userPopulate = { path: "user", select: "name username email phone" };
 
@@ -103,7 +104,7 @@ exports.approveTransaction = async (req, res, next) => {
     const { id } = req.params;
     const { adminNote } = req.body || {};
 
-    const transaction = await Transaction.findById(id);
+    const transaction = await Transaction.findById(id).populate("user", "name email");
     if (!transaction) {
       return errorResponse(res, 404, "Transaction not found");
     }
@@ -111,26 +112,58 @@ exports.approveTransaction = async (req, res, next) => {
       return errorResponse(res, 400, "Only pending or processing transactions can be approved");
     }
 
+    // Get user's default bank account
+    const bankAccount = await BankAccount.findOne({
+      userId: transaction.user._id,
+      isDefault: true,
+    });
+
+    if (!bankAccount) {
+      return errorResponse(res, 400, "User has no default bank account saved");
+    }
+    if (!bankAccount.bankCode) {
+      return errorResponse(res, 400, "User's bank account is missing a bank code — ask them to re-save their bank details");
+    }
+
+    // Create Paystack transfer recipient (or reuse stored one)
+    let recipientCode = transaction.paystackRecipientCode;
+    if (!recipientCode) {
+      recipientCode = await createTransferRecipient({
+        accountName: bankAccount.accountName,
+        accountNumber: bankAccount.accountNumber,
+        bankCode: bankAccount.bankCode,
+      });
+    }
+
+    // Initiate the transfer — transaction moves to "processing" until webhook confirms
+    const transfer = await initiateTransfer({
+      recipientCode,
+      amountNaira: transaction.amountNaira,
+      reason: `Naivolt payout — ${transaction.coin} conversion`,
+      reference: `naivolt_${transaction._id}`,
+    });
+
     const update = {
-      status: "paid",
-      paidAt: new Date(),
+      status: "processing",
+      paystackRecipientCode: recipientCode,
+      paystackTransferCode: transfer.transfer_code,
     };
     if (adminNote != null && String(adminNote).trim() !== "") {
       update.adminNote = String(adminNote).trim();
     }
 
-    const updated = await Transaction.findByIdAndUpdate(
-      id,
-      update,
-      { new: true }
-    )
+    const updated = await Transaction.findByIdAndUpdate(id, update, { new: true })
       .populate(userPopulate)
       .lean();
 
-    return successResponse(res, 200, "Transaction approved", {
+    return successResponse(res, 200, "Payout initiated — transaction is processing", {
       data: updated,
     });
   } catch (err) {
+    // Surface Paystack API errors clearly
+    if (err.response?.data) {
+      return errorResponse(res, 502, err.response.data.message || "Paystack transfer failed");
+    }
     next(err);
   }
 };

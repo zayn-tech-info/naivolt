@@ -17,6 +17,8 @@ const transactionSchema = new mongoose.Schema(
     },
     paidAt: { type: Date },
     adminNote: { type: String, trim: true },
+    paystackRecipientCode: { type: String, trim: true },
+    paystackTransferCode: { type: String, trim: true },
     createdAt: { type: Date, default: Date.now },
   },
   { versionKey: false }
