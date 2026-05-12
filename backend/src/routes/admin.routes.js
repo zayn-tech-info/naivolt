@@ -15,6 +15,16 @@ const {
   releaseWalletAddress,
   deleteWalletAddress,
 } = require("../controllers/depositAddress.controller");
+const {
+  createCategory,
+  updateCategory,
+  deleteCategory,
+  getAllCategories,
+  getAllGiftCardTransactions,
+  getGiftCardTransactionById: getGiftCardTxById,
+  approveGiftCardTransaction,
+  rejectGiftCardTransaction,
+} = require("../controllers/adminGiftCard.controller");
 
 const router = express.Router();
 
@@ -32,5 +42,17 @@ router.post("/wallet-addresses", addWalletAddresses);
 router.get("/wallet-addresses", listWalletAddresses);
 router.patch("/wallet-addresses/:id/release", releaseWalletAddress);
 router.delete("/wallet-addresses/:id", deleteWalletAddress);
+
+// Gift card category management
+router.post("/gift-card-categories", createCategory);
+router.get("/gift-card-categories", getAllCategories);
+router.put("/gift-card-categories/:id", updateCategory);
+router.delete("/gift-card-categories/:id", deleteCategory);
+
+// Gift card transaction management
+router.get("/gift-card-transactions", getAllGiftCardTransactions);
+router.get("/gift-card-transactions/:id", getGiftCardTxById);
+router.patch("/gift-card-transactions/:id/approve", approveGiftCardTransaction);
+router.patch("/gift-card-transactions/:id/reject", rejectGiftCardTransaction);
 
 module.exports = router;

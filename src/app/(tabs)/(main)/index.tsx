@@ -313,6 +313,22 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Gift Card Banner */}
+        <TouchableOpacity
+          style={styles.giftCardBanner}
+          activeOpacity={0.85}
+          onPress={() => router.push('/gift-cards')}
+        >
+          <View style={styles.giftCardBannerLeft}>
+            <Text style={styles.giftCardBannerEmoji}>🎁</Text>
+            <View style={styles.giftCardBannerText}>
+              <Text style={styles.giftCardBannerTitle}>Sell Gift Cards</Text>
+              <Text style={styles.giftCardBannerSub}>Amazon, iTunes, Google Play & more</Text>
+            </View>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={c.primaryAccent} />
+        </TouchableOpacity>
+
         {/* Quick tip */}
         <View style={styles.tipCard}>
           <Ionicons name="information-circle-outline" size={22} color={c.primaryAccent} style={styles.tipIcon} />
@@ -583,6 +599,42 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: c.primaryText,
+  },
+  giftCardBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: c.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: c.border,
+    borderLeftWidth: 3,
+    borderLeftColor: '#a855f7',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    marginBottom: theme.spacing.lg,
+  },
+  giftCardBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  giftCardBannerEmoji: {
+    fontSize: 28,
+    marginRight: 12,
+  },
+  giftCardBannerText: {
+    flex: 1,
+  },
+  giftCardBannerTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: c.primaryText,
+  },
+  giftCardBannerSub: {
+    fontSize: 12,
+    color: c.secondaryText,
+    marginTop: 2,
   },
   tipCard: {
     flexDirection: 'row',

@@ -25,6 +25,8 @@ export type TransactionStatus =
   | "paid"
   | "rejected";
 
+type TabType = "crypto" | "giftcards";
+
 interface Transaction {
   _id: string;
   coin?: string;
@@ -35,6 +37,18 @@ interface Transaction {
   status: TransactionStatus;
   createdAt: string;
   transactionHash?: string;
+}
+
+interface GiftCardTransaction {
+  _id: string;
+  categoryName: string;
+  emoji?: string;
+  country?: string;
+  currency?: string;
+  denomination?: number;
+  amountNaira?: number;
+  status: TransactionStatus;
+  createdAt: string;
 }
 
 const COIN_COLORS: Record<string, string> = {
@@ -137,14 +151,15 @@ function TransactionSkeleton() {
 
 export default function HistoryScreen() {
   const router = useRouter();
+  const [activeTab, setActiveTab] = useState<TabType>("crypto");
   const [filter, setFilter] = useState<TransactionStatus | "all">("all");
   const [refreshing, setRefreshing] = useState(false);
 
   const {
     data: transactionsRaw = [],
-    isLoading,
-    isError,
-    refetch,
+    isLoading: cryptoLoading,
+    isError: cryptoError,
+    refetch: refetchCrypto,
   } = useQuery({
     queryKey: ["transactions"],
     queryFn: async () => {
@@ -156,32 +171,55 @@ export default function HistoryScreen() {
     },
   });
 
+  const {
+    data: giftCardTxRaw = [],
+    isLoading: gcLoading,
+    isError: gcError,
+    refetch: refetchGc,
+  } = useQuery({
+    queryKey: ["gift-card-transactions"],
+    queryFn: async () => {
+      const res = await api.get<{ data?: GiftCardTransaction[] }>(
+        "/gift-cards/transactions"
+      );
+      return (res.data as { data?: GiftCardTransaction[] })?.data ?? [];
+    },
+  });
+
+  const isLoading = activeTab === "crypto" ? cryptoLoading : gcLoading;
+  const isError = activeTab === "crypto" ? cryptoError : gcError;
+  const refetch = activeTab === "crypto" ? refetchCrypto : refetchGc;
+
   const transactions = useMemo(() => {
     if (filter === "all") return transactionsRaw;
     return transactionsRaw.filter((tx) => tx.status === filter);
   }, [transactionsRaw, filter]);
 
+  const giftCardTransactions = useMemo(() => {
+    if (filter === "all") return giftCardTxRaw;
+    return giftCardTxRaw.filter((tx) => tx.status === filter);
+  }, [giftCardTxRaw, filter]);
+
   const stats = useMemo(() => {
-    const total = transactionsRaw.length;
-    const pending = transactionsRaw.filter((t) => t.status === "pending").length;
-    const paid = transactionsRaw.filter((t) => t.status === "paid").length;
-    const rejected = transactionsRaw.filter(
-      (t) => t.status === "rejected"
-    ).length;
-    const totalNairaPaid = transactionsRaw
+    const source = activeTab === "crypto" ? transactionsRaw : giftCardTxRaw;
+    const total = source.length;
+    const pending = source.filter((t) => t.status === "pending").length;
+    const paid = source.filter((t) => t.status === "paid").length;
+    const rejected = source.filter((t) => t.status === "rejected").length;
+    const totalNairaPaid = source
       .filter((t) => t.status === "paid" && t.amountNaira != null)
       .reduce((sum, t) => sum + (t.amountNaira ?? 0), 0);
     return { total, pending, paid, rejected, totalNairaPaid };
-  }, [transactionsRaw]);
+  }, [transactionsRaw, giftCardTxRaw, activeTab]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await refetch();
+      await Promise.all([refetchCrypto(), refetchGc()]);
     } finally {
       setRefreshing(false);
     }
-  }, [refetch]);
+  }, [refetchCrypto, refetchGc]);
 
   const handleRetry = useCallback(() => {
     refetch();
@@ -199,9 +237,12 @@ export default function HistoryScreen() {
     [router]
   );
 
-  const showEmptyState = !isLoading && transactions.length === 0;
-  const showGlobalEmpty = showEmptyState && transactionsRaw.length === 0;
-  const showFilterEmpty = showEmptyState && transactionsRaw.length > 0;
+  const activeList = activeTab === "crypto" ? transactions : giftCardTransactions;
+  const activeRaw = activeTab === "crypto" ? transactionsRaw : giftCardTxRaw;
+
+  const showEmptyState = !isLoading && activeList.length === 0;
+  const showGlobalEmpty = showEmptyState && activeRaw.length === 0;
+  const showFilterEmpty = showEmptyState && activeRaw.length > 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -226,7 +267,7 @@ export default function HistoryScreen() {
               <Text style={styles.subtitle}>
                 {isLoading
                   ? "Loading…"
-                  : `${transactionsRaw.length} transaction${transactionsRaw.length === 1 ? "" : "s"}`}
+                  : `${activeRaw.length} transaction${activeRaw.length === 1 ? "" : "s"}`}
               </Text>
             </View>
           </View>
@@ -236,6 +277,22 @@ export default function HistoryScreen() {
             disabled={isLoading}
           >
             <Ionicons name="refresh" size={22} color={colors.primaryAccent} />
+          </Pressable>
+        </View>
+
+        {/* Type Tab Toggle */}
+        <View style={styles.typeTabRow}>
+          <Pressable
+            style={[styles.typeTab, activeTab === "crypto" && styles.typeTabActive]}
+            onPress={() => { setActiveTab("crypto"); setFilter("all"); }}
+          >
+            <Text style={[styles.typeTabText, activeTab === "crypto" && styles.typeTabTextActive]}>Crypto</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.typeTab, activeTab === "giftcards" && styles.typeTabActive]}
+            onPress={() => { setActiveTab("giftcards"); setFilter("all"); }}
+          >
+            <Text style={[styles.typeTabText, activeTab === "giftcards" && styles.typeTabTextActive]}>🎁 Gift Cards</Text>
           </Pressable>
         </View>
 
@@ -335,20 +392,36 @@ export default function HistoryScreen() {
               ) : showGlobalEmpty ? (
                 <View style={styles.emptyBlock}>
                   <View style={styles.emptyIconWrap}>
-                    <Ionicons name="wallet-outline" size={40} color={colors.secondaryText} />
+                    <Ionicons
+                      name={activeTab === "crypto" ? "wallet-outline" : "gift-outline"}
+                      size={40}
+                      color={colors.secondaryText}
+                    />
                   </View>
                   <Text style={styles.emptyTitle}>No transactions yet</Text>
                   <Text style={styles.emptySub}>
-                    Convert crypto to Naira to see your history here.
+                    {activeTab === "crypto"
+                      ? "Convert crypto to Naira to see your history here."
+                      : "Sell a gift card to see your history here."}
                   </Text>
-                  <TouchableOpacity
-                    style={styles.convertBtn}
-                    onPress={handleConvertNow}
-                    activeOpacity={0.85}
-                  >
-                    <Ionicons name="flash" size={18} color={colors.primaryAccent} style={{ marginRight: 6 }} />
-                    <Text style={styles.convertBtnText}>Convert Now</Text>
-                  </TouchableOpacity>
+                  {activeTab === "crypto" ? (
+                    <TouchableOpacity
+                      style={styles.convertBtn}
+                      onPress={handleConvertNow}
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="flash" size={18} color={colors.primaryAccent} style={{ marginRight: 6 }} />
+                      <Text style={styles.convertBtnText}>Convert Now</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.convertBtn}
+                      onPress={() => router.push("/gift-cards")}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.convertBtnText}>Sell Gift Card</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               ) : showFilterEmpty ? (
                 <View style={styles.emptyBlock}>
@@ -358,7 +431,7 @@ export default function HistoryScreen() {
                   <Text style={styles.emptyTitle}>No {filter} transactions</Text>
                   <Text style={styles.emptySub}>Try a different filter to see more.</Text>
                 </View>
-              ) : (
+              ) : activeTab === "crypto" ? (
                 groupByDateSection(transactions).map(({ section, transactions: sectionTxs }) => (
                   <View key={section} style={styles.dateGroup}>
                     <Text style={styles.dateGroupLabel}>{section}</Text>
@@ -410,6 +483,55 @@ export default function HistoryScreen() {
                             </View>
                           </View>
                         </Pressable>
+                      );
+                    })}
+                  </View>
+                ))
+              ) : (
+                groupByDateSection(giftCardTransactions as unknown as Transaction[]).map(({ section, transactions: sectionTxs }) => (
+                  <View key={section} style={styles.dateGroup}>
+                    <Text style={styles.dateGroupLabel}>{section}</Text>
+                    {(sectionTxs as unknown as GiftCardTransaction[]).map((tx) => {
+                      const statusColor =
+                        tx.status === "paid"
+                          ? colors.paid
+                          : tx.status === "rejected"
+                            ? colors.error
+                            : tx.status === "pending"
+                              ? colors.pending
+                              : colors.secondaryText;
+                      return (
+                        <View
+                          key={tx._id}
+                          style={[styles.card, { borderLeftColor: statusColor }]}
+                        >
+                          <View style={styles.cardLeft}>
+                            <View style={[styles.coinCircle, { backgroundColor: '#1e1e2e' }]}>
+                              <Text style={{ fontSize: 22 }}>{tx.emoji ?? "🎁"}</Text>
+                            </View>
+                            <View style={styles.cardTextBlock}>
+                              <Text style={styles.cardTitle}>{tx.categoryName}</Text>
+                              <Text style={styles.cardDate}>{formatDate(tx.createdAt)}</Text>
+                              {tx.currency && tx.denomination ? (
+                                <View style={styles.networkBadge}>
+                                  <Text style={styles.networkText}>
+                                    {tx.currency}{tx.denomination}
+                                  </Text>
+                                </View>
+                              ) : null}
+                            </View>
+                          </View>
+                          <View style={styles.cardRight}>
+                            <Text style={styles.nairaAmount}>
+                              {tx.amountNaira != null
+                                ? formatCurrency(tx.amountNaira, "NGN", true)
+                                : "—"}
+                            </Text>
+                            <View style={styles.cardStatusRow}>
+                              <StatusBadge status={tx.status} />
+                            </View>
+                          </View>
+                        </View>
                       );
                     })}
                   </View>
@@ -557,6 +679,33 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: colors.secondaryText,
     marginTop: 2,
+  },
+  typeTabRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: theme.spacing.lg,
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 4,
+  },
+  typeTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: "center",
+    borderRadius: 10,
+  },
+  typeTabActive: {
+    backgroundColor: colors.primaryAccent,
+  },
+  typeTabText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: colors.secondaryText,
+  },
+  typeTabTextActive: {
+    color: "#000000",
   },
   tabsScroll: {
     marginHorizontal: -theme.spacing.lg,
