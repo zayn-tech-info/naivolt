@@ -33,11 +33,13 @@ export default function SubmitTransactionScreen() {
     network = "TRC20",
     amount: amountParam = "",
     rate: rateParam = "0",
+    depositAddressId = "",
   } = useLocalSearchParams<{
     coin?: string;
     network?: string;
     amount?: string;
     rate?: string;
+    depositAddressId?: string;
   }>();
 
   const [amount, setAmount] = useState(amountParam || "");
@@ -123,6 +125,8 @@ export default function SubmitTransactionScreen() {
       formData.append("rateAtTime", String(rate));
       if (transactionHash.trim())
         formData.append("transactionHash", transactionHash.trim());
+      if (depositAddressId)
+        formData.append("depositAddressId", depositAddressId);
 
       if (proofImage?.uri) {
         const filename = proofImage.uri.split("/").pop() || "proof.jpg";

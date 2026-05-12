@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const cloudinary = require('../config/cloudinary');
 const Transaction = require('../models/transaction.model');
+const WalletAddress = require('../models/walletAddress.model');
 const { successResponse, errorResponse } = require('../utils/apiResponse');
 
 exports.getMyTransactions = async (req, res) => {
@@ -37,7 +38,7 @@ exports.getTransactionById = async (req, res) => {
 exports.submitTransaction = async (req, res) => {
   let proofUrl = '';
   try {
-    const { coin, network, amountCrypto, amountNaira, rateAtTime, transactionHash } = req.body;
+    const { coin, network, amountCrypto, amountNaira, rateAtTime, transactionHash, depositAddressId } = req.body;
 
     if (!coin || !network || amountCrypto == null || amountNaira == null || rateAtTime == null) {
       return errorResponse(res, 400, 'Missing required fields: coin, network, amountCrypto, amountNaira, rateAtTime');
@@ -64,6 +65,21 @@ exports.submitTransaction = async (req, res) => {
       proofUrl = req.file.path;
     }
 
+    // Lock the deposit address to this transaction
+    let depositAddress = '';
+    let resolvedAddressId = null;
+    if (depositAddressId) {
+      const walletDoc = await WalletAddress.findByIdAndUpdate(
+        depositAddressId,
+        { isAvailable: false, assignedAt: new Date() },
+        { new: true }
+      );
+      if (walletDoc) {
+        depositAddress = walletDoc.address;
+        resolvedAddressId = walletDoc._id;
+      }
+    }
+
     const transaction = await Transaction.create({
       user: req.user._id,
       coin: String(coin).trim(),
@@ -71,10 +87,17 @@ exports.submitTransaction = async (req, res) => {
       amountCrypto: Number(amountCrypto),
       amountNaira: Number(amountNaira),
       rateAtTime: Number(rateAtTime),
+      depositAddress,
+      depositAddressId: resolvedAddressId,
       transactionHash: transactionHash ? String(transactionHash).trim() : '',
       proofImage: proofUrl,
       status: 'pending',
     });
+
+    // Link the wallet address record back to the transaction for audit
+    if (resolvedAddressId) {
+      await WalletAddress.findByIdAndUpdate(resolvedAddressId, { assignedTo: transaction._id });
+    }
 
     return successResponse(res, 201, 'Transaction submitted successfully', {
       transaction: {

@@ -8,6 +8,7 @@ const bankAccountRoutes = require("./src/routes/bankAccount.routes");
 const banksRoutes = require("./src/routes/banks.routes");
 const adminRoutes = require("./src/routes/admin.routes");
 const webhookRoutes = require("./src/routes/webhook.routes");
+const depositAddressRoutes = require("./src/routes/depositAddress.routes");
 
 const app = express();
 app.use(cors());
@@ -32,6 +33,7 @@ app.use("/api/v1/transactions", transactionRoutes);
 app.use("/api/v1/profile", profileRoutes);
 app.use("/api/v1/bank-accounts", bankAccountRoutes);
 app.use("/api/v1/banks", banksRoutes);
+app.use("/api/v1/deposit-address", depositAddressRoutes);
 app.use("/api/v1/admin", adminRoutes);
 
 app.use((err, req, res, next) => {

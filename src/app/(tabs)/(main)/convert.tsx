@@ -19,9 +19,18 @@ import { useHasBankDetails } from '@/hooks/useHasBankDetails';
 import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@/services/api';
-import { config, type WalletCoinId } from '@/constants/config';
+import { type WalletCoinId } from '@/constants/config';
 import { colors } from '@/constants/theme';
 import { formatCurrency } from '@/utils/formatCurrency';
+
+interface DepositAddressResponse {
+  data?: {
+    addressId: string;
+    coin: string;
+    network: string;
+    address: string;
+  };
+}
 
 const BRAND = {
   background: colors.primaryBackground,
@@ -94,6 +103,21 @@ export default function ConvertScreen() {
   const selectedCoin = COINS.find((c) => c.id === selectedCoinId) ?? COINS[0];
   const coinButtonWidth = (screenWidth - 40 - (COINS.length - 1) * COIN_GAP) / COINS.length;
 
+  const {
+    data: depositData,
+    isLoading: depositLoading,
+    isError: depositError,
+    refetch: refetchDeposit,
+  } = useQuery({
+    queryKey: ['depositAddress', selectedCoinId],
+    queryFn: async () => {
+      const res = await api.get<DepositAddressResponse>(`/deposit-address?coin=${selectedCoin.symbol}`);
+      return res.data?.data ?? null;
+    },
+    staleTime: 10 * 60 * 1000, // keep the same address for 10 min
+    retry: 2,
+  });
+
   const { data: rateData, isLoading: rateLoading, isError: rateError } = useQuery({
     queryKey: ['rate', selectedCoinId],
     queryFn: async () => {
@@ -125,10 +149,11 @@ export default function ConvertScreen() {
     ? formatCurrency(nairaAmount, 'NGN', true)
     : '0';
 
-  const walletAddress = config.wallets[selectedCoinId] || `Set EXPO_PUBLIC_WALLET_${selectedCoin.symbol.toUpperCase()} in .env`;
+  const walletAddress = depositData?.address ?? '';
+  const walletAddressId = depositData?.addressId ?? '';
 
   const handleCopy = async () => {
-    if (!walletAddress || walletAddress.startsWith('Set ')) return;
+    if (!walletAddress) return;
     await Clipboard.setStringAsync(walletAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -139,6 +164,10 @@ export default function ConvertScreen() {
       Alert.alert('Enter amount', `Please enter the amount of ${selectedCoin.symbol} you sent before continuing.`);
       return;
     }
+    if (!walletAddress || !walletAddressId) {
+      Alert.alert('No deposit address', 'Could not assign a deposit address. Please try again.');
+      return;
+    }
     router.push({
       pathname: '/submit-transaction',
       params: {
@@ -146,6 +175,7 @@ export default function ConvertScreen() {
         coin: selectedCoin.symbol,
         network: selectedCoin.network,
         rate: String(rate),
+        depositAddressId: walletAddressId,
       },
     });
   };
@@ -276,7 +306,24 @@ export default function ConvertScreen() {
           </View>
           <Text style={styles.walletSubtitle}>Send {selectedCoin.symbol} to this address only</Text>
 
-          {walletAddress && !walletAddress.startsWith('Set ') ? (
+          {depositLoading ? (
+            <View style={styles.addressPlaceholder}>
+              <ActivityIndicator size="small" color={BRAND.accent} />
+              <Text style={[styles.addressPlaceholderText, { marginTop: 10 }]}>
+                Generating your deposit address…
+              </Text>
+            </View>
+          ) : depositError || !walletAddress ? (
+            <View style={styles.addressPlaceholder}>
+              <Ionicons name="alert-circle-outline" size={28} color={BRAND.warning} />
+              <Text style={[styles.addressPlaceholderText, { marginTop: 8 }]}>
+                No address available for {selectedCoin.symbol} right now.
+              </Text>
+              <TouchableOpacity onPress={() => refetchDeposit()} style={{ marginTop: 10 }}>
+                <Text style={{ color: BRAND.accent, fontWeight: '700', fontSize: 14 }}>Try again</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
             <>
               <View style={styles.qrSection}>
                 <Text style={styles.qrLabel}>Scan to pay</Text>
@@ -292,7 +339,12 @@ export default function ConvertScreen() {
               </View>
 
               <View style={styles.addressSection}>
-                <Text style={styles.addressLabel}>Or copy address</Text>
+                <View style={styles.addressLabelRow}>
+                  <Text style={styles.addressLabel}>Your unique deposit address</Text>
+                  <View style={styles.uniqueBadge}>
+                    <Text style={styles.uniqueBadgeText}>UNIQUE</Text>
+                  </View>
+                </View>
                 <View style={styles.addressBox}>
                   <Text style={styles.walletAddress} selectable numberOfLines={2}>
                     {walletAddress}
@@ -309,17 +361,11 @@ export default function ConvertScreen() {
                     color="#000000"
                   />
                   <Text style={styles.copyBtnText}>
-                    {copied ? 'Copied' : 'Copy address'}
+                    {copied ? 'Copied!' : 'Copy address'}
                   </Text>
                 </TouchableOpacity>
               </View>
             </>
-          ) : (
-            <View style={styles.addressPlaceholder}>
-              <Text style={styles.addressPlaceholderText}>
-                Set EXPO_PUBLIC_WALLET_{selectedCoin.symbol} in .env
-              </Text>
-            </View>
           )}
         </View>
 
@@ -722,13 +768,30 @@ const styles = StyleSheet.create({
     borderTopColor: BRAND.border,
     paddingTop: 20,
   },
+  addressLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
   addressLabel: {
     fontSize: 11,
     fontWeight: '600',
     color: BRAND.secondaryText,
     textTransform: 'uppercase',
     letterSpacing: 1.2,
-    marginBottom: 10,
+  },
+  uniqueBadge: {
+    backgroundColor: BRAND.accentDim,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  uniqueBadgeText: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: BRAND.accent,
+    letterSpacing: 0.8,
   },
   addressBox: {
     backgroundColor: BRAND.surfaceInput,

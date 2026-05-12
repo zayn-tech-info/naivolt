@@ -8,6 +8,8 @@ const transactionSchema = new mongoose.Schema(
     amountCrypto: { type: Number, required: true },
     amountNaira: { type: Number, required: true },
     rateAtTime: { type: Number, required: true },
+    depositAddress: { type: String, trim: true, default: '' },
+    depositAddressId: { type: mongoose.Schema.Types.ObjectId, ref: 'WalletAddress', default: null },
     transactionHash: { type: String, trim: true, default: '' },
     proofImage: { type: String, default: '' },
     status: {
