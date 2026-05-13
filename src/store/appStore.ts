@@ -37,7 +37,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 }));
 
-export function useColors() {
+export function useColors(): import('@/constants/colors').Colors {
   const mode = useAppStore((s) => s.mode);
   return mode === 'dark' ? darkColors : lightColors;
 }

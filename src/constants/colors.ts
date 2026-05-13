@@ -48,7 +48,7 @@ export const lightColors = {
   paid: '#5C8F00',
 } as const;
 
-export type Colors = typeof darkColors;
+export type Colors = { readonly [K in keyof typeof darkColors]: string };
 
 // Default export for files that haven't been migrated to useColors() yet
 export const colors = darkColors;
