@@ -19,7 +19,8 @@ import { useColors } from '@/store/appStore';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-const SLIDES = [
+function getSlides(c: Colors) {
+  return [
   {
     id: 'hero',
     icon: 'flash' as const,
@@ -71,9 +72,11 @@ const SLIDES = [
       'Payout to your bank in minutes',
     ],
   },
-];
+  ];
+}
 
-function Slide({ item, styles, c }: { item: (typeof SLIDES)[number]; styles: ReturnType<typeof createStyles>; c: Colors }) {
+type SlideItem = ReturnType<typeof getSlides>[number];
+function Slide({ item, styles, c }: { item: SlideItem; styles: ReturnType<typeof createStyles>; c: Colors }) {
   return (
     <View style={[styles.slide, { width: SCREEN_WIDTH }]}>
       <View style={[styles.iconWrap, { borderColor: item.iconColor + '40' }]}>
@@ -125,6 +128,7 @@ export default function WelcomeScreen() {
   const router = useRouter();
   const c = useColors();
   const styles = useMemo(() => createStyles(c), [c]);
+  const slides = useMemo(() => getSlides(c), [c]);
   const flatListRef = useRef<FlatList>(null);
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -134,14 +138,14 @@ export default function WelcomeScreen() {
   }, []);
 
   const handleNext = useCallback(() => {
-    if (activeIndex < SLIDES.length - 1) {
+    if (activeIndex < slides.length - 1) {
       flatListRef.current?.scrollToIndex({ index: activeIndex + 1, animated: true });
     } else {
       router.push('/register');
     }
   }, [activeIndex, router]);
 
-  const isLast = activeIndex === SLIDES.length - 1;
+  const isLast = activeIndex === slides.length - 1;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
@@ -156,7 +160,7 @@ export default function WelcomeScreen() {
         {/* Slides */}
         <FlatList
           ref={flatListRef}
-          data={SLIDES}
+          data={slides}
           keyExtractor={(item) => item.id}
           horizontal
           pagingEnabled
@@ -174,7 +178,7 @@ export default function WelcomeScreen() {
         {/* Dots + CTA */}
         <View style={styles.footer}>
           <View style={styles.dots}>
-            {SLIDES.map((_, i) => (
+            {slides.map((_, i) => (
               <View
                 key={i}
                 style={[styles.dot, i === activeIndex && styles.dotActive]}
