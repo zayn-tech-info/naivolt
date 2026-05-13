@@ -2,6 +2,7 @@ import { Tabs, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { Alert, TouchableOpacity } from "react-native";
 import { useConvertGuard } from "@/hooks/useConvertGuard";
+import { useColors } from "@/store/appStore";
 
 const BANK_ALERT_TITLE = "Bank details required";
 const BANK_ALERT_MESSAGE =
@@ -10,14 +11,19 @@ const BANK_ALERT_MESSAGE =
 export default function MainTabsLayout() {
   const router = useRouter();
   const { hasBankDetails, isLoading } = useConvertGuard();
+  const c = useColors();
 
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { backgroundColor: "#16161A", borderTopColor: "#27272A" },
-        tabBarActiveTintColor: "#AAFF00",
-        tabBarInactiveTintColor: "#71717A",
+        tabBarStyle: {
+          backgroundColor: c.surface,
+          borderTopColor: c.border,
+          borderTopWidth: 1,
+        },
+        tabBarActiveTintColor: c.primaryAccent,
+        tabBarInactiveTintColor: c.secondaryText,
       }}
       initialRouteName="index"
     >
@@ -29,7 +35,7 @@ export default function MainTabsLayout() {
             <Ionicons
               name={focused ? "home" : "home-outline"}
               size={24}
-              color={focused ? "#AAFF00" : "#71717A"}
+              color={focused ? c.primaryAccent : c.secondaryText}
             />
           ),
         }}
@@ -42,7 +48,7 @@ export default function MainTabsLayout() {
             <Ionicons
               name={focused ? "swap-horizontal" : "swap-horizontal-outline"}
               size={24}
-              color={focused ? "#AAFF00" : "#71717A"}
+              color={focused ? c.primaryAccent : c.secondaryText}
             />
           ),
           tabBarButton: (props) => (
@@ -74,7 +80,7 @@ export default function MainTabsLayout() {
             <Ionicons
               name={focused ? "time" : "time-outline"}
               size={24}
-              color={focused ? "#AAFF00" : "#71717A"}
+              color={focused ? c.primaryAccent : c.secondaryText}
             />
           ),
         }}
@@ -87,7 +93,7 @@ export default function MainTabsLayout() {
             <Ionicons
               name={focused ? "person" : "person-outline"}
               size={24}
-              color={focused ? "#AAFF00" : "#71717A"}
+              color={focused ? c.primaryAccent : c.secondaryText}
             />
           ),
         }}

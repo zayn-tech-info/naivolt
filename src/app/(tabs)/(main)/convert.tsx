@@ -20,7 +20,8 @@ import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@/services/api';
 import { type WalletCoinId } from '@/constants/config';
-import { colors } from '@/constants/theme';
+import { type Colors } from '@/constants/colors';
+import { useColors } from '@/store/appStore';
 import { formatCurrency } from '@/utils/formatCurrency';
 
 interface DepositAddressResponse {
@@ -31,23 +32,6 @@ interface DepositAddressResponse {
     address: string;
   };
 }
-
-const BRAND = {
-  background: colors.primaryBackground,
-  surface: colors.surface,
-  surfaceElevated: colors.surfaceElevated,
-  surfaceInput: colors.surfaceInput,
-  accent: colors.primaryAccent,
-  accentDim: colors.accentDim,
-  primaryText: colors.primaryText,
-  secondaryText: colors.secondaryText,
-  tertiaryText: colors.tertiaryText,
-  border: colors.border,
-  borderLight: colors.borderLight,
-  warning: colors.error,
-  amber: colors.pending,
-  successDim: colors.successDim,
-};
 
 const COINS: {
   id: WalletCoinId;
@@ -70,9 +54,7 @@ interface RateResponse {
 }
 
 const DEFAULT_PLACEHOLDER_RATE = 0;
-
 const COIN_GAP = 8;
-
 const BANK_DETAILS_ALERT_TITLE = 'Bank details required';
 const BANK_DETAILS_ALERT_MESSAGE =
   'You need to set your bank details first before you can convert. Add a bank account in Profile to receive Naira payments.';
@@ -80,6 +62,8 @@ const BANK_DETAILS_ALERT_MESSAGE =
 export default function ConvertScreen() {
   const { width: screenWidth } = useWindowDimensions();
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const { hasBankDetails, isLoading: bankLoading } = useHasBankDetails();
   const [selectedCoinId, setSelectedCoinId] = useState<WalletCoinId>('usdt');
   const [cryptoInput, setCryptoInput] = useState('');
@@ -100,7 +84,7 @@ export default function ConvertScreen() {
     }
   }, [hasBankDetails, bankLoading, router]);
 
-  const selectedCoin = COINS.find((c) => c.id === selectedCoinId) ?? COINS[0];
+  const selectedCoin = COINS.find((coin) => coin.id === selectedCoinId) ?? COINS[0];
   const coinButtonWidth = (screenWidth - 40 - (COINS.length - 1) * COIN_GAP) / COINS.length;
 
   const {
@@ -114,7 +98,7 @@ export default function ConvertScreen() {
       const res = await api.get<DepositAddressResponse>(`/deposit-address?coin=${selectedCoin.symbol}`);
       return res.data?.data ?? null;
     },
-    staleTime: 10 * 60 * 1000, // keep the same address for 10 min
+    staleTime: 10 * 60 * 1000,
     retry: 2,
   });
 
@@ -188,7 +172,7 @@ export default function ConvertScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* 1. Header */}
+        {/* Header */}
         <View style={styles.headerRow}>
           <View>
             <Text style={styles.title}>Convert</Text>
@@ -201,7 +185,7 @@ export default function ConvertScreen() {
         </View>
         <Text style={styles.subtitle}>Send crypto and receive Naira at live rates</Text>
 
-        {/* Coin Selector — equal width per coin */}
+        {/* Coin Selector */}
         <View style={styles.coinSelector}>
           <View style={[styles.coinSelectorRow, { gap: COIN_GAP }]}>
             {COINS.map((coin) => {
@@ -227,7 +211,7 @@ export default function ConvertScreen() {
           </View>
         </View>
 
-        {/* 2. Rate Display Card */}
+        {/* Rate Card */}
         <View style={styles.rateCard}>
           <View style={styles.rateCardTop}>
             <Text style={styles.rateCardLabel}>Live rate</Text>
@@ -239,19 +223,19 @@ export default function ConvertScreen() {
             )}
           </View>
           {rateLoading ? (
-            <ActivityIndicator size="small" color={BRAND.accent} style={styles.rateLoader} />
+            <ActivityIndicator size="small" color={c.primaryAccent} style={styles.rateLoader} />
           ) : rateError ? (
             <Text style={styles.rateError}>Unable to load rate</Text>
           ) : (
             <View style={styles.rateRow}>
               <Text style={styles.rateFrom}>1 {selectedCoin.symbol}</Text>
-              <Ionicons name="arrow-forward" size={18} color={BRAND.tertiaryText} style={styles.rateArrow} />
+              <Ionicons name="arrow-forward" size={18} color={c.tertiaryText} style={styles.rateArrow} />
               <Text style={styles.rateTo}>{rateFormatted}</Text>
             </View>
           )}
         </View>
 
-        {/* 3. Calculator */}
+        {/* Calculator */}
         <View style={styles.calcCard}>
           <Text style={styles.calcCardTitle}>Quick convert</Text>
           <View style={styles.calcPanel}>
@@ -262,7 +246,7 @@ export default function ConvertScreen() {
                 value={cryptoInput}
                 onChangeText={setCryptoInput}
                 placeholder="0.00"
-                placeholderTextColor={BRAND.tertiaryText}
+                placeholderTextColor={c.tertiaryText}
                 keyboardType="decimal-pad"
                 editable={!rateLoading}
               />
@@ -274,7 +258,7 @@ export default function ConvertScreen() {
           <View style={styles.calcArrowWrap}>
             <View style={styles.calcArrowLine} />
             <View style={styles.calcArrowCircle}>
-              <Ionicons name="arrow-down" size={20} color={BRAND.background} />
+              <Ionicons name="arrow-down" size={20} color={c.primaryBackground} />
             </View>
             <View style={styles.calcArrowLine} />
           </View>
@@ -291,7 +275,7 @@ export default function ConvertScreen() {
           </View>
         </View>
 
-        {/* 4. Wallet Address Card */}
+        {/* Wallet Address Card */}
         <View style={styles.walletCard}>
           <View style={styles.walletCardHeader}>
             <View style={styles.walletTitleRow}>
@@ -308,19 +292,19 @@ export default function ConvertScreen() {
 
           {depositLoading ? (
             <View style={styles.addressPlaceholder}>
-              <ActivityIndicator size="small" color={BRAND.accent} />
+              <ActivityIndicator size="small" color={c.primaryAccent} />
               <Text style={[styles.addressPlaceholderText, { marginTop: 10 }]}>
                 Generating your deposit address…
               </Text>
             </View>
           ) : depositError || !walletAddress ? (
             <View style={styles.addressPlaceholder}>
-              <Ionicons name="alert-circle-outline" size={28} color={BRAND.warning} />
+              <Ionicons name="alert-circle-outline" size={28} color={c.error} />
               <Text style={[styles.addressPlaceholderText, { marginTop: 8 }]}>
                 No address available for {selectedCoin.symbol} right now.
               </Text>
               <TouchableOpacity onPress={() => refetchDeposit()} style={{ marginTop: 10 }}>
-                <Text style={{ color: BRAND.accent, fontWeight: '700', fontSize: 14 }}>Try again</Text>
+                <Text style={{ color: c.primaryAccent, fontWeight: '700', fontSize: 14 }}>Try again</Text>
               </TouchableOpacity>
             </View>
           ) : (
@@ -358,7 +342,7 @@ export default function ConvertScreen() {
                   <Ionicons
                     name={copied ? 'checkmark-circle' : 'copy-outline'}
                     size={20}
-                    color="#000000"
+                    color={c.buttonTextOnAccent}
                   />
                   <Text style={styles.copyBtnText}>
                     {copied ? 'Copied!' : 'Copy address'}
@@ -369,10 +353,10 @@ export default function ConvertScreen() {
           )}
         </View>
 
-        {/* 5. Important Notice */}
+        {/* Important Notice */}
         <View style={styles.noticeCard}>
           <View style={styles.noticeTitleRow}>
-            <Ionicons name="information-circle" size={22} color={BRAND.amber} />
+            <Ionicons name="information-circle" size={22} color={c.pending} />
             <Text style={styles.noticeTitle}>Important</Text>
           </View>
           <Text style={styles.noticeText}>• {selectedCoin.warning}</Text>
@@ -380,14 +364,14 @@ export default function ConvertScreen() {
           <Text style={styles.noticeText}>• After sending, submit your proof below</Text>
         </View>
 
-        {/* 6. Bottom Button */}
+        {/* Submit Button */}
         <TouchableOpacity
           style={styles.submitBtn}
           onPress={handleSubmitProof}
           activeOpacity={0.9}
         >
           <Text style={styles.submitBtnText}>{"I've sent"} {selectedCoin.symbol} — Submit proof</Text>
-          <Ionicons name="arrow-forward" size={20} color="#000000" style={styles.submitBtnIcon} />
+          <Ionicons name="arrow-forward" size={20} color={c.buttonTextOnAccent} style={styles.submitBtnIcon} />
         </TouchableOpacity>
 
         <View style={styles.bottomSpacer} />
@@ -396,497 +380,499 @@ export default function ConvertScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: BRAND.background,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-  },
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: BRAND.primaryText,
-    letterSpacing: -0.5,
-  },
-  titleAccent: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: BRAND.accent,
-    marginTop: 2,
-    letterSpacing: 0.3,
-  },
-  headerBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: BRAND.accentDim,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  headerBadgeDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: BRAND.accent,
-  },
-  headerBadgeText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: BRAND.accent,
-    letterSpacing: 0.5,
-  },
-  subtitle: {
-    fontSize: 14,
-    color: BRAND.secondaryText,
-    marginBottom: 16,
-    lineHeight: 20,
-  },
-  coinSelector: {
-    marginBottom: 20,
-    marginHorizontal: -20,
-  },
-  coinSelectorRow: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-  },
-  coinButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 6,
-    borderRadius: 14,
-    borderWidth: 2,
-    borderColor: 'transparent',
-    backgroundColor: BRAND.surface,
-  },
-  coinButtonSelected: {
-    borderColor: BRAND.accent,
-    backgroundColor: BRAND.surface,
-  },
-  coinLogo: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 6,
-  },
-  coinSymbol: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#FFFFFF',
-  },
-  coinName: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: BRAND.secondaryText,
-    textAlign: 'center',
-  },
-  rateCard: {
-    backgroundColor: BRAND.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 20,
-    marginBottom: 20,
-    overflow: 'hidden',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.25,
-        shadowRadius: 12,
-      },
-      android: { elevation: 6 },
-    }),
-  },
-  rateCardTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  rateCardLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: BRAND.secondaryText,
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
-  },
-  livePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: BRAND.accentDim,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  livePillDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: BRAND.accent,
-  },
-  livePillText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: BRAND.accent,
-    letterSpacing: 0.8,
-  },
-  rateRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-  },
-  rateFrom: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: BRAND.primaryText,
-  },
-  rateArrow: {
-    marginHorizontal: 10,
-  },
-  rateTo: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: BRAND.accent,
-    letterSpacing: -0.3,
-  },
-  rateLoader: {
-    marginVertical: 8,
-  },
-  rateError: {
-    fontSize: 14,
-    color: BRAND.warning,
-    marginTop: 4,
-  },
-  calcCard: {
-    backgroundColor: BRAND.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 20,
-    marginBottom: 20,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.2,
-        shadowRadius: 12,
-      },
-      android: { elevation: 4 },
-    }),
-  },
-  calcCardTitle: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: BRAND.secondaryText,
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
-    marginBottom: 16,
-  },
-  calcPanel: {
-    marginBottom: 0,
-  },
-  calcPanelReceive: {
-    marginBottom: 0,
-    marginTop: 0,
-  },
-  calcPanelLabel: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: BRAND.secondaryText,
-    marginBottom: 10,
-  },
-  calcInputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: BRAND.surfaceInput,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    paddingHorizontal: 16,
-    paddingVertical: Platform.OS === 'ios' ? 14 : 10,
-  },
-  calcInput: {
-    flex: 1,
-    fontSize: 24,
-    fontWeight: '700',
-    color: BRAND.primaryText,
-    paddingVertical: 0,
-    paddingHorizontal: 0,
-    textAlign: 'left',
-  },
-  calcAssetBadge: {
-    backgroundColor: BRAND.borderLight,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    marginLeft: 12,
-  },
-  calcAssetBadgeNgn: {
-    backgroundColor: BRAND.successDim,
-  },
-  calcAssetText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: BRAND.primaryText,
-  },
-  calcArrowWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 16,
-  },
-  calcArrowLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: BRAND.border,
-  },
-  calcArrowCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: BRAND.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginHorizontal: 12,
-  },
-  calcOutputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: BRAND.surfaceInput,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    paddingHorizontal: 16,
-    paddingVertical: Platform.OS === 'ios' ? 14 : 10,
-  },
-  calcOutput: {
-    flex: 1,
-    fontSize: 24,
-    fontWeight: '700',
-    color: BRAND.accent,
-  },
-  calcOutputMuted: {
-    color: BRAND.tertiaryText,
-  },
-  walletCard: {
-    backgroundColor: BRAND.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 20,
-    marginBottom: 20,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.15,
-        shadowRadius: 8,
-      },
-      android: { elevation: 3 },
-    }),
-  },
-  walletCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-  },
-  walletTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  walletIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: BRAND.accentDim,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  walletTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: BRAND.primaryText,
-  },
-  networkBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  networkBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  walletSubtitle: {
-    fontSize: 13,
-    color: BRAND.secondaryText,
-    marginBottom: 20,
-  },
-  qrSection: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  qrLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: BRAND.secondaryText,
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
-    marginBottom: 12,
-  },
-  qrContainer: {
-    padding: 16,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  qrImage: {
-    width: 200,
-    height: 200,
-  },
-  addressSection: {
-    borderTopWidth: 1,
-    borderTopColor: BRAND.border,
-    paddingTop: 20,
-  },
-  addressLabelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  addressLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: BRAND.secondaryText,
-    textTransform: 'uppercase',
-    letterSpacing: 1.2,
-  },
-  uniqueBadge: {
-    backgroundColor: BRAND.accentDim,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  uniqueBadgeText: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: BRAND.accent,
-    letterSpacing: 0.8,
-  },
-  addressBox: {
-    backgroundColor: BRAND.surfaceInput,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-  },
-  walletAddress: {
-    fontSize: 13,
-    color: BRAND.primaryText,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  copyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: BRAND.accent,
-    borderRadius: 14,
-    paddingVertical: 14,
-  },
-  copyBtnSuccess: {
-    backgroundColor: 'rgba(170, 255, 0, 0.9)',
-  },
-  copyBtnText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#000000',
-  },
-  addressPlaceholder: {
-    padding: 20,
-    backgroundColor: BRAND.surfaceInput,
-    borderRadius: 14,
-    alignItems: 'center',
-  },
-  addressPlaceholderText: {
-    fontSize: 13,
-    color: BRAND.secondaryText,
-  },
-  noticeCard: {
-    backgroundColor: BRAND.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    borderLeftWidth: 4,
-    borderLeftColor: BRAND.amber,
-    padding: 20,
-    marginBottom: 24,
-  },
-  noticeTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 12,
-  },
-  noticeTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: BRAND.amber,
-  },
-  noticeText: {
-    fontSize: 13,
-    color: BRAND.secondaryText,
-    marginBottom: 6,
-    lineHeight: 20,
-  },
-  submitBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    backgroundColor: BRAND.accent,
-    borderRadius: 14,
-    height: 56,
-    ...Platform.select({
-      ios: {
-        shadowColor: BRAND.accent,
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.35,
-        shadowRadius: 8,
-      },
-      android: { elevation: 4 },
-    }),
-  },
-  submitBtnText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000000',
-  },
-  submitBtnIcon: {
-    marginLeft: 0,
-  },
-  bottomSpacer: {
-    height: 32,
-  },
-});
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: c.primaryBackground,
+    },
+    scroll: {
+      flex: 1,
+    },
+    scrollContent: {
+      paddingHorizontal: 20,
+      paddingTop: 12,
+    },
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      marginBottom: 4,
+    },
+    title: {
+      fontSize: 28,
+      fontWeight: '800',
+      color: c.primaryText,
+      letterSpacing: -0.5,
+    },
+    titleAccent: {
+      fontSize: 18,
+      fontWeight: '600',
+      color: c.primaryAccent,
+      marginTop: 2,
+      letterSpacing: 0.3,
+    },
+    headerBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.accentDim,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 20,
+    },
+    headerBadgeDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: c.primaryAccent,
+    },
+    headerBadgeText: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: c.primaryAccent,
+      letterSpacing: 0.5,
+    },
+    subtitle: {
+      fontSize: 14,
+      color: c.secondaryText,
+      marginBottom: 16,
+      lineHeight: 20,
+    },
+    coinSelector: {
+      marginBottom: 20,
+      marginHorizontal: -20,
+    },
+    coinSelectorRow: {
+      flexDirection: 'row',
+      paddingHorizontal: 20,
+    },
+    coinButton: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 10,
+      paddingHorizontal: 6,
+      borderRadius: 14,
+      borderWidth: 2,
+      borderColor: 'transparent',
+      backgroundColor: c.surface,
+    },
+    coinButtonSelected: {
+      borderColor: c.primaryAccent,
+      backgroundColor: c.surface,
+    },
+    coinLogo: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 6,
+    },
+    coinSymbol: {
+      fontSize: 12,
+      fontWeight: '800',
+      color: '#FFFFFF',
+    },
+    coinName: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: c.secondaryText,
+      textAlign: 'center',
+    },
+    rateCard: {
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: 20,
+      marginBottom: 20,
+      overflow: 'hidden',
+      ...Platform.select({
+        ios: {
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.25,
+          shadowRadius: 12,
+        },
+        android: { elevation: 6 },
+      }),
+    },
+    rateCardTop: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 12,
+    },
+    rateCardLabel: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: c.secondaryText,
+      textTransform: 'uppercase',
+      letterSpacing: 1.2,
+    },
+    livePill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.accentDim,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 12,
+    },
+    livePillDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: c.primaryAccent,
+    },
+    livePillText: {
+      fontSize: 10,
+      fontWeight: '800',
+      color: c.primaryAccent,
+      letterSpacing: 0.8,
+    },
+    rateRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+    },
+    rateFrom: {
+      fontSize: 18,
+      fontWeight: '600',
+      color: c.primaryText,
+    },
+    rateArrow: {
+      marginHorizontal: 10,
+    },
+    rateTo: {
+      fontSize: 22,
+      fontWeight: '800',
+      color: c.primaryAccent,
+      letterSpacing: -0.3,
+    },
+    rateLoader: {
+      marginVertical: 8,
+    },
+    rateError: {
+      fontSize: 14,
+      color: c.error,
+      marginTop: 4,
+    },
+    calcCard: {
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: 20,
+      marginBottom: 20,
+      ...Platform.select({
+        ios: {
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.2,
+          shadowRadius: 12,
+        },
+        android: { elevation: 4 },
+      }),
+    },
+    calcCardTitle: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: c.secondaryText,
+      textTransform: 'uppercase',
+      letterSpacing: 1.2,
+      marginBottom: 16,
+    },
+    calcPanel: {
+      marginBottom: 0,
+    },
+    calcPanelReceive: {
+      marginBottom: 0,
+      marginTop: 0,
+    },
+    calcPanelLabel: {
+      fontSize: 12,
+      fontWeight: '500',
+      color: c.secondaryText,
+      marginBottom: 10,
+    },
+    calcInputWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: c.surfaceInput,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: 16,
+      paddingVertical: Platform.OS === 'ios' ? 14 : 10,
+    },
+    calcInput: {
+      flex: 1,
+      fontSize: 24,
+      fontWeight: '700',
+      color: c.primaryText,
+      paddingVertical: 0,
+      paddingHorizontal: 0,
+      textAlign: 'left',
+    },
+    calcAssetBadge: {
+      backgroundColor: c.borderLight,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 10,
+      marginLeft: 12,
+    },
+    calcAssetBadgeNgn: {
+      backgroundColor: c.successDim,
+    },
+    calcAssetText: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: c.primaryText,
+    },
+    calcArrowWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginVertical: 16,
+    },
+    calcArrowLine: {
+      flex: 1,
+      height: 1,
+      backgroundColor: c.border,
+    },
+    calcArrowCircle: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: c.primaryAccent,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginHorizontal: 12,
+    },
+    calcOutputWrap: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: c.surfaceInput,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: 16,
+      paddingVertical: Platform.OS === 'ios' ? 14 : 10,
+    },
+    calcOutput: {
+      flex: 1,
+      fontSize: 24,
+      fontWeight: '700',
+      color: c.primaryAccent,
+    },
+    calcOutputMuted: {
+      color: c.tertiaryText,
+    },
+    walletCard: {
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: 20,
+      marginBottom: 20,
+      ...Platform.select({
+        ios: {
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.15,
+          shadowRadius: 8,
+        },
+        android: { elevation: 3 },
+      }),
+    },
+    walletCardHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 6,
+    },
+    walletTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    walletIconWrap: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      backgroundColor: c.accentDim,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    walletTitle: {
+      fontSize: 18,
+      fontWeight: '700',
+      color: c.primaryText,
+    },
+    networkBadge: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 8,
+    },
+    networkBadgeText: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+    },
+    walletSubtitle: {
+      fontSize: 13,
+      color: c.secondaryText,
+      marginBottom: 20,
+    },
+    qrSection: {
+      alignItems: 'center',
+      marginBottom: 24,
+    },
+    qrLabel: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: c.secondaryText,
+      textTransform: 'uppercase',
+      letterSpacing: 1.2,
+      marginBottom: 12,
+    },
+    qrContainer: {
+      padding: 16,
+      backgroundColor: '#FFFFFF',
+      borderRadius: 16,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    qrImage: {
+      width: 200,
+      height: 200,
+    },
+    addressSection: {
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+      paddingTop: 20,
+    },
+    addressLabelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 10,
+    },
+    addressLabel: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: c.secondaryText,
+      textTransform: 'uppercase',
+      letterSpacing: 1.2,
+    },
+    uniqueBadge: {
+      backgroundColor: c.accentDim,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 6,
+    },
+    uniqueBadgeText: {
+      fontSize: 9,
+      fontWeight: '800',
+      color: c.primaryAccent,
+      letterSpacing: 0.8,
+    },
+    addressBox: {
+      backgroundColor: c.surfaceInput,
+      borderRadius: 14,
+      padding: 14,
+      marginBottom: 14,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    walletAddress: {
+      fontSize: 13,
+      color: c.primaryText,
+      fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    },
+    copyBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      backgroundColor: c.primaryAccent,
+      borderRadius: 14,
+      paddingVertical: 14,
+    },
+    copyBtnSuccess: {
+      opacity: 0.9,
+    },
+    copyBtnText: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: c.buttonTextOnAccent,
+    },
+    addressPlaceholder: {
+      padding: 20,
+      backgroundColor: c.surfaceInput,
+      borderRadius: 14,
+      alignItems: 'center',
+    },
+    addressPlaceholderText: {
+      fontSize: 13,
+      color: c.secondaryText,
+    },
+    noticeCard: {
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderLeftWidth: 4,
+      borderLeftColor: c.pending,
+      padding: 20,
+      marginBottom: 24,
+    },
+    noticeTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 12,
+    },
+    noticeTitle: {
+      fontSize: 16,
+      fontWeight: '700',
+      color: c.pending,
+    },
+    noticeText: {
+      fontSize: 13,
+      color: c.secondaryText,
+      marginBottom: 6,
+      lineHeight: 20,
+    },
+    submitBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 10,
+      backgroundColor: c.primaryAccent,
+      borderRadius: 14,
+      height: 56,
+      ...Platform.select({
+        ios: {
+          shadowColor: c.primaryAccent,
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.35,
+          shadowRadius: 8,
+        },
+        android: { elevation: 4 },
+      }),
+    },
+    submitBtnText: {
+      fontSize: 16,
+      fontWeight: '700',
+      color: c.buttonTextOnAccent,
+    },
+    submitBtnIcon: {
+      marginLeft: 0,
+    },
+    bottomSpacer: {
+      height: 32,
+    },
+  });
+}

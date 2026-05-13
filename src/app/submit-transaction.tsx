@@ -1,5 +1,7 @@
 import { config } from "@/constants/config";
-import { colors } from "@/constants/theme";
+import { type Colors } from "@/constants/colors";
+import { theme } from "@/constants/theme";
+import { useColors } from "@/store/appStore";
 import { api } from "@/services/api";
 import { formatCurrency } from "@/utils/formatCurrency";
 import { Ionicons } from "@expo/vector-icons";
@@ -28,6 +30,8 @@ interface RateResponse {
 
 export default function SubmitTransactionScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const {
     coin = "USDT",
     network = "TRC20",
@@ -63,7 +67,6 @@ export default function SubmitTransactionScreen() {
         return { rate: 0 };
       }
     },
-    // Use the rate passed from the convert screen while the fresh fetch is in flight
     placeholderData: passedRate > 0 ? { rate: passedRate } : undefined,
   });
 
@@ -139,7 +142,6 @@ export default function SubmitTransactionScreen() {
         } as unknown as Blob);
       }
 
-      // XHR handles local file:// and content:// URIs correctly on Android
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", `${config.apiUrl}/api/v1/transactions`);
@@ -204,7 +206,6 @@ export default function SubmitTransactionScreen() {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Header */}
           <View style={styles.header}>
             <TouchableOpacity
               onPress={() => router.back()}
@@ -212,7 +213,7 @@ export default function SubmitTransactionScreen() {
               hitSlop={12}
               activeOpacity={0.8}
             >
-              <Ionicons name="arrow-back" size={22} color={colors.primaryText} />
+              <Ionicons name="arrow-back" size={22} color={c.primaryText} />
             </TouchableOpacity>
             <View style={styles.headerCenter}>
               <Text style={styles.title}>Submit Proof</Text>
@@ -223,7 +224,6 @@ export default function SubmitTransactionScreen() {
             <View style={styles.headerRight} />
           </View>
 
-          {/* Transaction summary */}
           <View style={styles.sectionLabelWrap}>
             <Text style={styles.sectionLabel}>Transaction details</Text>
           </View>
@@ -249,7 +249,7 @@ export default function SubmitTransactionScreen() {
                 value={amount}
                 onChangeText={setAmount}
                 placeholder="0.00"
-                placeholderTextColor={colors.tertiaryText}
+                placeholderTextColor={c.tertiaryText}
                 keyboardType="decimal-pad"
               />
               <View style={styles.amountBadge}>
@@ -264,7 +264,6 @@ export default function SubmitTransactionScreen() {
             </View>
           </View>
 
-          {/* Upload proof */}
           <View style={styles.sectionLabelWrap}>
             <Text style={styles.sectionLabel}>Proof of payment</Text>
           </View>
@@ -294,7 +293,7 @@ export default function SubmitTransactionScreen() {
                       <Ionicons
                         name="close"
                         size={18}
-                        color={colors.primaryText}
+                        color={c.primaryText}
                       />
                     </View>
                   </TouchableOpacity>
@@ -305,7 +304,7 @@ export default function SubmitTransactionScreen() {
                     <Ionicons
                       name="cloud-upload-outline"
                       size={40}
-                      color={colors.secondaryText}
+                      color={c.secondaryText}
                     />
                   </View>
                   <Text style={styles.uploadTitle}>
@@ -317,7 +316,6 @@ export default function SubmitTransactionScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Transaction hash (optional) */}
           <View style={styles.sectionLabelWrap}>
             <Text style={styles.sectionLabel}>Transaction hash</Text>
             <Text style={styles.optionalPill}>Optional</Text>
@@ -331,19 +329,18 @@ export default function SubmitTransactionScreen() {
               value={transactionHash}
               onChangeText={setTransactionHash}
               placeholder="e.g. 0x1234abcd..."
-              placeholderTextColor={colors.tertiaryText}
+              placeholderTextColor={c.tertiaryText}
               autoCapitalize="none"
               autoCorrect={false}
             />
           </View>
 
-          {/* Notice */}
           <View style={styles.noticeCard}>
             <View style={styles.noticeTitleRow}>
               <Ionicons
                 name="warning-outline"
                 size={18}
-                color={colors.pending}
+                color={c.pending}
               />
               <Text style={styles.noticeTitle}>Before submitting</Text>
             </View>
@@ -355,7 +352,6 @@ export default function SubmitTransactionScreen() {
             </Text>
           </View>
 
-          {/* Submit */}
           <TouchableOpacity
             style={[
               styles.submitBtn,
@@ -366,7 +362,7 @@ export default function SubmitTransactionScreen() {
             activeOpacity={0.9}
           >
             {isSubmitting ? (
-              <ActivityIndicator size="small" color="#000000" />
+              <ActivityIndicator size="small" color={c.buttonTextOnAccent} />
             ) : (
               <>
                 <Text style={styles.submitBtnText}>
@@ -376,7 +372,7 @@ export default function SubmitTransactionScreen() {
                   <Ionicons
                     name="arrow-forward"
                     size={20}
-                    color="#000000"
+                    color={c.buttonTextOnAccent}
                     style={styles.submitBtnIcon}
                   />
                 )}
@@ -396,7 +392,7 @@ export default function SubmitTransactionScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalIconWrap}>
-              <Ionicons name="checkmark-circle" size={64} color={colors.primaryAccent} />
+              <Ionicons name="checkmark-circle" size={64} color={c.primaryAccent} />
             </View>
             <Text style={styles.modalTitle}>Transaction Submitted!</Text>
             <Text style={styles.modalMessage}>
@@ -417,275 +413,277 @@ export default function SubmitTransactionScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.primaryBackground },
-  keyboard: { flex: 1 },
-  scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24 },
-  header: { flexDirection: "row", alignItems: "center", marginBottom: 24 },
-  backBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    backgroundColor: colors.surface,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 12,
-  },
-  headerCenter: { flex: 1 },
-  headerRight: { width: 40 },
-  title: {
-    fontSize: 26,
-    fontWeight: "800",
-    color: colors.primaryText,
-    letterSpacing: -0.5,
-  },
-  subtitle: { fontSize: 14, color: colors.secondaryText, marginTop: 4 },
-  sectionLabelWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 10,
-  },
-  sectionLabel: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: colors.secondaryText,
-    textTransform: "uppercase",
-    letterSpacing: 1.2,
-  },
-  optionalPill: {
-    fontSize: 10,
-    fontWeight: "600",
-    color: colors.secondaryText,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-  card: {
-    backgroundColor: colors.surface,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 20,
-    marginBottom: 20,
-    ...Platform.select({
-      ios: {
-        shadowColor: "#000",
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.2,
-        shadowRadius: 8,
-      },
-      android: { elevation: 3 },
-    }),
-  },
-  cardSubtitle: {
-    fontSize: 13,
-    color: colors.secondaryText,
-    marginBottom: 16,
-    lineHeight: 18,
-  },
-  summaryRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 14,
-  },
-  summaryLabel: { fontSize: 14, color: colors.secondaryText, fontWeight: "500" },
-  badge: {
-    backgroundColor: colors.accentDim,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 10,
-  },
-  badgeMuted: { backgroundColor: colors.borderLight },
-  badgeText: { fontSize: 13, fontWeight: "700", color: colors.primaryText },
-  amountInputWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.surfaceInput,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    marginBottom: 16,
-  },
-  amountInput: {
-    flex: 1,
-    fontSize: 20,
-    fontWeight: "700",
-    color: colors.primaryText,
-    paddingVertical: 0,
-    paddingHorizontal: 0,
-  },
-  amountBadge: {
-    backgroundColor: colors.borderLight,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-    marginLeft: 12,
-  },
-  amountBadgeText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: colors.primaryText,
-  },
-  receiveRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  receiveValue: { fontSize: 18, fontWeight: "800", color: colors.primaryAccent },
-  receiveValueMuted: { color: colors.secondaryText, fontSize: 14, fontWeight: "500" },
-  uploadBox: {
-    height: 200,
-    borderRadius: 16,
-    borderWidth: 2,
-    borderStyle: "dashed",
-    borderColor: colors.border,
-    backgroundColor: colors.surfaceInput,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  uploadIconWrap: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.surface,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 12,
-  },
-  uploadTitle: { fontSize: 15, fontWeight: "600", color: colors.secondaryText },
-  uploadHint: { fontSize: 12, color: colors.tertiaryText, marginTop: 4 },
-  previewWrap: {
-    width: "100%",
-    height: "100%",
-    position: "relative",
-    borderRadius: 14,
-    overflow: "hidden",
-  },
-  previewImage: { width: "100%", height: "100%" },
-  removeBtn: { position: "absolute", top: 12, right: 12 },
-  removeBtnInner: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  hashInput: {
-    backgroundColor: colors.surfaceInput,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 14,
-    padding: 14,
-    fontSize: 14,
-    color: colors.primaryText,
-  },
-  noticeCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: colors.pending,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 18,
-    marginBottom: 24,
-  },
-  noticeTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 10,
-  },
-  noticeTitle: { fontSize: 14, fontWeight: "700", color: colors.pending },
-  noticeText: {
-    fontSize: 13,
-    color: colors.secondaryText,
-    marginBottom: 6,
-    lineHeight: 18,
-  },
-  submitBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    backgroundColor: colors.primaryAccent,
-    borderRadius: 14,
-    height: 56,
-    ...Platform.select({
-      ios: {
-        shadowColor: colors.primaryAccent,
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.3,
-        shadowRadius: 8,
-      },
-      android: { elevation: 4 },
-    }),
-  },
-  submitBtnDisabled: { backgroundColor: colors.secondaryText, opacity: 0.6 },
-  submitBtnText: { fontSize: 16, fontWeight: "700", color: "#000000" },
-  submitBtnIcon: { marginLeft: 0 },
-  errorText: {
-    fontSize: 14,
-    color: colors.error,
-    marginTop: 12,
-    textAlign: "center",
-  },
-  bottomSpacer: { height: 24 },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.65)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  modalCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 24,
-    padding: 32,
-    width: "100%",
-    maxWidth: 340,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.border,
-    ...Platform.select({
-      ios: {
-        shadowColor: "#000",
-        shadowOffset: { width: 0, height: 8 },
-        shadowOpacity: 0.35,
-        shadowRadius: 24,
-      },
-      android: { elevation: 8 },
-    }),
-  },
-  modalIconWrap: { marginBottom: 20 },
-  modalTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: colors.primaryText,
-    marginBottom: 12,
-    textAlign: "center",
-  },
-  modalMessage: {
-    fontSize: 15,
-    color: colors.secondaryText,
-    textAlign: "center",
-    marginBottom: 28,
-    lineHeight: 22,
-  },
-  modalBtn: {
-    backgroundColor: colors.primaryAccent,
-    borderRadius: 14,
-    paddingVertical: 16,
-    paddingHorizontal: 28,
-    width: "100%",
-    alignItems: "center",
-  },
-  modalBtnText: { fontSize: 16, fontWeight: "700", color: "#000000" },
-});
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: c.primaryBackground },
+    keyboard: { flex: 1 },
+    scroll: { flex: 1 },
+    scrollContent: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24 },
+    header: { flexDirection: "row", alignItems: "center", marginBottom: 24 },
+    backBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      backgroundColor: c.surface,
+      alignItems: "center",
+      justifyContent: "center",
+      marginRight: 12,
+    },
+    headerCenter: { flex: 1 },
+    headerRight: { width: 40 },
+    title: {
+      fontSize: 26,
+      fontWeight: "800",
+      color: c.primaryText,
+      letterSpacing: -0.5,
+    },
+    subtitle: { fontSize: 14, color: c.secondaryText, marginTop: 4 },
+    sectionLabelWrap: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 10,
+    },
+    sectionLabel: {
+      fontSize: 11,
+      fontWeight: "600",
+      color: c.secondaryText,
+      textTransform: "uppercase",
+      letterSpacing: 1.2,
+    },
+    optionalPill: {
+      fontSize: 10,
+      fontWeight: "600",
+      color: c.secondaryText,
+      textTransform: "uppercase",
+      letterSpacing: 0.5,
+    },
+    card: {
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: 20,
+      marginBottom: 20,
+      ...Platform.select({
+        ios: {
+          shadowColor: "#000",
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.2,
+          shadowRadius: 8,
+        },
+        android: { elevation: 3 },
+      }),
+    },
+    cardSubtitle: {
+      fontSize: 13,
+      color: c.secondaryText,
+      marginBottom: 16,
+      lineHeight: 18,
+    },
+    summaryRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 14,
+    },
+    summaryLabel: { fontSize: 14, color: c.secondaryText, fontWeight: "500" },
+    badge: {
+      backgroundColor: c.accentDim,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 10,
+    },
+    badgeMuted: { backgroundColor: c.borderLight },
+    badgeText: { fontSize: 13, fontWeight: "700", color: c.primaryText },
+    amountInputWrap: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surfaceInput,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 14,
+      paddingHorizontal: 16,
+      paddingVertical: 14,
+      marginBottom: 16,
+    },
+    amountInput: {
+      flex: 1,
+      fontSize: 20,
+      fontWeight: "700",
+      color: c.primaryText,
+      paddingVertical: 0,
+      paddingHorizontal: 0,
+    },
+    amountBadge: {
+      backgroundColor: c.borderLight,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 10,
+      marginLeft: 12,
+    },
+    amountBadgeText: {
+      fontSize: 13,
+      fontWeight: "700",
+      color: c.primaryText,
+    },
+    receiveRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingTop: 14,
+      borderTopWidth: 1,
+      borderTopColor: c.border,
+    },
+    receiveValue: { fontSize: 18, fontWeight: "800", color: c.primaryAccent },
+    receiveValueMuted: { color: c.secondaryText, fontSize: 14, fontWeight: "500" },
+    uploadBox: {
+      height: 200,
+      borderRadius: 16,
+      borderWidth: 2,
+      borderStyle: "dashed",
+      borderColor: c.border,
+      backgroundColor: c.surfaceInput,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    uploadIconWrap: {
+      width: 64,
+      height: 64,
+      borderRadius: 32,
+      backgroundColor: c.surface,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 12,
+    },
+    uploadTitle: { fontSize: 15, fontWeight: "600", color: c.secondaryText },
+    uploadHint: { fontSize: 12, color: c.tertiaryText, marginTop: 4 },
+    previewWrap: {
+      width: "100%",
+      height: "100%",
+      position: "relative",
+      borderRadius: 14,
+      overflow: "hidden",
+    },
+    previewImage: { width: "100%", height: "100%" },
+    removeBtn: { position: "absolute", top: 12, right: 12 },
+    removeBtnInner: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      backgroundColor: "rgba(0,0,0,0.6)",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    hashInput: {
+      backgroundColor: c.surfaceInput,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 14,
+      padding: 14,
+      fontSize: 14,
+      color: c.primaryText,
+    },
+    noticeCard: {
+      backgroundColor: c.surface,
+      borderRadius: 16,
+      borderLeftWidth: 4,
+      borderLeftColor: c.pending,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: 18,
+      marginBottom: 24,
+    },
+    noticeTitleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 10,
+    },
+    noticeTitle: { fontSize: 14, fontWeight: "700", color: c.pending },
+    noticeText: {
+      fontSize: 13,
+      color: c.secondaryText,
+      marginBottom: 6,
+      lineHeight: 18,
+    },
+    submitBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+      backgroundColor: c.primaryAccent,
+      borderRadius: 14,
+      height: 56,
+      ...Platform.select({
+        ios: {
+          shadowColor: c.primaryAccent,
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.3,
+          shadowRadius: 8,
+        },
+        android: { elevation: 4 },
+      }),
+    },
+    submitBtnDisabled: { backgroundColor: c.secondaryText, opacity: 0.6 },
+    submitBtnText: { fontSize: 16, fontWeight: "700", color: c.buttonTextOnAccent },
+    submitBtnIcon: { marginLeft: 0 },
+    errorText: {
+      fontSize: 14,
+      color: c.error,
+      marginTop: 12,
+      textAlign: "center",
+    },
+    bottomSpacer: { height: 24 },
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.65)",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 24,
+    },
+    modalCard: {
+      backgroundColor: c.surface,
+      borderRadius: 24,
+      padding: 32,
+      width: "100%",
+      maxWidth: 340,
+      alignItems: "center",
+      borderWidth: 1,
+      borderColor: c.border,
+      ...Platform.select({
+        ios: {
+          shadowColor: "#000",
+          shadowOffset: { width: 0, height: 8 },
+          shadowOpacity: 0.35,
+          shadowRadius: 24,
+        },
+        android: { elevation: 8 },
+      }),
+    },
+    modalIconWrap: { marginBottom: 20 },
+    modalTitle: {
+      fontSize: 22,
+      fontWeight: "800",
+      color: c.primaryText,
+      marginBottom: 12,
+      textAlign: "center",
+    },
+    modalMessage: {
+      fontSize: 15,
+      color: c.secondaryText,
+      textAlign: "center",
+      marginBottom: 28,
+      lineHeight: 22,
+    },
+    modalBtn: {
+      backgroundColor: c.primaryAccent,
+      borderRadius: 14,
+      paddingVertical: 16,
+      paddingHorizontal: 28,
+      width: "100%",
+      alignItems: "center",
+    },
+    modalBtnText: { fontSize: 16, fontWeight: "700", color: c.buttonTextOnAccent },
+  });
+}

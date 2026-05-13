@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -15,7 +15,9 @@ import { useRouter, useLocalSearchParams, useGlobalSearchParams } from "expo-rou
 import { useQuery } from "@tanstack/react-query";
 import * as Clipboard from "expo-clipboard";
 import { Ionicons } from "@expo/vector-icons";
-import { colors, theme } from "@/constants/theme";
+import { theme } from "@/constants/theme";
+import { type Colors } from "@/constants/colors";
+import { useColors } from "@/store/appStore";
 import StatusBadge from "@/components/transaction/StatusBadge";
 import { api } from "@/services/api";
 import { formatCurrency } from "@/utils/formatCurrency";
@@ -72,7 +74,7 @@ const STATUS_DESCRIPTION: Record<TransactionStatus, string> = {
   rejected: "Transaction was rejected",
 };
 
-const DEFAULT_COIN_COLOR = colors.secondaryText;
+const DEFAULT_COIN_COLOR = "#71717A";
 const DEFAULT_COIN_SYMBOL = "?";
 
 function getCoinColor(coin?: string): string {
@@ -101,6 +103,8 @@ function useTransactionId(): string | undefined {
 
 export default function TransactionDetailScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const id = useTransactionId();
   const [copied, setCopied] = useState(false);
   const [proofModalVisible, setProofModalVisible] = useState(false);
@@ -153,7 +157,7 @@ export default function TransactionDetailScreen() {
           <View style={styles.headerAccent} />
           <View style={styles.header}>
             <Pressable style={styles.backBtn} onPress={handleBack} hitSlop={12}>
-              <Ionicons name="arrow-back" size={24} color={colors.primaryText} />
+              <Ionicons name="arrow-back" size={24} color={c.primaryText} />
             </Pressable>
             <View style={styles.headerCenter}>
               <Text style={styles.headerTitle}>Transaction</Text>
@@ -177,7 +181,7 @@ export default function TransactionDetailScreen() {
           <View style={styles.headerAccent} />
           <View style={styles.header}>
             <Pressable style={styles.backBtn} onPress={handleBack} hitSlop={12}>
-              <Ionicons name="arrow-back" size={24} color={colors.primaryText} />
+              <Ionicons name="arrow-back" size={24} color={c.primaryText} />
             </Pressable>
             <View style={styles.headerCenter}>
               <Text style={styles.headerTitle}>Transaction</Text>
@@ -187,7 +191,7 @@ export default function TransactionDetailScreen() {
           </View>
         </View>
         <View style={styles.centered}>
-          <ActivityIndicator size="large" color={colors.primaryAccent} />
+          <ActivityIndicator size="large" color={c.primaryAccent} />
           <Text style={styles.loadingText}>Loading…</Text>
         </View>
       </SafeAreaView>
@@ -201,7 +205,7 @@ export default function TransactionDetailScreen() {
           <View style={styles.headerAccent} />
           <View style={styles.header}>
             <Pressable style={styles.backBtn} onPress={handleBack} hitSlop={12}>
-              <Ionicons name="arrow-back" size={24} color={colors.primaryText} />
+              <Ionicons name="arrow-back" size={24} color={c.primaryText} />
             </Pressable>
             <View style={styles.headerCenter}>
               <Text style={styles.headerTitle}>Transaction</Text>
@@ -212,7 +216,7 @@ export default function TransactionDetailScreen() {
         </View>
         <View style={styles.centered}>
           <View style={styles.errorIconWrap}>
-            <Ionicons name="alert-circle" size={40} color={colors.error} />
+            <Ionicons name="alert-circle" size={40} color={c.error} />
           </View>
           <Text style={styles.errorTitle}>{"Couldn't load transaction"}</Text>
           <Text style={styles.errorSub}>Something went wrong.</Text>
@@ -237,19 +241,18 @@ export default function TransactionDetailScreen() {
 
   const adminNoteBorderColor =
     tx.status === "paid"
-      ? colors.primaryAccent
+      ? c.primaryAccent
       : tx.status === "rejected"
-        ? colors.error
-        : colors.pending;
+        ? c.error
+        : c.pending;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      {/* Header with accent strip */}
       <View style={styles.headerWrap}>
         <View style={styles.headerAccent} />
         <View style={styles.header}>
           <Pressable style={styles.backBtn} onPress={handleBack} hitSlop={12}>
-            <Ionicons name="arrow-back" size={24} color={colors.primaryText} />
+            <Ionicons name="arrow-back" size={24} color={c.primaryText} />
           </Pressable>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle}>Transaction</Text>
@@ -264,7 +267,7 @@ export default function TransactionDetailScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Hero: coin, title, network, status, description */}
+        {/* Hero */}
         <View style={styles.heroCard}>
           <View style={styles.heroTop}>
             <View style={[styles.heroCoinCircle, { backgroundColor: coinColor }]}>
@@ -350,7 +353,7 @@ export default function TransactionDetailScreen() {
                     <Ionicons
                       name={copied ? "checkmark" : "copy-outline"}
                       size={18}
-                      color={colors.primaryAccent}
+                      color={c.primaryAccent}
                     />
                   </Pressable>
                 </View>
@@ -376,7 +379,7 @@ export default function TransactionDetailScreen() {
                 resizeMode="cover"
               />
               <View style={styles.proofOverlay}>
-                <Ionicons name="expand-outline" size={24} color={colors.primaryText} />
+                <Ionicons name="expand-outline" size={24} color={c.primaryText} />
                 <Text style={styles.tapToView}>Tap to view full image</Text>
               </View>
             </TouchableOpacity>
@@ -403,7 +406,7 @@ export default function TransactionDetailScreen() {
           <View style={styles.bottomAction}>
             {tx.status === "pending" ? (
               <View style={styles.waitingBtn}>
-                <Ionicons name="time-outline" size={20} color={colors.secondaryText} />
+                <Ionicons name="time-outline" size={20} color={c.secondaryText} />
                 <Text style={styles.waitingBtnText}>
                   Waiting for verification
                 </Text>
@@ -415,7 +418,7 @@ export default function TransactionDetailScreen() {
                 activeOpacity={0.85}
               >
                 <Text style={styles.tryAgainBtnText}>Try again</Text>
-                <Ionicons name="arrow-forward" size={18} color={colors.buttonTextOnAccent} />
+                <Ionicons name="arrow-forward" size={18} color={c.buttonTextOnAccent} />
               </TouchableOpacity>
             )}
           </View>
@@ -452,7 +455,7 @@ export default function TransactionDetailScreen() {
               style={styles.modalCloseBtn}
               onPress={() => setProofModalVisible(false)}
             >
-              <Ionicons name="close" size={28} color={colors.primaryText} />
+              <Ionicons name="close" size={28} color={c.primaryText} />
             </Pressable>
           </View>
         </View>
@@ -462,364 +465,365 @@ export default function TransactionDetailScreen() {
 }
 
 const CARD_RADIUS = 16;
-const BORDER_COLOR = "#2A2A2A";
 
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: "#0D0D0D",
-  },
-  headerWrap: {
-    backgroundColor: "#0D0D0D",
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  headerAccent: {
-    height: 3,
-    backgroundColor: colors.primaryAccent,
-    marginHorizontal: theme.spacing.lg,
-    marginTop: theme.spacing.xs,
-    borderRadius: 2,
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: theme.spacing.md,
-    paddingVertical: theme.spacing.md,
-  },
-  backBtn: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    marginLeft: -4,
-  },
-  headerCenter: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.primaryText,
-    letterSpacing: 0.3,
-  },
-  headerSubtitle: {
-    fontSize: 12,
-    fontWeight: "500",
-    color: colors.secondaryText,
-    marginTop: 2,
-  },
-  headerRight: {
-    width: 44,
-    height: 44,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingTop: theme.spacing.lg,
-    paddingBottom: theme.spacing.xl + 32,
-  },
-  centered: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: theme.spacing.lg,
-  },
-  loadingText: {
-    fontSize: 14,
-    color: colors.secondaryText,
-    marginTop: theme.spacing.sm,
-  },
-  errorIconWrap: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.error,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: theme.spacing.md,
-  },
-  errorTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.primaryText,
-    marginBottom: theme.spacing.xs,
-  },
-  errorSub: {
-    fontSize: 14,
-    color: colors.secondaryText,
-    marginBottom: theme.spacing.lg,
-  },
-  errorActions: {
-    flexDirection: "row",
-    gap: theme.spacing.sm,
-  },
-  secondaryBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: theme.borderRadius.button,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  secondaryBtnText: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.primaryText,
-  },
-  retryBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: theme.borderRadius.button,
-    backgroundColor: colors.primaryAccent,
-  },
-  retryBtnText: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.buttonTextOnAccent,
-  },
-  section: {
-    marginBottom: theme.spacing.lg,
-  },
-  sectionLabel: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: colors.secondaryText,
-    textTransform: "uppercase",
-    letterSpacing: 1.4,
-    marginBottom: theme.spacing.sm,
-  },
-  heroCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: BORDER_COLOR,
-    borderRadius: CARD_RADIUS,
-    padding: theme.spacing.lg,
-    marginBottom: theme.spacing.lg,
-  },
-  heroTop: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: theme.spacing.md,
-  },
-  heroCoinCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: theme.spacing.md,
-  },
-  heroCoinSymbol: {
-    fontSize: 26,
-    fontWeight: "700",
-    color: colors.buttonTextOnAccent,
-  },
-  heroTitleBlock: {
-    flex: 1,
-  },
-  heroTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.primaryText,
-    marginBottom: theme.spacing.xs,
-  },
-  heroNetworkBadge: {
-    alignSelf: "flex-start",
-    backgroundColor: colors.surfaceElevated,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: theme.borderRadius.badge,
-  },
-  heroNetworkText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: colors.secondaryText,
-  },
-  heroStatusRow: {
-    marginBottom: theme.spacing.sm,
-  },
-  statusDescription: {
-    fontSize: 13,
-    color: colors.secondaryText,
-    lineHeight: 18,
-  },
-  card: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: BORDER_COLOR,
-    borderRadius: CARD_RADIUS,
-    paddingHorizontal: theme.spacing.md,
-    overflow: "hidden",
-  },
-  detailRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    minHeight: 48,
-    paddingVertical: theme.spacing.sm,
-    paddingHorizontal: 0,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER_COLOR,
-  },
-  detailRowLast: {
-    borderBottomWidth: 0,
-  },
-  detailLabel: {
-    fontSize: 14,
-    color: colors.secondaryText,
-    fontWeight: "500",
-    flex: 1,
-  },
-  detailValue: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: colors.primaryText,
-  },
-  detailValueAccent: {
-    color: colors.primaryAccent,
-  },
-  detailValueMuted: {
-    fontSize: 14,
-    fontWeight: "500",
-    color: colors.secondaryText,
-  },
-  rateRow: {
-    paddingVertical: theme.spacing.sm,
-    paddingHorizontal: 0,
-  },
-  rateText: {
-    fontSize: 12,
-    color: colors.secondaryText,
-  },
-  hashRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  copyBtn: {
-    padding: 4,
-  },
-  proofCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: BORDER_COLOR,
-    borderRadius: CARD_RADIUS,
-    overflow: "hidden",
-  },
-  proofImage: {
-    width: "100%",
-    height: 200,
-    backgroundColor: colors.surfaceElevated,
-  },
-  proofOverlay: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: theme.spacing.md,
-    paddingHorizontal: theme.spacing.lg,
-  },
-  tapToView: {
-    fontSize: 13,
-    color: colors.secondaryText,
-    fontWeight: "500",
-  },
-  adminNoteCard: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: BORDER_COLOR,
-    borderLeftWidth: 4,
-    borderRadius: CARD_RADIUS,
-    padding: theme.spacing.md,
-  },
-  adminNoteText: {
-    fontSize: 14,
-    color: colors.primaryText,
-    lineHeight: 21,
-  },
-  bottomAction: {
-    marginTop: theme.spacing.md,
-  },
-  waitingBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: theme.borderRadius.button,
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  waitingBtnText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: colors.secondaryText,
-  },
-  tryAgainBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: theme.borderRadius.button,
-    backgroundColor: colors.primaryAccent,
-  },
-  tryAgainBtnText: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.buttonTextOnAccent,
-  },
-  copiedToast: {
-    position: "absolute",
-    bottom: theme.spacing.xl,
-    left: 0,
-    right: 0,
-    alignItems: "center",
-  },
-  copiedToastText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: colors.buttonTextOnAccent,
-    backgroundColor: colors.primaryAccent,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: theme.borderRadius.badge,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.95)",
-    justifyContent: "center",
-  },
-  modalCloseArea: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  modalContent: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  modalImage: {
-    width: "100%",
-    height: "80%",
-  },
-  modalCloseBtn: {
-    position: "absolute",
-    top: 50,
-    right: theme.spacing.lg,
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: c.primaryBackground,
+    },
+    headerWrap: {
+      backgroundColor: c.primaryBackground,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+    },
+    headerAccent: {
+      height: 3,
+      backgroundColor: c.primaryAccent,
+      marginHorizontal: theme.spacing.lg,
+      marginTop: theme.spacing.xs,
+      borderRadius: 2,
+    },
+    header: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: theme.spacing.md,
+      paddingVertical: theme.spacing.md,
+    },
+    backBtn: {
+      width: 44,
+      height: 44,
+      alignItems: "center",
+      justifyContent: "center",
+      marginLeft: -4,
+    },
+    headerCenter: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    headerTitle: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.primaryText,
+      letterSpacing: 0.3,
+    },
+    headerSubtitle: {
+      fontSize: 12,
+      fontWeight: "500",
+      color: c.secondaryText,
+      marginTop: 2,
+    },
+    headerRight: {
+      width: 44,
+      height: 44,
+    },
+    scroll: {
+      flex: 1,
+    },
+    scrollContent: {
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.lg,
+      paddingBottom: theme.spacing.xl + 32,
+    },
+    centered: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      padding: theme.spacing.lg,
+    },
+    loadingText: {
+      fontSize: 14,
+      color: c.secondaryText,
+      marginTop: theme.spacing.sm,
+    },
+    errorIconWrap: {
+      width: 80,
+      height: 80,
+      borderRadius: 40,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.error,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: theme.spacing.md,
+    },
+    errorTitle: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.primaryText,
+      marginBottom: theme.spacing.xs,
+    },
+    errorSub: {
+      fontSize: 14,
+      color: c.secondaryText,
+      marginBottom: theme.spacing.lg,
+    },
+    errorActions: {
+      flexDirection: "row",
+      gap: theme.spacing.sm,
+    },
+    secondaryBtn: {
+      paddingVertical: 12,
+      paddingHorizontal: 24,
+      borderRadius: theme.borderRadius.button,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    secondaryBtnText: {
+      fontSize: 16,
+      fontWeight: "700",
+      color: c.primaryText,
+    },
+    retryBtn: {
+      paddingVertical: 12,
+      paddingHorizontal: 24,
+      borderRadius: theme.borderRadius.button,
+      backgroundColor: c.primaryAccent,
+    },
+    retryBtnText: {
+      fontSize: 16,
+      fontWeight: "700",
+      color: c.buttonTextOnAccent,
+    },
+    section: {
+      marginBottom: theme.spacing.lg,
+    },
+    sectionLabel: {
+      fontSize: 11,
+      fontWeight: "600",
+      color: c.secondaryText,
+      textTransform: "uppercase",
+      letterSpacing: 1.4,
+      marginBottom: theme.spacing.sm,
+    },
+    heroCard: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: CARD_RADIUS,
+      padding: theme.spacing.lg,
+      marginBottom: theme.spacing.lg,
+    },
+    heroTop: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginBottom: theme.spacing.md,
+    },
+    heroCoinCircle: {
+      width: 56,
+      height: 56,
+      borderRadius: 28,
+      alignItems: "center",
+      justifyContent: "center",
+      marginRight: theme.spacing.md,
+    },
+    heroCoinSymbol: {
+      fontSize: 26,
+      fontWeight: "700",
+      color: "#FFFFFF",
+    },
+    heroTitleBlock: {
+      flex: 1,
+    },
+    heroTitle: {
+      fontSize: 18,
+      fontWeight: "700",
+      color: c.primaryText,
+      marginBottom: theme.spacing.xs,
+    },
+    heroNetworkBadge: {
+      alignSelf: "flex-start",
+      backgroundColor: c.surfaceElevated,
+      paddingVertical: 4,
+      paddingHorizontal: 10,
+      borderRadius: theme.borderRadius.badge,
+    },
+    heroNetworkText: {
+      fontSize: 12,
+      fontWeight: "600",
+      color: c.secondaryText,
+    },
+    heroStatusRow: {
+      marginBottom: theme.spacing.sm,
+    },
+    statusDescription: {
+      fontSize: 13,
+      color: c.secondaryText,
+      lineHeight: 18,
+    },
+    card: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: CARD_RADIUS,
+      paddingHorizontal: theme.spacing.md,
+      overflow: "hidden",
+    },
+    detailRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      minHeight: 48,
+      paddingVertical: theme.spacing.sm,
+      paddingHorizontal: 0,
+      borderBottomWidth: 1,
+      borderBottomColor: c.border,
+    },
+    detailRowLast: {
+      borderBottomWidth: 0,
+    },
+    detailLabel: {
+      fontSize: 14,
+      color: c.secondaryText,
+      fontWeight: "500",
+      flex: 1,
+    },
+    detailValue: {
+      fontSize: 15,
+      fontWeight: "600",
+      color: c.primaryText,
+    },
+    detailValueAccent: {
+      color: c.primaryAccent,
+    },
+    detailValueMuted: {
+      fontSize: 14,
+      fontWeight: "500",
+      color: c.secondaryText,
+    },
+    rateRow: {
+      paddingVertical: theme.spacing.sm,
+      paddingHorizontal: 0,
+    },
+    rateText: {
+      fontSize: 12,
+      color: c.secondaryText,
+    },
+    hashRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    copyBtn: {
+      padding: 4,
+    },
+    proofCard: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: CARD_RADIUS,
+      overflow: "hidden",
+    },
+    proofImage: {
+      width: "100%",
+      height: 200,
+      backgroundColor: c.surfaceElevated,
+    },
+    proofOverlay: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingVertical: theme.spacing.md,
+      paddingHorizontal: theme.spacing.lg,
+    },
+    tapToView: {
+      fontSize: 13,
+      color: c.secondaryText,
+      fontWeight: "500",
+    },
+    adminNoteCard: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderLeftWidth: 4,
+      borderRadius: CARD_RADIUS,
+      padding: theme.spacing.md,
+    },
+    adminNoteText: {
+      fontSize: 14,
+      color: c.primaryText,
+      lineHeight: 21,
+    },
+    bottomAction: {
+      marginTop: theme.spacing.md,
+    },
+    waitingBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingVertical: 14,
+      paddingHorizontal: 24,
+      borderRadius: theme.borderRadius.button,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    waitingBtnText: {
+      fontSize: 15,
+      fontWeight: "600",
+      color: c.secondaryText,
+    },
+    tryAgainBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingVertical: 14,
+      paddingHorizontal: 24,
+      borderRadius: theme.borderRadius.button,
+      backgroundColor: c.primaryAccent,
+    },
+    tryAgainBtnText: {
+      fontSize: 16,
+      fontWeight: "700",
+      color: c.buttonTextOnAccent,
+    },
+    copiedToast: {
+      position: "absolute",
+      bottom: theme.spacing.xl,
+      left: 0,
+      right: 0,
+      alignItems: "center",
+    },
+    copiedToastText: {
+      fontSize: 14,
+      fontWeight: "700",
+      color: c.buttonTextOnAccent,
+      backgroundColor: c.primaryAccent,
+      paddingVertical: 8,
+      paddingHorizontal: 16,
+      borderRadius: theme.borderRadius.badge,
+    },
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.95)",
+      justifyContent: "center",
+    },
+    modalCloseArea: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    modalContent: {
+      flex: 1,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    modalImage: {
+      width: "100%",
+      height: "80%",
+    },
+    modalCloseBtn: {
+      position: "absolute",
+      top: 50,
+      right: theme.spacing.lg,
+      width: 44,
+      height: 44,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+  });
+}

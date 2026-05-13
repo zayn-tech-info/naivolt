@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import {
   View,
   Text,
@@ -16,7 +16,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useForm, Controller } from "react-hook-form";
 import { Ionicons } from "@expo/vector-icons";
 import { setToken as setTokenInStorage, saveUser, TOKEN_KEY } from "@/services/tokenStorage";
-import { colors, theme } from "@/constants/theme";
+import { theme } from "@/constants/theme";
+import { type Colors } from "@/constants/colors";
+import { useColors } from "@/store/appStore";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 
@@ -27,6 +29,8 @@ interface LoginForm {
 
 export default function LoginScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const { setUser, setToken } = useAuthStore();
   const [showPassword, setShowPassword] = useState(false);
   const [focusedField, setFocusedField] = useState<string | null>(null);
@@ -126,7 +130,7 @@ export default function LoginScreen() {
   };
 
   const inputBorder = (fieldName: string) =>
-    focusedField === fieldName ? colors.primaryAccent : colors.border;
+    focusedField === fieldName ? c.primaryAccent : c.border;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -146,7 +150,7 @@ export default function LoginScreen() {
             style={styles.backBtn}
             hitSlop={12}
           >
-            <Ionicons name="arrow-back" size={24} color={colors.primaryText} />
+            <Ionicons name="arrow-back" size={24} color={c.primaryText} />
           </Pressable>
 
           <Text style={styles.heading}>Welcome back</Text>
@@ -163,7 +167,7 @@ export default function LoginScreen() {
                   <Text style={styles.label}>Email</Text>
                   <TextInput
                     placeholder="Enter your email"
-                    placeholderTextColor={colors.secondaryText}
+                    placeholderTextColor={c.secondaryText}
                     value={field.value}
                     onChangeText={field.onChange}
                     onBlur={() => {
@@ -178,8 +182,8 @@ export default function LoginScreen() {
                       styles.input,
                       { borderColor: inputBorder("email") },
                     ]}
-                    cursorColor={colors.primaryAccent}
-                    selectionColor={colors.primaryAccent}
+                    cursorColor={c.primaryAccent}
+                    selectionColor={c.primaryAccent}
                     underlineColorAndroid="transparent"
                   />
                   {errors.email ? (
@@ -205,7 +209,7 @@ export default function LoginScreen() {
                   >
                     <TextInput
                       placeholder="Enter your password"
-                      placeholderTextColor={colors.secondaryText}
+                      placeholderTextColor={c.secondaryText}
                       value={field.value}
                       onChangeText={field.onChange}
                       onBlur={() => {
@@ -215,8 +219,8 @@ export default function LoginScreen() {
                       onFocus={() => setFocusedField("password")}
                       secureTextEntry={!showPassword}
                       style={styles.inputInner}
-                      cursorColor={colors.primaryAccent}
-                      selectionColor={colors.primaryAccent}
+                      cursorColor={c.primaryAccent}
+                      selectionColor={c.primaryAccent}
                       underlineColorAndroid="transparent"
                     />
                     <Pressable
@@ -229,7 +233,7 @@ export default function LoginScreen() {
                           showPassword ? "eye-off-outline" : "eye-outline"
                         }
                         size={22}
-                        color={colors.secondaryText}
+                        color={c.secondaryText}
                       />
                     </Pressable>
                   </View>
@@ -254,7 +258,7 @@ export default function LoginScreen() {
             >
               {isSubmitting ? (
                 <ActivityIndicator
-                  color={colors.buttonTextOnAccent}
+                  color={c.buttonTextOnAccent}
                   size="small"
                 />
               ) : (
@@ -282,126 +286,128 @@ export default function LoginScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: colors.primaryBackground,
-  },
-  keyboard: {
-    flex: 1,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingTop: theme.spacing.sm,
-    paddingBottom: theme.spacing.xl,
-  },
-  backBtn: {
-    alignSelf: "flex-start",
-    padding: theme.spacing.sm,
-    marginBottom: theme.spacing.md,
-  },
-  heading: {
-    fontSize: 26,
-    fontWeight: "800",
-    color: colors.primaryText,
-    marginBottom: theme.spacing.xs,
-  },
-  subtext: {
-    fontSize: 14,
-    color: colors.secondaryText,
-    marginBottom: theme.spacing.lg,
-  },
-  form: {
-    marginBottom: theme.spacing.lg,
-  },
-  field: {
-    marginBottom: theme.spacing.md,
-  },
-  label: {
-    fontSize: 12,
-    color: colors.secondaryText,
-    marginBottom: theme.spacing.xs,
-  },
-  input: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderRadius: 12,
-    color: colors.primaryText,
-    fontSize: 16,
-    padding: 16,
-  },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingRight: 12,
-    overflow: "hidden",
-  },
-  inputInner: {
-    flex: 1,
-    backgroundColor: "transparent",
-    borderWidth: 0,
-    color: colors.primaryText,
-    fontSize: 16,
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    minHeight: 52,
-  },
-  eyeBtn: {
-    padding: 4,
-  },
-  inlineError: {
-    fontSize: 12,
-    color: colors.error,
-    marginTop: theme.spacing.xs,
-  },
-  apiError: {
-    fontSize: 12,
-    color: colors.error,
-    marginTop: theme.spacing.sm,
-    marginBottom: theme.spacing.sm,
-  },
-  submitBtn: {
-    backgroundColor: colors.primaryAccent,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: 52,
-    marginTop: theme.spacing.lg,
-  },
-  submitBtnDisabled: {
-    opacity: 0.8,
-  },
-  submitBtnText: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: colors.buttonTextOnAccent,
-  },
-  signupRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 8,
-    marginTop: theme.spacing.lg,
-    minHeight: 48,
-  },
-  signupPrompt: {
-    fontSize: 16,
-    color: colors.secondaryText,
-  },
-  signupLinkTouch: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-  },
-  signupLink: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: colors.primaryAccent,
-  },
-});
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: c.primaryBackground,
+    },
+    keyboard: {
+      flex: 1,
+    },
+    scroll: {
+      flex: 1,
+    },
+    scrollContent: {
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.sm,
+      paddingBottom: theme.spacing.xl,
+    },
+    backBtn: {
+      alignSelf: "flex-start",
+      padding: theme.spacing.sm,
+      marginBottom: theme.spacing.md,
+    },
+    heading: {
+      fontSize: 26,
+      fontWeight: "800",
+      color: c.primaryText,
+      marginBottom: theme.spacing.xs,
+    },
+    subtext: {
+      fontSize: 14,
+      color: c.secondaryText,
+      marginBottom: theme.spacing.lg,
+    },
+    form: {
+      marginBottom: theme.spacing.lg,
+    },
+    field: {
+      marginBottom: theme.spacing.md,
+    },
+    label: {
+      fontSize: 12,
+      color: c.secondaryText,
+      marginBottom: theme.spacing.xs,
+    },
+    input: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderRadius: 12,
+      color: c.primaryText,
+      fontSize: 16,
+      padding: 16,
+    },
+    inputRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderRadius: 12,
+      paddingRight: 12,
+      overflow: "hidden",
+    },
+    inputInner: {
+      flex: 1,
+      backgroundColor: "transparent",
+      borderWidth: 0,
+      color: c.primaryText,
+      fontSize: 16,
+      paddingVertical: 16,
+      paddingHorizontal: 16,
+      minHeight: 52,
+    },
+    eyeBtn: {
+      padding: 4,
+    },
+    inlineError: {
+      fontSize: 12,
+      color: c.error,
+      marginTop: theme.spacing.xs,
+    },
+    apiError: {
+      fontSize: 12,
+      color: c.error,
+      marginTop: theme.spacing.sm,
+      marginBottom: theme.spacing.sm,
+    },
+    submitBtn: {
+      backgroundColor: c.primaryAccent,
+      paddingVertical: 16,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      minHeight: 52,
+      marginTop: theme.spacing.lg,
+    },
+    submitBtnDisabled: {
+      opacity: 0.8,
+    },
+    submitBtnText: {
+      fontSize: 17,
+      fontWeight: "700",
+      color: c.buttonTextOnAccent,
+    },
+    signupRow: {
+      flexDirection: "row",
+      justifyContent: "center",
+      alignItems: "center",
+      gap: 8,
+      marginTop: theme.spacing.lg,
+      minHeight: 48,
+    },
+    signupPrompt: {
+      fontSize: 16,
+      color: c.secondaryText,
+    },
+    signupLinkTouch: {
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+    },
+    signupLink: {
+      fontSize: 17,
+      fontWeight: "700",
+      color: c.primaryAccent,
+    },
+  });
+}

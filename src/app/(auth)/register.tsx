@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import {
   View,
   Text,
@@ -16,7 +16,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useForm, Controller } from "react-hook-form";
 import { Ionicons } from "@expo/vector-icons";
 import { setToken as setTokenInStorage, saveUser, TOKEN_KEY } from "@/services/tokenStorage";
-import { colors, theme } from "@/constants/theme";
+import { theme } from "@/constants/theme";
+import { type Colors } from "@/constants/colors";
+import { useColors } from "@/store/appStore";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 
@@ -31,6 +33,8 @@ interface RegisterForm {
 
 export default function RegisterScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const { setUser, setToken } = useAuthStore();
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -161,7 +165,7 @@ export default function RegisterScreen() {
   };
 
   const inputBorder = (fieldName: string) =>
-    focusedField === fieldName ? colors.primaryAccent : colors.border;
+    focusedField === fieldName ? c.primaryAccent : c.border;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -176,13 +180,12 @@ export default function RegisterScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Back arrow */}
           <Pressable
             onPress={() => router.back()}
             style={styles.backBtn}
             hitSlop={12}
           >
-            <Ionicons name="arrow-back" size={24} color={colors.primaryText} />
+            <Ionicons name="arrow-back" size={24} color={c.primaryText} />
           </Pressable>
 
           <Text style={styles.heading}>Create Account</Text>
@@ -199,7 +202,7 @@ export default function RegisterScreen() {
                   <Text style={styles.label}>Full Name</Text>
                   <TextInput
                     placeholder="Enter your full name"
-                    placeholderTextColor={colors.secondaryText}
+                    placeholderTextColor={c.secondaryText}
                     value={field.value}
                     onChangeText={field.onChange}
                     onBlur={() => {
@@ -211,8 +214,8 @@ export default function RegisterScreen() {
                       styles.input,
                       { borderColor: inputBorder("fullName") },
                     ]}
-                    cursorColor={colors.primaryAccent}
-                    selectionColor={colors.primaryAccent}
+                    cursorColor={c.primaryAccent}
+                    selectionColor={c.primaryAccent}
                     underlineColorAndroid="transparent"
                   />
                   {errors.fullName ? (
@@ -232,7 +235,7 @@ export default function RegisterScreen() {
                   <Text style={styles.label}>Username</Text>
                   <TextInput
                     placeholder="3–30 characters, e.g. johndoe"
-                    placeholderTextColor={colors.secondaryText}
+                    placeholderTextColor={c.secondaryText}
                     value={field.value}
                     onChangeText={(text) => field.onChange(text)}
                     onBlur={() => {
@@ -246,8 +249,8 @@ export default function RegisterScreen() {
                       styles.input,
                       { borderColor: inputBorder("username") },
                     ]}
-                    cursorColor={colors.primaryAccent}
-                    selectionColor={colors.primaryAccent}
+                    cursorColor={c.primaryAccent}
+                    selectionColor={c.primaryAccent}
                     underlineColorAndroid="transparent"
                   />
                   {errors.username ? (
@@ -267,7 +270,7 @@ export default function RegisterScreen() {
                   <Text style={styles.label}>Email Address</Text>
                   <TextInput
                     placeholder="Enter your email"
-                    placeholderTextColor={colors.secondaryText}
+                    placeholderTextColor={c.secondaryText}
                     value={field.value}
                     onChangeText={field.onChange}
                     onBlur={() => {
@@ -282,8 +285,8 @@ export default function RegisterScreen() {
                       styles.input,
                       { borderColor: inputBorder("email") },
                     ]}
-                    cursorColor={colors.primaryAccent}
-                    selectionColor={colors.primaryAccent}
+                    cursorColor={c.primaryAccent}
+                    selectionColor={c.primaryAccent}
                     underlineColorAndroid="transparent"
                   />
                   {errors.email ? (
@@ -303,7 +306,7 @@ export default function RegisterScreen() {
                   <Text style={styles.label}>Phone Number</Text>
                   <TextInput
                     placeholder="e.g 08012345678"
-                    placeholderTextColor={colors.secondaryText}
+                    placeholderTextColor={c.secondaryText}
                     value={field.value}
                     onChangeText={field.onChange}
                     onBlur={() => {
@@ -316,8 +319,8 @@ export default function RegisterScreen() {
                       styles.input,
                       { borderColor: inputBorder("phone") },
                     ]}
-                    cursorColor={colors.primaryAccent}
-                    selectionColor={colors.primaryAccent}
+                    cursorColor={c.primaryAccent}
+                    selectionColor={c.primaryAccent}
                     underlineColorAndroid="transparent"
                   />
                   {errors.phone ? (
@@ -343,7 +346,7 @@ export default function RegisterScreen() {
                   >
                     <TextInput
                       placeholder="Minimum 6 characters"
-                      placeholderTextColor={colors.secondaryText}
+                      placeholderTextColor={c.secondaryText}
                       value={field.value}
                       onChangeText={field.onChange}
                       onBlur={() => {
@@ -353,8 +356,8 @@ export default function RegisterScreen() {
                       onFocus={() => setFocusedField("password")}
                       secureTextEntry={!showPassword}
                       style={styles.inputInner}
-                      cursorColor={colors.primaryAccent}
-                      selectionColor={colors.primaryAccent}
+                      cursorColor={c.primaryAccent}
+                      selectionColor={c.primaryAccent}
                       underlineColorAndroid="transparent"
                     />
                     <Pressable
@@ -365,7 +368,7 @@ export default function RegisterScreen() {
                       <Ionicons
                         name={showPassword ? "eye-off-outline" : "eye-outline"}
                         size={22}
-                        color={colors.secondaryText}
+                        color={c.secondaryText}
                       />
                     </Pressable>
                   </View>
@@ -392,7 +395,7 @@ export default function RegisterScreen() {
                   >
                     <TextInput
                       placeholder="Re-enter your password"
-                      placeholderTextColor={colors.secondaryText}
+                      placeholderTextColor={c.secondaryText}
                       value={field.value}
                       onChangeText={field.onChange}
                       onBlur={() => {
@@ -402,8 +405,8 @@ export default function RegisterScreen() {
                       onFocus={() => setFocusedField("confirmPassword")}
                       secureTextEntry={!showConfirmPassword}
                       style={styles.inputInner}
-                      cursorColor={colors.primaryAccent}
-                      selectionColor={colors.primaryAccent}
+                      cursorColor={c.primaryAccent}
+                      selectionColor={c.primaryAccent}
                       underlineColorAndroid="transparent"
                     />
                     <Pressable
@@ -418,7 +421,7 @@ export default function RegisterScreen() {
                             : "eye-outline"
                         }
                         size={22}
-                        color={colors.secondaryText}
+                        color={c.secondaryText}
                       />
                     </Pressable>
                   </View>
@@ -441,7 +444,7 @@ export default function RegisterScreen() {
             >
               {isSubmitting ? (
                 <ActivityIndicator
-                  color={colors.buttonTextOnAccent}
+                  color={c.buttonTextOnAccent}
                   size="small"
                 />
               ) : (
@@ -465,126 +468,128 @@ export default function RegisterScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: colors.primaryBackground,
-  },
-  keyboard: {
-    flex: 1,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingTop: theme.spacing.sm,
-    paddingBottom: theme.spacing.xl,
-  },
-  backBtn: {
-    alignSelf: "flex-start",
-    padding: theme.spacing.sm,
-    marginBottom: theme.spacing.md,
-  },
-  heading: {
-    fontSize: 26,
-    fontWeight: "800",
-    color: colors.primaryText,
-    marginBottom: theme.spacing.xs,
-  },
-  subtext: {
-    fontSize: 14,
-    color: colors.secondaryText,
-    marginBottom: theme.spacing.lg,
-  },
-  form: {
-    marginBottom: theme.spacing.lg,
-  },
-  field: {
-    marginBottom: theme.spacing.md,
-  },
-  label: {
-    fontSize: 12,
-    color: colors.secondaryText,
-    marginBottom: theme.spacing.xs,
-  },
-  input: {
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderRadius: 12,
-    color: colors.primaryText,
-    fontSize: 16,
-    padding: 16,
-  },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.surface,
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingRight: 12,
-    overflow: "hidden",
-  },
-  inputInner: {
-    flex: 1,
-    backgroundColor: "transparent",
-    borderWidth: 0,
-    color: colors.primaryText,
-    fontSize: 16,
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    minHeight: 52,
-  },
-  eyeBtn: {
-    padding: 4,
-  },
-  inlineError: {
-    fontSize: 12,
-    color: colors.error,
-    marginTop: theme.spacing.xs,
-  },
-  apiError: {
-    fontSize: 12,
-    color: colors.error,
-    marginTop: theme.spacing.sm,
-    marginBottom: theme.spacing.sm,
-  },
-  submitBtn: {
-    backgroundColor: colors.primaryAccent,
-    paddingVertical: 16,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: 52,
-    marginTop: theme.spacing.lg,
-  },
-  submitBtnDisabled: {
-    opacity: 0.8,
-  },
-  submitBtnText: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: colors.buttonTextOnAccent,
-  },
-  loginRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 8,
-    marginTop: theme.spacing.lg,
-    minHeight: 48,
-  },
-  loginPrompt: {
-    fontSize: 16,
-    color: colors.secondaryText,
-  },
-  loginLinkTouch: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-  },
-  loginLink: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: colors.primaryAccent,
-  },
-});
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: c.primaryBackground,
+    },
+    keyboard: {
+      flex: 1,
+    },
+    scroll: {
+      flex: 1,
+    },
+    scrollContent: {
+      paddingHorizontal: theme.spacing.lg,
+      paddingTop: theme.spacing.sm,
+      paddingBottom: theme.spacing.xl,
+    },
+    backBtn: {
+      alignSelf: "flex-start",
+      padding: theme.spacing.sm,
+      marginBottom: theme.spacing.md,
+    },
+    heading: {
+      fontSize: 26,
+      fontWeight: "800",
+      color: c.primaryText,
+      marginBottom: theme.spacing.xs,
+    },
+    subtext: {
+      fontSize: 14,
+      color: c.secondaryText,
+      marginBottom: theme.spacing.lg,
+    },
+    form: {
+      marginBottom: theme.spacing.lg,
+    },
+    field: {
+      marginBottom: theme.spacing.md,
+    },
+    label: {
+      fontSize: 12,
+      color: c.secondaryText,
+      marginBottom: theme.spacing.xs,
+    },
+    input: {
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderRadius: 12,
+      color: c.primaryText,
+      fontSize: 16,
+      padding: 16,
+    },
+    inputRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderRadius: 12,
+      paddingRight: 12,
+      overflow: "hidden",
+    },
+    inputInner: {
+      flex: 1,
+      backgroundColor: "transparent",
+      borderWidth: 0,
+      color: c.primaryText,
+      fontSize: 16,
+      paddingVertical: 16,
+      paddingHorizontal: 16,
+      minHeight: 52,
+    },
+    eyeBtn: {
+      padding: 4,
+    },
+    inlineError: {
+      fontSize: 12,
+      color: c.error,
+      marginTop: theme.spacing.xs,
+    },
+    apiError: {
+      fontSize: 12,
+      color: c.error,
+      marginTop: theme.spacing.sm,
+      marginBottom: theme.spacing.sm,
+    },
+    submitBtn: {
+      backgroundColor: c.primaryAccent,
+      paddingVertical: 16,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      minHeight: 52,
+      marginTop: theme.spacing.lg,
+    },
+    submitBtnDisabled: {
+      opacity: 0.8,
+    },
+    submitBtnText: {
+      fontSize: 17,
+      fontWeight: "700",
+      color: c.buttonTextOnAccent,
+    },
+    loginRow: {
+      flexDirection: "row",
+      justifyContent: "center",
+      alignItems: "center",
+      gap: 8,
+      marginTop: theme.spacing.lg,
+      minHeight: 48,
+    },
+    loginPrompt: {
+      fontSize: 16,
+      color: c.secondaryText,
+    },
+    loginLinkTouch: {
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+    },
+    loginLink: {
+      fontSize: 17,
+      fontWeight: "700",
+      color: c.primaryAccent,
+    },
+  });
+}
