@@ -501,9 +501,10 @@ export default function HistoryScreen() {
                               ? colors.pending
                               : colors.secondaryText;
                       return (
-                        <View
+                        <Pressable
                           key={tx._id}
                           style={[styles.card, { borderLeftColor: statusColor }]}
+                          onPress={() => router.push(`/(tabs)/gift-card-transaction/${tx._id}` as const)}
                         >
                           <View style={styles.cardLeft}>
                             <View style={[styles.coinCircle, { backgroundColor: '#1e1e2e' }]}>
@@ -529,9 +530,10 @@ export default function HistoryScreen() {
                             </Text>
                             <View style={styles.cardStatusRow}>
                               <StatusBadge status={tx.status} />
+                              <Ionicons name="chevron-forward" size={18} color={colors.secondaryText} />
                             </View>
                           </View>
-                        </View>
+                        </Pressable>
                       );
                     })}
                   </View>
