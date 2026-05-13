@@ -1,72 +1,204 @@
+import { useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   Pressable,
+  FlatList,
+  Dimensions,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, theme } from '@/constants/theme';
 
-const FEATURES = [
-  'Send crypto, collect Naira in seconds',
-  'Best real-time rates, zero hidden charges',
-  'Supports USDT, BTC, ETH and more',
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+const SLIDES = [
+  {
+    id: 'hero',
+    icon: 'flash' as const,
+    iconColor: colors.primaryAccent,
+    title: 'Got Crypto?\nGet Naira.',
+    titleAccent: 'Get Naira.',
+    subtitle: 'The smartest way to convert crypto to Naira.\nFast, simple, secure.',
+    bullets: [
+      'Real-time rates, zero hidden charges',
+      'Supports USDT, BTC, ETH and more',
+      'Naira paid straight to your bank',
+    ],
+  },
+  {
+    id: 'how',
+    icon: 'list-circle' as const,
+    iconColor: '#a78bfa',
+    title: 'How It Works',
+    titleAccent: null,
+    subtitle: 'Three steps to turn your crypto into cash.',
+    steps: [
+      {
+        num: '1',
+        title: 'Send Crypto',
+        desc: 'Copy your unique deposit address and send USDT or BTC from any wallet.',
+      },
+      {
+        num: '2',
+        title: 'Upload Proof',
+        desc: 'Screenshot your transaction and upload it as payment proof in the app.',
+      },
+      {
+        num: '3',
+        title: 'Get Naira',
+        desc: 'We verify and send Naira directly to your Nigerian bank account.',
+      },
+    ],
+  },
+  {
+    id: 'giftcards',
+    icon: 'gift' as const,
+    iconColor: '#a855f7',
+    title: 'Sell Gift Cards\nfor Naira too.',
+    titleAccent: 'for Naira too.',
+    subtitle: 'Amazon, iTunes, Google Play, Steam and more — all converted to Naira instantly.',
+    bullets: [
+      'Upload your gift card details & proof',
+      'Get the best NGN rates per card',
+      'Payout to your bank in minutes',
+    ],
+  },
 ];
+
+function Slide({ item }: { item: (typeof SLIDES)[number] }) {
+  return (
+    <View style={[styles.slide, { width: SCREEN_WIDTH }]}>
+      <View style={[styles.iconWrap, { borderColor: item.iconColor + '40' }]}>
+        <Ionicons name={item.icon} size={48} color={item.iconColor} />
+      </View>
+
+      <Text style={styles.slideTitle}>
+        {item.titleAccent
+          ? item.title.replace(item.titleAccent, '').trim() + '\n'
+          : item.title}
+        {item.titleAccent && (
+          <Text style={[styles.slideTitleAccent, { color: item.iconColor }]}>
+            {item.titleAccent}
+          </Text>
+        )}
+      </Text>
+
+      <Text style={styles.slideSubtitle}>{item.subtitle}</Text>
+
+      {'steps' in item && item.steps ? (
+        <View style={styles.stepsBlock}>
+          {item.steps.map((s) => (
+            <View key={s.num} style={styles.stepRow}>
+              <View style={[styles.stepCircle, { backgroundColor: item.iconColor }]}>
+                <Text style={styles.stepNum}>{s.num}</Text>
+              </View>
+              <View style={styles.stepText}>
+                <Text style={styles.stepTitle}>{s.title}</Text>
+                <Text style={styles.stepDesc}>{s.desc}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <View style={styles.bulletsBlock}>
+          {'bullets' in item && item.bullets?.map((line, i) => (
+            <View key={i} style={styles.bulletRow}>
+              <View style={[styles.bulletDot, { backgroundColor: item.iconColor }]} />
+              <Text style={styles.bulletText}>{line}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
 
 export default function WelcomeScreen() {
   const router = useRouter();
+  const flatListRef = useRef<FlatList>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+    setActiveIndex(index);
+  }, []);
+
+  const handleNext = useCallback(() => {
+    if (activeIndex < SLIDES.length - 1) {
+      flatListRef.current?.scrollToIndex({ index: activeIndex + 1, animated: true });
+    } else {
+      router.push('/register');
+    }
+  }, [activeIndex, router]);
+
+  const isLast = activeIndex === SLIDES.length - 1;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.container}>
-        <View style={styles.hero}>
-          <View style={styles.logoWrap}>
-            <Ionicons name="flash" size={48} color={colors.primaryAccent} />
-          </View>
-          <Text style={styles.heading}>
-            <Text style={styles.headingLine}>Got Crypto?</Text>
-            {'\n'}
-            <Text style={styles.headingAccent}>Get Naira.</Text>
-          </Text>
-          <Text style={styles.subtext}>
-            The smartest way to convert crypto to Naira. Fast, simple, secure.
-          </Text>
+        {/* Skip */}
+        <View style={styles.topBar}>
+          <Pressable onPress={() => router.push('/register')} hitSlop={12}>
+            <Text style={styles.skipText}>Skip</Text>
+          </Pressable>
         </View>
 
-        <View style={styles.features}>
-          {FEATURES.map((line, i) => (
-            <View key={i} style={styles.featureRow}>
-              <View style={styles.featureBullet} />
-              <Text style={styles.featureText}>{line}</Text>
-            </View>
-          ))}
-        </View>
+        {/* Slides */}
+        <FlatList
+          ref={flatListRef}
+          data={SLIDES}
+          keyExtractor={(item) => item.id}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          onScroll={onScroll}
+          scrollEventThrottle={16}
+          renderItem={({ item }) => <Slide item={item} />}
+          getItemLayout={(_, index) => ({
+            length: SCREEN_WIDTH,
+            offset: SCREEN_WIDTH * index,
+            index,
+          })}
+        />
 
+        {/* Dots + CTA */}
         <View style={styles.footer}>
+          <View style={styles.dots}>
+            {SLIDES.map((_, i) => (
+              <View
+                key={i}
+                style={[styles.dot, i === activeIndex && styles.dotActive]}
+              />
+            ))}
+          </View>
+
           <TouchableOpacity
             activeOpacity={0.85}
             style={styles.primaryButton}
-            onPress={() => router.push('/register')}
+            onPress={handleNext}
           >
-            <Text style={styles.primaryButtonText}>Get Started</Text>
+            <Text style={styles.primaryButtonText}>
+              {isLast ? 'Get Started' : 'Next'}
+            </Text>
             <Ionicons
-              name="arrow-forward"
+              name={isLast ? 'arrow-forward' : 'chevron-forward'}
               size={20}
               color={colors.buttonTextOnAccent}
               style={styles.buttonArrow}
             />
           </TouchableOpacity>
+
           <View style={styles.loginRow}>
             <Text style={styles.loginPrompt}>Already have an account?</Text>
             <Pressable
               onPress={() => router.push('/login')}
-              style={({ pressed }) => [
-                styles.loginLinkWrap,
-                pressed && styles.loginPressed,
-              ]}
+              style={({ pressed }) => [styles.loginLinkWrap, pressed && styles.loginPressed]}
             >
               <Text style={styles.loginLink}>Login</Text>
             </Pressable>
@@ -84,75 +216,137 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    paddingHorizontal: theme.spacing.lg,
-    paddingTop: theme.spacing.xl * 1.5,
-    paddingBottom: theme.spacing.xl,
-    justifyContent: 'space-between',
   },
-  hero: {
+  topBar: {
+    alignItems: 'flex-end',
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.sm,
+    paddingBottom: theme.spacing.xs,
+  },
+  skipText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.secondaryText,
+  },
+  slide: {
+    paddingHorizontal: theme.spacing.lg,
+    paddingTop: theme.spacing.lg,
     alignItems: 'center',
   },
-  logoWrap: {
+  iconWrap: {
     width: 96,
     height: 96,
     borderRadius: 24,
     backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: colors.border,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: theme.spacing.xl,
-    overflow: 'hidden',
   },
-  heading: {
-    fontSize: 34,
+  slideTitle: {
+    fontSize: 32,
     fontWeight: '800',
     textAlign: 'center',
-    lineHeight: 42,
+    lineHeight: 40,
     letterSpacing: -0.5,
-    marginBottom: theme.spacing.md,
-    maxWidth: 320,
-  },
-  headingLine: {
     color: colors.primaryText,
+    marginBottom: theme.spacing.md,
+    maxWidth: 300,
   },
-  headingAccent: {
-    color: colors.primaryAccent,
+  slideTitleAccent: {
+    fontWeight: '800',
   },
-  subtext: {
-    fontSize: 16,
+  slideSubtitle: {
+    fontSize: 15,
     color: colors.secondaryText,
     textAlign: 'center',
-    lineHeight: 24,
+    lineHeight: 22,
     maxWidth: 300,
-    paddingHorizontal: theme.spacing.xs,
+    marginBottom: theme.spacing.xl,
   },
-  features: {
-    paddingVertical: theme.spacing.lg,
-    paddingLeft: theme.spacing.sm,
+  stepsBlock: {
+    width: '100%',
+    gap: 16,
   },
-  featureRow: {
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    gap: 14,
+  },
+  stepCircle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  stepNum: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#000',
+  },
+  stepText: {
+    flex: 1,
+  },
+  stepTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.primaryText,
+    marginBottom: 4,
+  },
+  stepDesc: {
+    fontSize: 13,
+    color: colors.secondaryText,
+    lineHeight: 18,
+  },
+  bulletsBlock: {
+    width: '100%',
+    gap: 14,
+  },
+  bulletRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: theme.spacing.md,
+    gap: 12,
   },
-  featureBullet: {
+  bulletDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    flexShrink: 0,
+  },
+  bulletText: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    color: colors.primaryText,
+    lineHeight: 22,
+  },
+  footer: {
+    paddingHorizontal: theme.spacing.lg,
+    paddingBottom: theme.spacing.lg,
+    paddingTop: theme.spacing.md,
+  },
+  dots: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 6,
+    marginBottom: theme.spacing.lg,
+  },
+  dot: {
     width: 6,
     height: 6,
     borderRadius: 3,
+    backgroundColor: colors.border,
+  },
+  dotActive: {
+    width: 20,
     backgroundColor: colors.primaryAccent,
-    marginRight: theme.spacing.md,
-  },
-  featureText: {
-    flex: 1,
-    fontSize: 15,
-    color: colors.primaryText,
-    fontWeight: '500',
-    letterSpacing: 0.1,
-    opacity: 0.95,
-  },
-  footer: {
-    paddingTop: theme.spacing.lg,
   },
   primaryButton: {
     backgroundColor: colors.primaryAccent,
@@ -160,7 +354,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 18,
-    paddingHorizontal: theme.spacing.lg,
     borderRadius: theme.borderRadius.button,
     marginBottom: theme.spacing.lg,
   },

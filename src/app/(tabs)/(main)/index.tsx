@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,15 +8,11 @@ import {
   TouchableOpacity,
   Pressable,
   Animated,
-  LayoutAnimation,
-  Platform,
-  UIManager,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors, theme } from '@/constants/theme';
 import { useAuthStore } from '@/store/authStore';
 import { api } from '@/services/api';
@@ -24,12 +20,6 @@ import StatusBadge from '@/components/transaction/StatusBadge';
 import { formatCurrency } from '@/utils/formatCurrency';
 import { formatDate } from '@/utils/formatDate';
 import { useConvertGuard } from '@/hooks/useConvertGuard';
-
-const HOW_IT_WORKS_SEEN_KEY = 'naivolt_how_it_works_seen';
-
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 type TransactionStatus = 'pending' | 'processing' | 'paid' | 'rejected';
 
@@ -91,24 +81,6 @@ function TransactionSkeleton() {
   );
 }
 
-const HOW_STEPS = [
-  {
-    step: 1,
-    title: 'Send Crypto',
-    desc: 'Copy our wallet address and send USDT or BTC from any wallet',
-  },
-  {
-    step: 2,
-    title: 'Upload Proof',
-    desc: 'Take a screenshot of your transaction and upload it in the app',
-  },
-  {
-    step: 3,
-    title: 'Get Naira',
-    desc: 'We verify and send Naira straight to your Nigerian bank account',
-  },
-];
-
 function PulsingDot() {
   const opacity = useRef(new Animated.Value(0.9)).current;
   useEffect(() => {
@@ -135,24 +107,6 @@ function PulsingDot() {
 export default function HomeScreen() {
   const router = useRouter();
   const { user } = useAuthStore();
-  const [howItWorksSeen, setHowItWorksSeen] = useState<boolean | null>(null);
-  const [howItWorksCollapsed, setHowItWorksCollapsed] = useState(false);
-  const collapseAnim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const seen = await AsyncStorage.getItem(HOW_IT_WORKS_SEEN_KEY);
-        if (mounted) setHowItWorksSeen(seen === 'true');
-      } catch {
-        if (mounted) setHowItWorksSeen(false);
-      }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   const { navigateToConvert } = useConvertGuard();
   const {
@@ -208,22 +162,6 @@ export default function HomeScreen() {
   const rate = rateData?.rate ?? 0;
   const displayRate =
     rateLoading || rateError || !rate ? '---' : formatCurrency(rate, 'NGN', true);
-
-  const handleDismissHowItWorks = useCallback(() => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    Animated.timing(collapseAnim, {
-      toValue: 0,
-      duration: 300,
-      useNativeDriver: true,
-    }).start(() => {
-      setHowItWorksCollapsed(true);
-      setHowItWorksSeen(true);
-      AsyncStorage.setItem(HOW_IT_WORKS_SEEN_KEY, 'true').catch(() => {});
-    });
-  }, [collapseAnim]);
-
-  const showHowItWorks =
-    howItWorksSeen === false && !howItWorksCollapsed;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -337,38 +275,7 @@ export default function HomeScreen() {
           </Text>
         </View>
 
-        {/* 4. How It Works — Collapsible */}
-        {showHowItWorks && (
-          <Animated.View style={[styles.howSection, { opacity: collapseAnim }]}>
-            <View style={styles.howHeader}>
-              <Text style={styles.howSectionTitle}>How It Works</Text>
-              <Pressable
-                onPress={handleDismissHowItWorks}
-                hitSlop={12}
-                style={styles.howCloseBtn}
-              >
-                <Ionicons name="close" size={22} color={c.secondaryText} />
-              </Pressable>
-            </View>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.howScroll}
-            >
-              {HOW_STEPS.map((item) => (
-                <View key={item.step} style={styles.howCard}>
-                  <View style={styles.howStepCircle}>
-                    <Text style={styles.howStepNum}>{item.step}</Text>
-                  </View>
-                  <Text style={styles.howTitle}>{item.title}</Text>
-                  <Text style={styles.howDesc}>{item.desc}</Text>
-                </View>
-              ))}
-            </ScrollView>
-          </Animated.View>
-        )}
-
-        {/* 5. Recent Transactions */}
+        {/* 4. Recent Transactions */}
         <View style={styles.section}>
           <View style={styles.sectionRow}>
             <View style={styles.sectionTitleRow}>
@@ -655,61 +562,6 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 12,
     fontWeight: '500',
-    color: c.secondaryText,
-    lineHeight: 18,
-  },
-  howSection: {
-    marginBottom: theme.spacing.lg,
-  },
-  howHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: theme.spacing.md,
-  },
-  howSectionTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: c.primaryText,
-  },
-  howCloseBtn: {
-    padding: 4,
-  },
-  howScroll: {
-    flexDirection: 'row',
-    gap: 12,
-    paddingBottom: theme.spacing.sm,
-  },
-  howCard: {
-    width: 180,
-    backgroundColor: c.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: c.border,
-    padding: 16,
-  },
-  howStepCircle: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: c.primaryAccent,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  howStepNum: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#000000',
-  },
-  howTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: c.primaryText,
-    marginBottom: 4,
-  },
-  howDesc: {
-    fontSize: 12,
     color: c.secondaryText,
     lineHeight: 18,
   },
