@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, theme } from '@/constants/theme';
+import { theme } from '@/constants/theme';
+import { Colors } from '@/constants/colors';
+import { useColors } from '@/store/appStore';
 import { useAuthStore } from '@/store/authStore';
 import { api } from '@/services/api';
 import StatusBadge from '@/components/transaction/StatusBadge';
@@ -38,9 +40,6 @@ interface RateResponse {
   usdtToNgn?: number;
 }
 
-// Use shared theme (same as Convert tab)
-const c = colors;
-
 function getGreeting(): string {
   const hour = new Date().getHours();
   if (hour < 12) return 'Good morning';
@@ -48,7 +47,7 @@ function getGreeting(): string {
   return 'Good evening';
 }
 
-function RateSkeleton() {
+function RateSkeleton({ styles }: { styles: ReturnType<typeof createStyles> }) {
   return (
     <View style={styles.rateCard}>
       <View style={styles.rateCardTop}>
@@ -61,7 +60,7 @@ function RateSkeleton() {
   );
 }
 
-function TransactionSkeleton() {
+function TransactionSkeleton({ styles }: { styles: ReturnType<typeof createStyles> }) {
   return (
     <>
       {[1, 2, 3].map((i) => (
@@ -81,66 +80,56 @@ function TransactionSkeleton() {
   );
 }
 
-function PulsingDot() {
+function PulsingDot({ color }: { color: string }) {
   const opacity = useRef(new Animated.Value(0.9)).current;
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(opacity, {
-          toValue: 0.4,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 1,
-          duration: 800,
-          useNativeDriver: true,
-        }),
+        Animated.timing(opacity, { toValue: 0.4, duration: 800, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 800, useNativeDriver: true }),
       ])
     );
     loop.start();
     return () => loop.stop();
   }, [opacity]);
-  return <Animated.View style={[styles.pulseDot, { opacity }]} />;
+  return (
+    <Animated.View
+      style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color, opacity }}
+    />
+  );
 }
 
 export default function HomeScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const { user } = useAuthStore();
+  const [refreshing, setRefreshing] = useState(false);
 
   const { navigateToConvert } = useConvertGuard();
-  const {
-    data: rateData,
-    isLoading: rateLoading,
-    isError: rateError,
-    refetch: refetchRate,
-  } = useQuery({
-    queryKey: ['rate'],
-    queryFn: async () => {
-      try {
-        const res = await api.get<RateResponse>('/rate');
-        const rate = res.data?.rate ?? res.data?.usdtToNgn ?? 0;
-        return { rate };
-      } catch {
-        return { rate: 0 };
-      }
-    },
-    refetchInterval: 60 * 1000,
-  });
 
-  const {
-    data: transactionsRaw = [],
-    isLoading: txLoading,
-    refetch: refetchTx,
-  } = useQuery({
+  const { data: rateData, isLoading: rateLoading, isError: rateError, refetch: refetchRate } =
+    useQuery({
+      queryKey: ['rate'],
+      queryFn: async () => {
+        try {
+          const res = await api.get<RateResponse>('/rate');
+          return { rate: res.data?.rate ?? res.data?.usdtToNgn ?? 0 };
+        } catch {
+          return { rate: 0 };
+        }
+      },
+      refetchInterval: 60 * 1000,
+    });
+
+  const { data: transactionsRaw = [], isLoading: txLoading, refetch: refetchTx } = useQuery({
     queryKey: ['transactions'],
     queryFn: async () => {
       try {
         const res = await api.get<Transaction[] | { data?: Transaction[] }>('/transactions');
-        const list = Array.isArray(res.data)
+        return Array.isArray(res.data)
           ? res.data
           : (res.data as { data?: Transaction[] })?.data ?? [];
-        return list;
       } catch {
         return [];
       }
@@ -149,7 +138,6 @@ export default function HomeScreen() {
 
   const transactions = transactionsRaw.slice(0, 3);
 
-  const [refreshing, setRefreshing] = useState(false);
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -160,8 +148,7 @@ export default function HomeScreen() {
   }, [refetchRate, refetchTx]);
 
   const rate = rateData?.rate ?? 0;
-  const displayRate =
-    rateLoading || rateError || !rate ? '---' : formatCurrency(rate, 'NGN', true);
+  const displayRate = rateLoading || rateError || !rate ? '---' : formatCurrency(rate, 'NGN', true);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -170,16 +157,12 @@ export default function HomeScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={c.primaryAccent}
-          />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={c.primaryAccent} />
         }
       >
-        {/* 1. Header */}
+        {/* Header */}
         <View style={styles.header}>
-          <View style={styles.headerLeft}>
+          <View>
             <Text style={styles.greetingLabel}>{getGreeting()},</Text>
             <Text style={styles.userName}>{user?.username ?? user?.name ?? 'User'}</Text>
           </View>
@@ -191,35 +174,28 @@ export default function HomeScreen() {
 
         {/* Trust strip */}
         <View style={styles.trustStrip}>
-          <View style={styles.trustItem}>
-            <Ionicons name="flash-outline" size={16} color={c.primaryAccent} />
-            <Text style={styles.trustText}>Fast payouts</Text>
-          </View>
-          <View style={styles.trustDivider} />
-          <View style={styles.trustItem}>
-            <Ionicons name="shield-checkmark-outline" size={16} color={c.primaryAccent} />
-            <Text style={styles.trustText}>Secure</Text>
-          </View>
-          <View style={styles.trustDivider} />
-          <View style={styles.trustItem}>
-            <Ionicons name="time-outline" size={16} color={c.primaryAccent} />
-            <Text style={styles.trustText}>24/7</Text>
-          </View>
+          {(['flash-outline', 'shield-checkmark-outline', 'time-outline'] as const).map(
+            (icon, i) => (
+              <View key={icon} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {i > 0 && <View style={styles.trustDivider} />}
+                <Ionicons name={icon} size={15} color={c.primaryAccent} />
+                <Text style={styles.trustText}>
+                  {['Fast payouts', 'Secure', '24/7'][i]}
+                </Text>
+              </View>
+            )
+          )}
         </View>
 
-        {/* 2. Live Rate Card */}
+        {/* Live Rate Card */}
         <View style={styles.section}>
           {rateLoading ? (
-            <RateSkeleton />
+            <RateSkeleton styles={styles} />
           ) : (
-            <TouchableOpacity
-              style={styles.rateCard}
-              activeOpacity={0.88}
-              onPress={navigateToConvert}
-            >
+            <TouchableOpacity style={styles.rateCard} activeOpacity={0.88} onPress={navigateToConvert}>
               <View style={styles.rateCardTop}>
                 <Text style={styles.rateLabel}>LIVE RATE</Text>
-                <PulsingDot />
+                <PulsingDot color={c.primaryAccent} />
               </View>
               <View style={styles.rateMiddle}>
                 <Text style={styles.ratePair}>1 USDT →</Text>
@@ -232,14 +208,10 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* 3. Two Action Buttons */}
+        {/* Actions */}
         <View style={styles.actionsRow}>
-          <TouchableOpacity
-            style={styles.actionPrimary}
-            onPress={navigateToConvert}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="flash" size={20} color="#000000" style={{ marginRight: 8 }} />
+          <TouchableOpacity style={styles.actionPrimary} onPress={navigateToConvert} activeOpacity={0.85}>
+            <Ionicons name="flash" size={20} color={c.buttonTextOnAccent} style={{ marginRight: 8 }} />
             <Text style={styles.actionPrimaryText}>Convert Now</Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -252,14 +224,10 @@ export default function HomeScreen() {
         </View>
 
         {/* Gift Card Banner */}
-        <TouchableOpacity
-          style={styles.giftCardBanner}
-          activeOpacity={0.85}
-          onPress={() => router.push('/gift-cards')}
-        >
-          <View style={styles.giftCardBannerLeft}>
-            <Text style={styles.giftCardBannerEmoji}>🎁</Text>
-            <View style={styles.giftCardBannerText}>
+        <TouchableOpacity style={styles.giftCardBanner} activeOpacity={0.85} onPress={() => router.push('/gift-cards')}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+            <Text style={{ fontSize: 28, marginRight: 12 }}>🎁</Text>
+            <View style={{ flex: 1 }}>
               <Text style={styles.giftCardBannerTitle}>Sell Gift Cards</Text>
               <Text style={styles.giftCardBannerSub}>Amazon, iTunes, Google Play & more</Text>
             </View>
@@ -269,16 +237,16 @@ export default function HomeScreen() {
 
         {/* Quick tip */}
         <View style={styles.tipCard}>
-          <Ionicons name="information-circle-outline" size={22} color={c.primaryAccent} style={styles.tipIcon} />
+          <Ionicons name="information-circle-outline" size={22} color={c.primaryAccent} style={{ marginRight: 10 }} />
           <Text style={styles.tipText}>
             Always send on the correct network (e.g. TRC20 for USDT) to avoid permanent loss.
           </Text>
         </View>
 
-        {/* 4. Recent Transactions */}
+        {/* Recent Transactions */}
         <View style={styles.section}>
           <View style={styles.sectionRow}>
-            <View style={styles.sectionTitleRow}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
               <Ionicons name="list-outline" size={20} color={c.primaryAccent} style={{ marginRight: 8 }} />
               <Text style={styles.sectionTitle}>Recent Transactions</Text>
             </View>
@@ -288,7 +256,7 @@ export default function HomeScreen() {
           </View>
 
           {txLoading ? (
-            <TransactionSkeleton />
+            <TransactionSkeleton styles={styles} />
           ) : transactions.length === 0 ? (
             <View style={styles.emptyState}>
               <View style={styles.emptyIconWrap}>
@@ -296,11 +264,7 @@ export default function HomeScreen() {
               </View>
               <Text style={styles.emptyTitle}>No transactions yet</Text>
               <Text style={styles.emptySub}>Make your first conversion and get Naira in minutes.</Text>
-              <TouchableOpacity
-                style={styles.emptyBtn}
-                onPress={navigateToConvert}
-                activeOpacity={0.85}
-              >
+              <TouchableOpacity style={styles.emptyBtn} onPress={navigateToConvert} activeOpacity={0.85}>
                 <Text style={styles.emptyBtnText}>Convert Now</Text>
               </TouchableOpacity>
             </View>
@@ -308,24 +272,21 @@ export default function HomeScreen() {
             transactions.map((tx) => {
               const coin = (tx.coin ?? tx.cryptoType ?? 'USDT').toUpperCase();
               return (
-              <View key={tx._id} style={styles.txRow}>
-                <View style={styles.txIconCircle}>
-                  <Text style={styles.txIconSymbol}>
-                    {coin === 'BTC' ? '₿' : '₮'}
-                  </Text>
+                <View key={tx._id} style={styles.txRow}>
+                  <View style={styles.txIconCircle}>
+                    <Text style={styles.txIconSymbol}>{coin === 'BTC' ? '₿' : '₮'}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.txTitle}>{coin} Conversion</Text>
+                    <Text style={styles.txDate}>{formatDate(tx.createdAt)}</Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={styles.txAmount}>{tx.amountCrypto ?? 0} {coin}</Text>
+                    <StatusBadge status={tx.status} />
+                  </View>
                 </View>
-                <View style={styles.txMiddle}>
-                  <Text style={styles.txTitle}>{coin} Conversion</Text>
-                  <Text style={styles.txDate}>{formatDate(tx.createdAt)}</Text>
-                </View>
-                <View style={styles.txRight}>
-                  <Text style={styles.txAmount}>
-                    {tx.amountCrypto ?? 0} {coin}
-                  </Text>
-                  <StatusBadge status={tx.status} />
-                </View>
-              </View>
-            );})
+              );
+            })
           )}
         </View>
       </ScrollView>
@@ -333,344 +294,108 @@ export default function HomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: c.primaryBackground,
-  },
-  scroll: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingBottom: theme.spacing.xl,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginTop: theme.spacing.sm,
-    marginBottom: theme.spacing.xs,
-  },
-  headerLeft: {},
-  greetingLabel: {
-    fontSize: 13,
-    color: c.secondaryText,
-  },
-  userName: {
-    fontSize: 24,
-    fontWeight: '800',
-    color: c.primaryText,
-  },
-  bellBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: c.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tagline: {
-    fontSize: 13,
-    color: c.secondaryText,
-    marginBottom: theme.spacing.sm,
-  },
-  trustStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: c.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: c.border,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    marginBottom: theme.spacing.lg,
-  },
-  trustItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  trustText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: c.primaryText,
-  },
-  trustDivider: {
-    width: 1,
-    height: 14,
-    backgroundColor: c.border,
-    marginHorizontal: 16,
-  },
-  section: {
-    marginBottom: theme.spacing.lg,
-  },
-  rateCard: {
-    backgroundColor: c.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: c.border,
-    padding: 20,
-    overflow: 'hidden',
-  },
-  rateCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  rateLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: c.secondaryText,
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
-  },
-  pulseDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: c.primaryAccent,
-  },
-  rateMiddle: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-  },
-  ratePair: {
-    fontSize: 14,
-    color: c.secondaryText,
-    fontWeight: '500',
-  },
-  rateValue: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: c.primaryAccent,
-    letterSpacing: 0.5,
-  },
-  rateCardDivider: {
-    height: 1,
-    backgroundColor: c.border,
-    marginTop: 18,
-    marginBottom: 14,
-  },
-  rateTap: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: c.secondaryText,
-    textAlign: 'center',
-  },
-  rateSub: {
-    fontSize: 10,
-    fontWeight: '500',
-    color: c.secondaryText,
-    textAlign: 'center',
-    marginTop: 4,
-    opacity: 0.8,
-  },
-  skeletonLine: {
-    backgroundColor: c.border,
-    borderRadius: 4,
-  },
-  actionsRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: theme.spacing.lg,
-  },
-  actionPrimary: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: 52,
-    backgroundColor: c.primaryAccent,
-    borderRadius: 12,
-  },
-  actionPrimaryText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000000',
-  },
-  actionSecondary: {
-    flex: 1,
-    height: 52,
-    backgroundColor: c.surface,
-    borderWidth: 1,
-    borderColor: c.border,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionSecondaryText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: c.primaryText,
-  },
-  giftCardBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: c.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: c.border,
-    borderLeftWidth: 3,
-    borderLeftColor: '#a855f7',
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    marginBottom: theme.spacing.lg,
-  },
-  giftCardBannerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  giftCardBannerEmoji: {
-    fontSize: 28,
-    marginRight: 12,
-  },
-  giftCardBannerText: {
-    flex: 1,
-  },
-  giftCardBannerTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: c.primaryText,
-  },
-  giftCardBannerSub: {
-    fontSize: 12,
-    color: c.secondaryText,
-    marginTop: 2,
-  },
-  tipCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: c.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: c.border,
-    borderLeftWidth: 3,
-    borderLeftColor: c.primaryAccent,
-    padding: 14,
-    marginBottom: theme.spacing.lg,
-  },
-  tipIcon: {
-    marginRight: 10,
-  },
-  tipText: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '500',
-    color: c.secondaryText,
-    lineHeight: 18,
-  },
-  sectionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: theme.spacing.md,
-  },
-  sectionTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: c.primaryText,
-  },
-  seeAll: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: c.primaryAccent,
-  },
-  txRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: c.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: c.border,
-    padding: 16,
-    marginBottom: 12,
-  },
-  txIconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: c.surface,
-    borderWidth: 1,
-    borderColor: c.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  txIconSymbol: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: c.primaryAccent,
-  },
-  txMiddle: {
-    flex: 1,
-  },
-  txTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: c.primaryText,
-  },
-  txDate: {
-    fontSize: 11,
-    color: c.secondaryText,
-    marginTop: 2,
-  },
-  txRight: {
-    alignItems: 'flex-end',
-  },
-  txAmount: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: c.primaryText,
-    marginBottom: 4,
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: theme.spacing.xl,
-    backgroundColor: c.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: c.border,
-  },
-  emptyIconWrap: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(170, 255, 0, 0.12)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: c.primaryText,
-    marginTop: 16,
-  },
-  emptySub: {
-    fontSize: 14,
-    color: c.secondaryText,
-    marginTop: 4,
-  },
-  emptyBtn: {
-    marginTop: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    backgroundColor: c.primaryAccent,
-    borderRadius: 12,
-  },
-  emptyBtnText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#000000',
-  },
-});
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+    safe: { flex: 1, backgroundColor: c.primaryBackground },
+    scroll: { flex: 1 },
+    scrollContent: { paddingHorizontal: 20, paddingBottom: theme.spacing.xl },
+    header: {
+      flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
+      marginTop: theme.spacing.sm, marginBottom: theme.spacing.xs,
+    },
+    greetingLabel: { fontSize: 13, color: c.secondaryText },
+    userName: { fontSize: 24, fontWeight: '800', color: c.primaryText },
+    bellBtn: {
+      width: 44, height: 44, borderRadius: 12,
+      backgroundColor: c.surface, alignItems: 'center', justifyContent: 'center',
+      borderWidth: 1, borderColor: c.border,
+    },
+    tagline: { fontSize: 13, color: c.secondaryText, marginBottom: theme.spacing.sm },
+    trustStrip: {
+      flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+      backgroundColor: c.surface, borderRadius: 14, borderWidth: 1, borderColor: c.border,
+      paddingVertical: 12, paddingHorizontal: 16, marginBottom: theme.spacing.lg,
+    },
+    trustText: { fontSize: 12, fontWeight: '600', color: c.primaryText },
+    trustDivider: { width: 1, height: 14, backgroundColor: c.border, marginHorizontal: 16 },
+    section: { marginBottom: theme.spacing.lg },
+    rateCard: {
+      backgroundColor: c.surface, borderRadius: 20, borderWidth: 1,
+      borderColor: c.border, padding: 20, overflow: 'hidden',
+    },
+    rateCardTop: {
+      flexDirection: 'row', justifyContent: 'space-between',
+      alignItems: 'center', marginBottom: 16,
+    },
+    rateLabel: {
+      fontSize: 11, fontWeight: '600', color: c.secondaryText,
+      letterSpacing: 1.2, textTransform: 'uppercase',
+    },
+    rateMiddle: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
+    ratePair: { fontSize: 14, color: c.secondaryText, fontWeight: '500' },
+    rateValue: { fontSize: 28, fontWeight: '800', color: c.primaryAccent, letterSpacing: 0.5 },
+    rateCardDivider: { height: 1, backgroundColor: c.border, marginTop: 18, marginBottom: 14 },
+    rateTap: { fontSize: 12, fontWeight: '500', color: c.secondaryText, textAlign: 'center' },
+    rateSub: { fontSize: 10, color: c.secondaryText, textAlign: 'center', marginTop: 4, opacity: 0.8 },
+    skeletonLine: { backgroundColor: c.border, borderRadius: 4 },
+    actionsRow: { flexDirection: 'row', gap: 12, marginBottom: theme.spacing.lg },
+    actionPrimary: {
+      flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+      height: 54, backgroundColor: c.primaryAccent, borderRadius: 14,
+    },
+    actionPrimaryText: { fontSize: 16, fontWeight: '700', color: c.buttonTextOnAccent },
+    actionSecondary: {
+      flex: 1, height: 54, backgroundColor: c.surface, borderWidth: 1,
+      borderColor: c.border, borderRadius: 14, alignItems: 'center', justifyContent: 'center',
+    },
+    actionSecondaryText: { fontSize: 16, fontWeight: '600', color: c.primaryText },
+    giftCardBanner: {
+      flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+      backgroundColor: c.surface, borderRadius: 14, borderWidth: 1, borderColor: c.border,
+      borderLeftWidth: 3, borderLeftColor: '#a855f7',
+      paddingVertical: 14, paddingHorizontal: 16, marginBottom: theme.spacing.lg,
+    },
+    giftCardBannerTitle: { fontSize: 15, fontWeight: '700', color: c.primaryText },
+    giftCardBannerSub: { fontSize: 12, color: c.secondaryText, marginTop: 2 },
+    tipCard: {
+      flexDirection: 'row', alignItems: 'center', backgroundColor: c.surface,
+      borderRadius: 14, borderWidth: 1, borderColor: c.border,
+      borderLeftWidth: 3, borderLeftColor: c.primaryAccent,
+      padding: 14, marginBottom: theme.spacing.lg,
+    },
+    tipText: { flex: 1, fontSize: 12, fontWeight: '500', color: c.secondaryText, lineHeight: 18 },
+    sectionRow: {
+      flexDirection: 'row', justifyContent: 'space-between',
+      alignItems: 'center', marginBottom: theme.spacing.md,
+    },
+    sectionTitle: { fontSize: 18, fontWeight: '800', color: c.primaryText },
+    seeAll: { fontSize: 14, fontWeight: '700', color: c.primaryAccent },
+    txRow: {
+      flexDirection: 'row', alignItems: 'center', backgroundColor: c.surface,
+      borderRadius: 14, borderWidth: 1, borderColor: c.border, padding: 16, marginBottom: 10,
+    },
+    txIconCircle: {
+      width: 44, height: 44, borderRadius: 22, backgroundColor: c.surfaceElevated,
+      borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center', marginRight: 12,
+    },
+    txIconSymbol: { fontSize: 20, fontWeight: '700', color: c.primaryAccent },
+    txTitle: { fontSize: 14, fontWeight: '700', color: c.primaryText },
+    txDate: { fontSize: 11, color: c.secondaryText, marginTop: 2 },
+    txAmount: { fontSize: 14, fontWeight: '600', color: c.primaryText, marginBottom: 4 },
+    emptyState: {
+      alignItems: 'center', justifyContent: 'center', paddingVertical: theme.spacing.xl,
+      backgroundColor: c.surface, borderRadius: 20, borderWidth: 1, borderColor: c.border,
+    },
+    emptyIconWrap: {
+      width: 80, height: 80, borderRadius: 40,
+      backgroundColor: c.accentDim, alignItems: 'center', justifyContent: 'center',
+    },
+    emptyTitle: { fontSize: 16, fontWeight: '700', color: c.primaryText, marginTop: 16 },
+    emptySub: { fontSize: 14, color: c.secondaryText, marginTop: 4 },
+    emptyBtn: {
+      marginTop: 16, paddingVertical: 14, paddingHorizontal: 24,
+      backgroundColor: c.primaryAccent, borderRadius: 12,
+    },
+    emptyBtnText: { fontSize: 16, fontWeight: '700', color: c.buttonTextOnAccent },
+  });
+}

@@ -12,7 +12,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
-import { colors, theme } from "@/constants/theme";
+import { theme } from "@/constants/theme";
+import { Colors } from "@/constants/colors";
+import { useColors } from "@/store/appStore";
 import StatusBadge from "@/components/transaction/StatusBadge";
 import { api } from "@/services/api";
 import { useConvertGuard } from "@/hooks/useConvertGuard";
@@ -79,7 +81,7 @@ const FILTER_OPTIONS: { value: TransactionStatus | "all"; label: string }[] = [
   { value: "rejected", label: "Rejected" },
 ];
 
-const DEFAULT_COIN_COLOR = colors.secondaryText;
+const DEFAULT_COIN_COLOR = "#71717A";
 const DEFAULT_COIN_SYMBOL = "?";
 
 const DATE_SECTION_ORDER = ["Today", "Yesterday", "This week", "Older"] as const;
@@ -125,7 +127,7 @@ function groupByDateSection(
   }));
 }
 
-function TransactionSkeleton() {
+function TransactionSkeleton({ styles }: { styles: ReturnType<typeof createStyles> }) {
   return (
     <View style={styles.skeletonList}>
       {[1, 2, 3, 4].map((i) => (
@@ -151,6 +153,8 @@ function TransactionSkeleton() {
 
 export default function HistoryScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const [activeTab, setActiveTab] = useState<TabType>("crypto");
   const [filter, setFilter] = useState<TransactionStatus | "all">("all");
   const [refreshing, setRefreshing] = useState(false);
@@ -253,7 +257,7 @@ export default function HistoryScreen() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={onRefresh}
-            tintColor={colors.primaryAccent}
+            tintColor={c.primaryAccent}
           />
         }
       >
@@ -276,7 +280,7 @@ export default function HistoryScreen() {
             onPress={onRefresh}
             disabled={isLoading}
           >
-            <Ionicons name="refresh" size={22} color={colors.primaryAccent} />
+            <Ionicons name="refresh" size={22} color={c.primaryAccent} />
           </Pressable>
         </View>
 
@@ -298,8 +302,8 @@ export default function HistoryScreen() {
 
         {isError ? (
           <View style={styles.errorBlock}>
-            <View style={[styles.emptyIconWrap, { borderColor: colors.error }]}>
-              <Ionicons name="alert-circle" size={40} color={colors.error} />
+            <View style={[styles.emptyIconWrap, { borderColor: c.error }]}>
+              <Ionicons name="alert-circle" size={40} color={c.error} />
             </View>
             <Text style={styles.errorTitle}>Something went wrong</Text>
             <Text style={styles.errorSub}>
@@ -327,23 +331,23 @@ export default function HistoryScreen() {
                 </View>
                 <View style={styles.statsRow}>
                   <View style={styles.statPill}>
-                    <View style={[styles.statDot, { backgroundColor: colors.primaryText }]} />
+                    <View style={[styles.statDot, { backgroundColor: c.primaryText }]} />
                     <Text style={styles.statPillValue}>{stats.total}</Text>
                     <Text style={styles.statPillLabel}>Total</Text>
                   </View>
                   <View style={styles.statPill}>
-                    <View style={[styles.statDot, { backgroundColor: colors.pending }]} />
-                    <Text style={[styles.statPillValue, { color: colors.pending }]}>{stats.pending}</Text>
+                    <View style={[styles.statDot, { backgroundColor: c.pending }]} />
+                    <Text style={[styles.statPillValue, { color: c.pending }]}>{stats.pending}</Text>
                     <Text style={styles.statPillLabel}>Pending</Text>
                   </View>
                   <View style={styles.statPill}>
-                    <View style={[styles.statDot, { backgroundColor: colors.paid }]} />
-                    <Text style={[styles.statPillValue, { color: colors.paid }]}>{stats.paid}</Text>
+                    <View style={[styles.statDot, { backgroundColor: c.paid }]} />
+                    <Text style={[styles.statPillValue, { color: c.paid }]}>{stats.paid}</Text>
                     <Text style={styles.statPillLabel}>Paid</Text>
                   </View>
                   <View style={styles.statPill}>
-                    <View style={[styles.statDot, { backgroundColor: colors.error }]} />
-                    <Text style={[styles.statPillValue, { color: colors.error }]}>{stats.rejected}</Text>
+                    <View style={[styles.statDot, { backgroundColor: c.error }]} />
+                    <Text style={[styles.statPillValue, { color: c.error }]}>{stats.rejected}</Text>
                     <Text style={styles.statPillLabel}>Rejected</Text>
                   </View>
                 </View>
@@ -388,14 +392,14 @@ export default function HistoryScreen() {
               </View>
 
               {isLoading ? (
-                <TransactionSkeleton />
+                <TransactionSkeleton styles={styles} />
               ) : showGlobalEmpty ? (
                 <View style={styles.emptyBlock}>
                   <View style={styles.emptyIconWrap}>
                     <Ionicons
                       name={activeTab === "crypto" ? "wallet-outline" : "gift-outline"}
                       size={40}
-                      color={colors.secondaryText}
+                      color={c.secondaryText}
                     />
                   </View>
                   <Text style={styles.emptyTitle}>No transactions yet</Text>
@@ -410,7 +414,7 @@ export default function HistoryScreen() {
                       onPress={handleConvertNow}
                       activeOpacity={0.85}
                     >
-                      <Ionicons name="flash" size={18} color={colors.primaryAccent} style={{ marginRight: 6 }} />
+                      <Ionicons name="flash" size={18} color={c.primaryAccent} style={{ marginRight: 6 }} />
                       <Text style={styles.convertBtnText}>Convert Now</Text>
                     </TouchableOpacity>
                   ) : (
@@ -426,7 +430,7 @@ export default function HistoryScreen() {
               ) : showFilterEmpty ? (
                 <View style={styles.emptyBlock}>
                   <View style={styles.emptyIconWrap}>
-                    <Ionicons name="filter-outline" size={40} color={colors.secondaryText} />
+                    <Ionicons name="filter-outline" size={40} color={c.secondaryText} />
                   </View>
                   <Text style={styles.emptyTitle}>No {filter} transactions</Text>
                   <Text style={styles.emptySub}>Try a different filter to see more.</Text>
@@ -442,12 +446,12 @@ export default function HistoryScreen() {
                       const title = `${coin} Conversion`;
                       const statusColor =
                         tx.status === "paid"
-                          ? colors.paid
+                          ? c.paid
                           : tx.status === "rejected"
-                            ? colors.error
+                            ? c.error
                             : tx.status === "pending"
-                              ? colors.pending
-                              : colors.secondaryText;
+                              ? c.pending
+                              : c.secondaryText;
                       return (
                         <Pressable
                           key={tx._id}
@@ -479,7 +483,7 @@ export default function HistoryScreen() {
                             </Text>
                             <View style={styles.cardStatusRow}>
                               <StatusBadge status={tx.status} />
-                              <Ionicons name="chevron-forward" size={18} color={colors.secondaryText} />
+                              <Ionicons name="chevron-forward" size={18} color={c.secondaryText} />
                             </View>
                           </View>
                         </Pressable>
@@ -494,12 +498,12 @@ export default function HistoryScreen() {
                     {(sectionTxs as unknown as GiftCardTransaction[]).map((tx) => {
                       const statusColor =
                         tx.status === "paid"
-                          ? colors.paid
+                          ? c.paid
                           : tx.status === "rejected"
-                            ? colors.error
+                            ? c.error
                             : tx.status === "pending"
-                              ? colors.pending
-                              : colors.secondaryText;
+                              ? c.pending
+                              : c.secondaryText;
                       return (
                         <Pressable
                           key={tx._id}
@@ -530,7 +534,7 @@ export default function HistoryScreen() {
                             </Text>
                             <View style={styles.cardStatusRow}>
                               <StatusBadge status={tx.status} />
-                              <Ionicons name="chevron-forward" size={18} color={colors.secondaryText} />
+                              <Ionicons name="chevron-forward" size={18} color={c.secondaryText} />
                             </View>
                           </View>
                         </Pressable>
@@ -547,10 +551,11 @@ export default function HistoryScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(c: Colors) {
+  return StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: colors.primaryBackground,
+    backgroundColor: c.primaryBackground,
   },
   scroll: {
     flex: 1,
@@ -573,35 +578,35 @@ const styles = StyleSheet.create({
     width: 32,
     height: 3,
     borderRadius: 2,
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
     marginBottom: theme.spacing.sm,
   },
   headerTextBlock: {},
   headerLabel: {
     fontSize: 12,
     fontWeight: "600",
-    color: colors.secondaryText,
+    color: c.secondaryText,
     letterSpacing: 0.5,
     marginBottom: 2,
   },
   title: {
     fontSize: 30,
     fontWeight: "800",
-    color: colors.primaryText,
+    color: c.primaryText,
     letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 14,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     marginTop: 4,
   },
   refreshBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -617,19 +622,19 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 13,
     fontWeight: "700",
-    color: colors.secondaryText,
+    color: c.secondaryText,
     letterSpacing: 0.8,
     marginBottom: theme.spacing.md,
   },
   sectionCount: {
     fontSize: 13,
     fontWeight: "600",
-    color: colors.primaryAccent,
+    color: c.primaryAccent,
   },
   summaryCard: {
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
     borderRadius: theme.borderRadius.card,
     padding: theme.spacing.lg,
     overflow: "hidden",
@@ -638,18 +643,18 @@ const styles = StyleSheet.create({
     marginBottom: theme.spacing.md,
     paddingBottom: theme.spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    borderBottomColor: c.border,
   },
   heroLabel: {
     fontSize: 12,
     fontWeight: "600",
-    color: colors.secondaryText,
+    color: c.secondaryText,
     marginBottom: 4,
   },
   heroValue: {
     fontSize: 26,
     fontWeight: "800",
-    color: colors.primaryAccent,
+    color: c.primaryAccent,
     letterSpacing: -0.5,
   },
   statsRow: {
@@ -662,7 +667,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: theme.spacing.sm,
     paddingHorizontal: theme.spacing.xs,
-    backgroundColor: colors.surfaceElevated,
+    backgroundColor: c.surfaceElevated,
     borderRadius: theme.borderRadius.badge,
   },
   statDot: {
@@ -674,22 +679,22 @@ const styles = StyleSheet.create({
   statPillValue: {
     fontSize: 16,
     fontWeight: "700",
-    color: colors.primaryText,
+    color: c.primaryText,
   },
   statPillLabel: {
     fontSize: 10,
     fontWeight: "600",
-    color: colors.secondaryText,
+    color: c.secondaryText,
     marginTop: 2,
   },
   typeTabRow: {
     flexDirection: "row",
     gap: 8,
     marginBottom: theme.spacing.lg,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
     padding: 4,
   },
   typeTab: {
@@ -699,12 +704,12 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   typeTabActive: {
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
   },
   typeTabText: {
     fontSize: 14,
     fontWeight: "600",
-    color: colors.secondaryText,
+    color: c.secondaryText,
   },
   typeTabTextActive: {
     color: "#000000",
@@ -719,21 +724,21 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   tab: {
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     paddingVertical: 10,
     paddingHorizontal: 18,
     borderRadius: theme.borderRadius.button,
   },
   tabActive: {
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
   },
   tabText: {
     fontSize: 14,
     fontWeight: "600",
-    color: colors.secondaryText,
+    color: c.secondaryText,
   },
   tabTextActive: {
-    color: colors.buttonTextOnAccent,
+    color: c.buttonTextOnAccent,
   },
   dateGroup: {
     marginBottom: theme.spacing.md,
@@ -741,7 +746,7 @@ const styles = StyleSheet.create({
   dateGroupLabel: {
     fontSize: 11,
     fontWeight: "700",
-    color: colors.secondaryText,
+    color: c.secondaryText,
     letterSpacing: 0.5,
     marginBottom: theme.spacing.sm,
     marginLeft: 4,
@@ -750,17 +755,17 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "stretch",
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
     borderLeftWidth: 4,
-    borderColor: colors.border,
+    borderColor: c.border,
     borderRadius: theme.borderRadius.card,
     padding: theme.spacing.md,
     marginBottom: theme.spacing.sm,
     overflow: "hidden",
   },
   cardSkeleton: {
-    borderLeftColor: colors.border,
+    borderLeftColor: c.border,
   },
   cardLeft: {
     flexDirection: "row",
@@ -779,7 +784,7 @@ const styles = StyleSheet.create({
   coinSymbol: {
     fontSize: 20,
     fontWeight: "700",
-    color: colors.buttonTextOnAccent,
+    color: c.buttonTextOnAccent,
   },
   cardTextBlock: {
     flex: 1,
@@ -789,19 +794,19 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 15,
     fontWeight: "700",
-    color: colors.primaryText,
+    color: c.primaryText,
     lineHeight: 20,
     marginBottom: 4,
   },
   cardDate: {
     fontSize: 13,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     lineHeight: 18,
     marginBottom: 6,
   },
   networkBadge: {
     alignSelf: "flex-start",
-    backgroundColor: colors.surfaceElevated,
+    backgroundColor: c.surfaceElevated,
     paddingVertical: 4,
     paddingHorizontal: 8,
     borderRadius: theme.borderRadius.badge,
@@ -810,7 +815,7 @@ const styles = StyleSheet.create({
   },
   networkText: {
     fontSize: 11,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     fontWeight: "600",
   },
   cardRight: {
@@ -821,13 +826,13 @@ const styles = StyleSheet.create({
   cryptoAmount: {
     fontSize: 15,
     fontWeight: "700",
-    color: colors.primaryText,
+    color: c.primaryText,
     lineHeight: 20,
     marginBottom: 4,
   },
   nairaAmount: {
     fontSize: 13,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     lineHeight: 18,
     marginBottom: 6,
   },
@@ -846,21 +851,21 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
     alignItems: "center",
     justifyContent: "center",
   },
   emptyTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: colors.primaryText,
+    color: c.primaryText,
     marginTop: theme.spacing.md,
   },
   emptySub: {
     fontSize: 14,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     marginTop: theme.spacing.sm,
     textAlign: "center",
     lineHeight: 20,
@@ -869,14 +874,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
     paddingVertical: 14,
     paddingHorizontal: 28,
     borderRadius: theme.borderRadius.button,
     marginTop: theme.spacing.lg,
   },
   convertBtnText: {
-    color: colors.buttonTextOnAccent,
+    color: c.buttonTextOnAccent,
     fontWeight: "700",
     fontSize: 16,
   },
@@ -888,30 +893,30 @@ const styles = StyleSheet.create({
   errorTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: colors.primaryText,
+    color: c.primaryText,
     marginTop: theme.spacing.md,
   },
   errorSub: {
     fontSize: 14,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     marginTop: theme.spacing.xs,
     textAlign: "center",
   },
   retryBtn: {
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
     paddingVertical: 14,
     paddingHorizontal: 28,
     borderRadius: theme.borderRadius.button,
     marginTop: theme.spacing.md,
   },
   retryBtnText: {
-    color: colors.buttonTextOnAccent,
+    color: c.buttonTextOnAccent,
     fontWeight: "700",
     fontSize: 16,
   },
   skeletonList: {},
   skeleton: {
-    backgroundColor: colors.border,
+    backgroundColor: c.border,
   },
   skeletonTitle: {
     width: 120,
@@ -941,4 +946,5 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: theme.borderRadius.badge,
   },
-});
+  });
+}

@@ -15,6 +15,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   FlatList,
+  Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,20 +23,11 @@ import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import { useRouter } from "expo-router";
 import { theme } from "@/constants/theme";
+import { Colors } from "@/constants/colors";
+import { useColors, useAppStore } from "@/store/appStore";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { config } from "@/constants/config";
-
-const THEME = {
-  background: "#0D0D0D",
-  surface: "#1A1A1A",
-  accent: "#AAFF00",
-  primaryText: "#FFFFFF",
-  secondaryText: "#888888",
-  border: "#2A2A2A",
-  error: "#FF4444",
-  pending: "#F0B429",
-};
 
 interface UserProfile {
   _id: string;
@@ -95,6 +87,9 @@ export default function ProfileScreen() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { token, setUser } = useAuthStore();
+  const c = useColors();
+  const { mode, toggleMode } = useAppStore();
+  const styles = useMemo(() => createStyles(c), [c]);
 
   const [refreshing, setRefreshing] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
@@ -219,13 +214,13 @@ export default function ProfileScreen() {
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={THEME.accent} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={c.primaryAccent} />}
       >
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Profile</Text>
           <TouchableOpacity onPress={() => Alert.alert("Settings", "Coming soon")} style={styles.settingsBtn} hitSlop={12}>
-            <Ionicons name="settings-outline" size={24} color={THEME.primaryText} />
+            <Ionicons name="settings-outline" size={24} color={c.primaryText} />
           </TouchableOpacity>
         </View>
 
@@ -234,7 +229,7 @@ export default function ProfileScreen() {
           <View style={styles.avatarWrap}>
             {profileLoading ? (
               <View style={[styles.avatar, styles.avatarPlaceholder]}>
-                <ActivityIndicator size="large" color={THEME.background} />
+                <ActivityIndicator size="large" color={c.primaryBackground} />
               </View>
             ) : profile?.profileImageUrl ? (
               <Image source={{ uri: profile.profileImageUrl }} style={styles.avatar} />
@@ -245,11 +240,11 @@ export default function ProfileScreen() {
             )}
             {uploadingImage && (
               <View style={styles.avatarOverlay}>
-                <ActivityIndicator size="large" color={THEME.primaryText} />
+                <ActivityIndicator size="large" color={c.primaryText} />
               </View>
             )}
             <TouchableOpacity style={styles.cameraBtn} onPress={handlePickProfileImage} disabled={uploadingImage}>
-              <Ionicons name="camera" size={20} color={THEME.background} />
+              <Ionicons name="camera" size={20} color={c.primaryBackground} />
             </TouchableOpacity>
           </View>
           {!profileLoading && profile && (
@@ -258,7 +253,7 @@ export default function ProfileScreen() {
                 <Text style={styles.heroName}>{profile.name}</Text>
                 {profile.isVerified && (
                   <View style={styles.verifiedBadge}>
-                    <Ionicons name="checkmark-circle" size={18} color={THEME.accent} />
+                    <Ionicons name="checkmark-circle" size={18} color={c.primaryAccent} />
                   </View>
                 )}
               </View>
@@ -283,7 +278,7 @@ export default function ProfileScreen() {
               <Text style={styles.statLabel}>Paid</Text>
             </View>
             <View style={styles.statPill}>
-              <Text style={[styles.statValue, { color: THEME.pending }]}>{profileLoading ? "—" : pendingCount}</Text>
+              <Text style={[styles.statValue, { color: c.pending }]}>{profileLoading ? "—" : pendingCount}</Text>
               <Text style={styles.statLabel}>Pending</Text>
             </View>
           </View>
@@ -301,7 +296,7 @@ export default function ProfileScreen() {
           </View>
           {bankAccounts.length === 0 ? (
             <View style={styles.emptyBank}>
-              <Ionicons name="business-outline" size={48} color={THEME.secondaryText} />
+              <Ionicons name="business-outline" size={48} color={c.secondaryText} />
               <Text style={styles.emptyBankText}>No bank account added</Text>
               <TouchableOpacity style={styles.addBankButton} onPress={() => setAddBankVisible(true)}>
                 <Text style={styles.addBankButtonText}>Add Bank Account</Text>
@@ -334,36 +329,46 @@ export default function ProfileScreen() {
           <Text style={styles.sectionLabel}>ACCOUNT</Text>
           <View style={styles.menuCard}>
             <TouchableOpacity style={styles.menuRow} onPress={() => setEditProfileVisible(true)}>
-              <Ionicons name="person-outline" size={22} color={THEME.secondaryText} />
+              <Ionicons name="person-outline" size={22} color={c.secondaryText} />
               <Text style={styles.menuLabel}>Edit Profile</Text>
-              <Ionicons name="chevron-forward" size={20} color={THEME.secondaryText} />
+              <Ionicons name="chevron-forward" size={20} color={c.secondaryText} />
             </TouchableOpacity>
             <TouchableOpacity style={styles.menuRow} onPress={() => setChangePasswordVisible(true)}>
-              <Ionicons name="lock-closed-outline" size={22} color={THEME.secondaryText} />
+              <Ionicons name="lock-closed-outline" size={22} color={c.secondaryText} />
               <Text style={styles.menuLabel}>Change Password</Text>
-              <Ionicons name="chevron-forward" size={20} color={THEME.secondaryText} />
+              <Ionicons name="chevron-forward" size={20} color={c.secondaryText} />
             </TouchableOpacity>
             <TouchableOpacity style={styles.menuRow} onPress={() => Alert.alert("Coming soon", "Notifications")}>
-              <Ionicons name="notifications-outline" size={22} color={THEME.secondaryText} />
+              <Ionicons name="notifications-outline" size={22} color={c.secondaryText} />
               <Text style={styles.menuLabel}>Notifications</Text>
-              <Ionicons name="chevron-forward" size={20} color={THEME.secondaryText} />
+              <Ionicons name="chevron-forward" size={20} color={c.secondaryText} />
             </TouchableOpacity>
             <TouchableOpacity style={styles.menuRow} onPress={() => Alert.alert("Coming soon", "Privacy & Security")}>
-              <Ionicons name="shield-checkmark-outline" size={22} color={THEME.secondaryText} />
+              <Ionicons name="shield-checkmark-outline" size={22} color={c.secondaryText} />
               <Text style={styles.menuLabel}>Privacy & Security</Text>
-              <Ionicons name="chevron-forward" size={20} color={THEME.secondaryText} />
+              <Ionicons name="chevron-forward" size={20} color={c.secondaryText} />
             </TouchableOpacity>
+            <View style={styles.menuRow}>
+              <Ionicons name={mode === "dark" ? "moon-outline" : "sunny-outline"} size={22} color={c.secondaryText} />
+              <Text style={styles.menuLabel}>Dark Mode</Text>
+              <Switch
+                value={mode === "dark"}
+                onValueChange={toggleMode}
+                trackColor={{ false: c.border, true: c.primaryAccent }}
+                thumbColor={mode === "dark" ? c.buttonTextOnAccent : c.surface}
+              />
+            </View>
             <TouchableOpacity style={[styles.menuRow, styles.menuRowLast]} onPress={() => Alert.alert("Coming soon", "Help & Support")}>
-              <Ionicons name="help-circle-outline" size={22} color={THEME.secondaryText} />
+              <Ionicons name="help-circle-outline" size={22} color={c.secondaryText} />
               <Text style={styles.menuLabel}>Help & Support</Text>
-              <Ionicons name="chevron-forward" size={20} color={THEME.secondaryText} />
+              <Ionicons name="chevron-forward" size={20} color={c.secondaryText} />
             </TouchableOpacity>
           </View>
         </View>
 
         {/* Danger zone */}
         <TouchableOpacity style={styles.logoutRow} onPress={handleLogout}>
-          <Ionicons name="log-out-outline" size={22} color={THEME.error} />
+          <Ionicons name="log-out-outline" size={22} color={c.error} />
           <Text style={styles.logoutText}>Log Out</Text>
         </TouchableOpacity>
       </ScrollView>
@@ -465,6 +470,8 @@ function AddBankAccountModal({
   onClose: () => void;
   onSuccess: () => void;
 }) {
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const [selectedBank, setSelectedBank] = useState<BankOption | null>(null);
   const [accountNumber, setAccountNumber] = useState("");
   const [resolvedAccountName, setResolvedAccountName] = useState("");
@@ -593,7 +600,7 @@ function AddBankAccountModal({
                 <Text style={selectedBank ? styles.bankSelectText : styles.bankSelectPlaceholder}>
                   {selectedBank ? selectedBank.name : "Select bank"}
                 </Text>
-                <Ionicons name="chevron-down" size={20} color={THEME.secondaryText} />
+                <Ionicons name="chevron-down" size={20} color={c.secondaryText} />
               </TouchableOpacity>
               <Text style={styles.inputLabel}>Account Number</Text>
               <TextInput
@@ -601,21 +608,21 @@ function AddBankAccountModal({
                 value={accountNumber}
                 onChangeText={(t) => setAccountNumber(t.replace(/\D/g, "").slice(0, 10))}
                 placeholder="10 digits"
-                placeholderTextColor={THEME.secondaryText}
+                placeholderTextColor={c.secondaryText}
                 keyboardType="number-pad"
                 maxLength={10}
               />
               <Text style={styles.inputLabel}>Account Name</Text>
               {resolving ? (
                 <View style={styles.resolvedRow}>
-                  <ActivityIndicator size="small" color={THEME.accent} />
+                  <ActivityIndicator size="small" color={c.primaryAccent} />
                   <Text style={styles.resolvedLabel}>Verifying…</Text>
                 </View>
               ) : resolveError ? (
                 <Text style={styles.resolveError}>{resolveError}</Text>
               ) : resolvedAccountName ? (
                 <View style={styles.resolvedRow}>
-                  <Ionicons name="checkmark-circle" size={20} color={THEME.accent} />
+                  <Ionicons name="checkmark-circle" size={20} color={c.primaryAccent} />
                   <Text style={styles.resolvedName}>{resolvedAccountName}</Text>
                 </View>
               ) : (
@@ -626,7 +633,7 @@ function AddBankAccountModal({
                 onPress={submit}
                 disabled={loading || resolving || !resolvedAccountName}
               >
-                {loading ? <ActivityIndicator color={THEME.background} /> : <Text style={styles.submitBtnText}>Add Account</Text>}
+                {loading ? <ActivityIndicator color={c.primaryBackground} /> : <Text style={styles.submitBtnText}>Add Account</Text>}
               </TouchableOpacity>
             </ScrollView>
           </KeyboardAvoidingView>
@@ -648,7 +655,7 @@ function AddBankAccountModal({
               value={bankSearch}
               onChangeText={setBankSearch}
               placeholder="Search banks..."
-              placeholderTextColor={THEME.secondaryText}
+              placeholderTextColor={c.secondaryText}
             />
             <FlatList
               data={filteredBanks}
@@ -685,6 +692,8 @@ function EditProfileModal({
   onClose: () => void;
   onSuccess: (user: UserProfile) => void;
 }) {
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const [name, setName] = useState(profile?.name ?? "");
   const [username, setUsername] = useState(profile?.username ?? "");
   const [phone, setPhone] = useState(profile?.phone ?? "");
@@ -739,18 +748,18 @@ function EditProfileModal({
           <ScrollView style={styles.modalScroll} contentContainerStyle={styles.modalScrollContent} keyboardShouldPersistTaps="handled">
             {error ? <Text style={styles.modalError}>{error}</Text> : null}
             <Text style={styles.inputLabel}>Full Name</Text>
-            <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Your name" placeholderTextColor={THEME.secondaryText} />
+            <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Your name" placeholderTextColor={c.secondaryText} />
             <Text style={styles.inputLabel}>Username</Text>
-            <TextInput style={styles.input} value={username} onChangeText={setUsername} placeholder="username" placeholderTextColor={THEME.secondaryText} autoCapitalize="none" />
+            <TextInput style={styles.input} value={username} onChangeText={setUsername} placeholder="username" placeholderTextColor={c.secondaryText} autoCapitalize="none" />
             <Text style={styles.inputLabel}>Email</Text>
             <View style={styles.emailRow}>
-              <TextInput style={[styles.input, styles.inputDisabled, styles.emailInput]} value={profile?.email ?? ""} editable={false} placeholderTextColor={THEME.secondaryText} />
-              <Ionicons name="lock-closed" size={20} color={THEME.secondaryText} style={styles.emailLock} />
+              <TextInput style={[styles.input, styles.inputDisabled, styles.emailInput]} value={profile?.email ?? ""} editable={false} placeholderTextColor={c.secondaryText} />
+              <Ionicons name="lock-closed" size={20} color={c.secondaryText} style={styles.emailLock} />
             </View>
             <Text style={styles.inputLabel}>Phone</Text>
-            <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="08012345678" placeholderTextColor={THEME.secondaryText} keyboardType="phone-pad" />
+            <TextInput style={styles.input} value={phone} onChangeText={setPhone} placeholder="08012345678" placeholderTextColor={c.secondaryText} keyboardType="phone-pad" />
             <TouchableOpacity style={[styles.submitBtn, loading && styles.submitBtnDisabled]} onPress={submit} disabled={loading}>
-              {loading ? <ActivityIndicator color={THEME.background} /> : <Text style={styles.submitBtnText}>Save</Text>}
+              {loading ? <ActivityIndicator color={c.primaryBackground} /> : <Text style={styles.submitBtnText}>Save</Text>}
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -760,6 +769,8 @@ function EditProfileModal({
 }
 
 function ChangePasswordModal({ visible, onClose, onSuccess }: { visible: boolean; onClose: () => void; onSuccess: () => void }) {
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -829,11 +840,11 @@ function ChangePasswordModal({ visible, onClose, onSuccess }: { visible: boolean
                 value={currentPassword}
                 onChangeText={setCurrentPassword}
                 placeholder="Current password"
-                placeholderTextColor={THEME.secondaryText}
+                placeholderTextColor={c.secondaryText}
                 secureTextEntry={!showCurrent}
               />
               <TouchableOpacity onPress={() => setShowCurrent((s) => !s)} style={styles.eyeBtn}>
-                <Ionicons name={showCurrent ? "eye-off-outline" : "eye-outline"} size={22} color={THEME.secondaryText} />
+                <Ionicons name={showCurrent ? "eye-off-outline" : "eye-outline"} size={22} color={c.secondaryText} />
               </TouchableOpacity>
             </View>
             <Text style={styles.inputLabel}>New Password</Text>
@@ -843,11 +854,11 @@ function ChangePasswordModal({ visible, onClose, onSuccess }: { visible: boolean
                 value={newPassword}
                 onChangeText={setNewPassword}
                 placeholder="At least 6 characters"
-                placeholderTextColor={THEME.secondaryText}
+                placeholderTextColor={c.secondaryText}
                 secureTextEntry={!showNew}
               />
               <TouchableOpacity onPress={() => setShowNew((s) => !s)} style={styles.eyeBtn}>
-                <Ionicons name={showNew ? "eye-off-outline" : "eye-outline"} size={22} color={THEME.secondaryText} />
+                <Ionicons name={showNew ? "eye-off-outline" : "eye-outline"} size={22} color={c.secondaryText} />
               </TouchableOpacity>
             </View>
             <Text style={styles.inputLabel}>Confirm New Password</Text>
@@ -857,15 +868,15 @@ function ChangePasswordModal({ visible, onClose, onSuccess }: { visible: boolean
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
                 placeholder="Confirm new password"
-                placeholderTextColor={THEME.secondaryText}
+                placeholderTextColor={c.secondaryText}
                 secureTextEntry={!showConfirm}
               />
               <TouchableOpacity onPress={() => setShowConfirm((s) => !s)} style={styles.eyeBtn}>
-                <Ionicons name={showConfirm ? "eye-off-outline" : "eye-outline"} size={22} color={THEME.secondaryText} />
+                <Ionicons name={showConfirm ? "eye-off-outline" : "eye-outline"} size={22} color={c.secondaryText} />
               </TouchableOpacity>
             </View>
             <TouchableOpacity style={[styles.submitBtn, loading && styles.submitBtnDisabled]} onPress={submit} disabled={loading}>
-              {loading ? <ActivityIndicator color={THEME.background} /> : <Text style={styles.submitBtnText}>Change Password</Text>}
+              {loading ? <ActivityIndicator color={c.primaryBackground} /> : <Text style={styles.submitBtnText}>Change Password</Text>}
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
@@ -874,8 +885,9 @@ function ChangePasswordModal({ visible, onClose, onSuccess }: { visible: boolean
   );
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: THEME.background },
+function createStyles(c: Colors) {
+  return StyleSheet.create({
+  safe: { flex: 1, backgroundColor: c.primaryBackground },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: theme.spacing.lg, paddingBottom: 100 },
   header: {
@@ -884,12 +896,12 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingVertical: theme.spacing.md,
   },
-  headerTitle: { fontSize: 28, fontWeight: "800", color: THEME.primaryText },
+  headerTitle: { fontSize: 28, fontWeight: "800", color: c.primaryText },
   settingsBtn: { padding: 4 },
   heroCard: {
-    backgroundColor: THEME.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: c.border,
     borderRadius: 20,
     padding: theme.spacing.lg,
     alignItems: "center",
@@ -897,8 +909,8 @@ const styles = StyleSheet.create({
   },
   avatarWrap: { position: "relative", marginBottom: theme.spacing.md },
   avatar: { width: 72, height: 72, borderRadius: 36 },
-  avatarPlaceholder: { backgroundColor: THEME.accent, justifyContent: "center", alignItems: "center" },
-  avatarInitials: { fontSize: 24, fontWeight: "700", color: THEME.background },
+  avatarPlaceholder: { backgroundColor: c.primaryAccent, justifyContent: "center", alignItems: "center" },
+  avatarInitials: { fontSize: 24, fontWeight: "700", color: c.primaryBackground },
   avatarOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.5)",
@@ -915,49 +927,49 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: THEME.accent,
+    backgroundColor: c.primaryAccent,
     justifyContent: "center",
     alignItems: "center",
   },
   nameRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  heroName: { fontSize: 20, fontWeight: "700", color: THEME.primaryText },
+  heroName: { fontSize: 20, fontWeight: "700", color: c.primaryText },
   verifiedBadge: {},
-  heroUsername: { fontSize: 14, color: THEME.secondaryText, marginTop: 2 },
-  heroEmail: { fontSize: 13, color: THEME.secondaryText, marginTop: 2 },
-  memberSince: { fontSize: 13, color: THEME.secondaryText, marginTop: 4 },
+  heroUsername: { fontSize: 14, color: c.secondaryText, marginTop: 2 },
+  heroEmail: { fontSize: 13, color: c.secondaryText, marginTop: 2 },
+  memberSince: { fontSize: 13, color: c.secondaryText, marginTop: 4 },
   statsCard: {
-    backgroundColor: THEME.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: c.border,
     borderRadius: 20,
     padding: theme.spacing.md,
     marginBottom: theme.spacing.lg,
   },
   statsRow: { flexDirection: "row" },
   statPill: { flex: 1, alignItems: "center", paddingVertical: 8 },
-  statPillBorder: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: THEME.border },
-  statValue: { fontSize: 18, fontWeight: "700", color: THEME.primaryText },
-  statLabel: { fontSize: 12, color: THEME.secondaryText, marginTop: 2 },
+  statPillBorder: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: c.border },
+  statValue: { fontSize: 18, fontWeight: "700", color: c.primaryText },
+  statLabel: { fontSize: 12, color: c.secondaryText, marginTop: 2 },
   section: { marginBottom: theme.spacing.lg },
   sectionLabel: {
     fontSize: 11,
     fontWeight: "600",
-    color: THEME.secondaryText,
+    color: c.secondaryText,
     textTransform: "uppercase",
     letterSpacing: 1.2,
     marginBottom: 10,
   },
   sectionHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
-  sectionTitle: { fontSize: 18, fontWeight: "700", color: THEME.primaryText },
-  addBankText: { color: THEME.accent, fontWeight: "700", fontSize: 16 },
-  emptyBank: { backgroundColor: THEME.surface, borderWidth: 1, borderColor: THEME.border, borderRadius: 20, padding: theme.spacing.xl, alignItems: "center" },
-  emptyBankText: { color: THEME.secondaryText, marginTop: 8, marginBottom: 12 },
-  addBankButton: { backgroundColor: THEME.accent, paddingVertical: 12, paddingHorizontal: 24, borderRadius: theme.borderRadius.button },
-  addBankButtonText: { color: THEME.background, fontWeight: "700" },
+  sectionTitle: { fontSize: 18, fontWeight: "700", color: c.primaryText },
+  addBankText: { color: c.primaryAccent, fontWeight: "700", fontSize: 16 },
+  emptyBank: { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 20, padding: theme.spacing.xl, alignItems: "center" },
+  emptyBankText: { color: c.secondaryText, marginTop: 8, marginBottom: 12 },
+  addBankButton: { backgroundColor: c.primaryAccent, paddingVertical: 12, paddingHorizontal: 24, borderRadius: theme.borderRadius.button },
+  addBankButtonText: { color: c.primaryBackground, fontWeight: "700" },
   bankCard: {
-    backgroundColor: THEME.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
-    borderColor: THEME.border,
+    borderColor: c.border,
     borderRadius: 20,
     padding: theme.spacing.md,
     marginBottom: 8,
@@ -966,23 +978,23 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   bankCardContent: { flex: 1 },
-  bankName: { fontSize: 16, fontWeight: "700", color: THEME.primaryText },
-  bankAccountNumber: { fontSize: 14, color: THEME.secondaryText, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginTop: 2 },
-  bankAccountName: { fontSize: 13, color: THEME.secondaryText, marginTop: 2 },
-  defaultBadge: { backgroundColor: THEME.accent, paddingHorizontal: 8, paddingVertical: 4, borderRadius: theme.borderRadius.badge },
-  defaultBadgeText: { fontSize: 11, fontWeight: "700", color: THEME.background },
-  menuCard: { backgroundColor: THEME.surface, borderWidth: 1, borderColor: THEME.border, borderRadius: 20, overflow: "hidden" },
+  bankName: { fontSize: 16, fontWeight: "700", color: c.primaryText },
+  bankAccountNumber: { fontSize: 14, color: c.secondaryText, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginTop: 2 },
+  bankAccountName: { fontSize: 13, color: c.secondaryText, marginTop: 2 },
+  defaultBadge: { backgroundColor: c.primaryAccent, paddingHorizontal: 8, paddingVertical: 4, borderRadius: theme.borderRadius.badge },
+  defaultBadgeText: { fontSize: 11, fontWeight: "700", color: c.primaryBackground },
+  menuCard: { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: 20, overflow: "hidden" },
   menuRow: {
     flexDirection: "row",
     alignItems: "center",
     height: 56,
     borderBottomWidth: 1,
-    borderColor: THEME.border,
+    borderColor: c.border,
     paddingHorizontal: theme.spacing.md,
     gap: 12,
   },
   menuRowLast: { borderBottomWidth: 0 },
-  menuLabel: { flex: 1, fontSize: 16, color: THEME.primaryText },
+  menuLabel: { flex: 1, fontSize: 16, color: c.primaryText },
   logoutRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -995,51 +1007,52 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,68,68,0.3)",
   },
-  logoutText: { fontSize: 16, fontWeight: "600", color: THEME.error },
-  modalSafe: { flex: 1, backgroundColor: THEME.background },
+  logoutText: { fontSize: 16, fontWeight: "600", color: c.error },
+  modalSafe: { flex: 1, backgroundColor: c.primaryBackground },
   modalKav: { flex: 1 },
-  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing.md, paddingVertical: 12, borderBottomWidth: 1, borderColor: THEME.border },
-  modalCloseText: { color: THEME.accent, fontSize: 16 },
-  modalTitle: { fontSize: 18, fontWeight: "700", color: THEME.primaryText },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing.md, paddingVertical: 12, borderBottomWidth: 1, borderColor: c.border },
+  modalCloseText: { color: c.primaryAccent, fontSize: 16 },
+  modalTitle: { fontSize: 18, fontWeight: "700", color: c.primaryText },
   modalHeaderRight: { width: 60 },
   modalScroll: { flex: 1 },
   modalScrollContent: { padding: theme.spacing.lg, paddingBottom: 40 },
-  modalError: { color: THEME.error, marginBottom: 12 },
-  inputLabel: { fontSize: 14, color: THEME.secondaryText, marginBottom: 6, marginTop: 12 },
-  input: { backgroundColor: THEME.surface, borderWidth: 1, borderColor: THEME.border, borderRadius: theme.borderRadius.input, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16, color: THEME.primaryText },
+  modalError: { color: c.error, marginBottom: 12 },
+  inputLabel: { fontSize: 14, color: c.secondaryText, marginBottom: 6, marginTop: 12 },
+  input: { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: theme.borderRadius.input, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16, color: c.primaryText },
   inputDisabled: { opacity: 0.7 },
   emailRow: { position: "relative" },
   emailInput: { paddingRight: 44 },
   emailLock: { position: "absolute", right: 14, top: 14 },
-  passwordWrap: { flexDirection: "row", alignItems: "center", backgroundColor: THEME.surface, borderWidth: 1, borderColor: THEME.border, borderRadius: theme.borderRadius.input, marginBottom: 4 },
-  inputFlex: { flex: 1, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16, color: THEME.primaryText },
+  passwordWrap: { flexDirection: "row", alignItems: "center", backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: theme.borderRadius.input, marginBottom: 4 },
+  inputFlex: { flex: 1, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16, color: c.primaryText },
   eyeBtn: { padding: 12 },
-  submitBtn: { backgroundColor: THEME.accent, borderRadius: theme.borderRadius.button, paddingVertical: 14, marginTop: 24, alignItems: "center", justifyContent: "center", minHeight: 48 },
+  submitBtn: { backgroundColor: c.primaryAccent, borderRadius: theme.borderRadius.button, paddingVertical: 14, marginTop: 24, alignItems: "center", justifyContent: "center", minHeight: 48 },
   submitBtnDisabled: { opacity: 0.7 },
-  submitBtnText: { fontSize: 16, fontWeight: "700", color: THEME.background },
-  bankSelectBtn: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: THEME.surface, borderWidth: 1, borderColor: THEME.border, borderRadius: theme.borderRadius.input, paddingHorizontal: 14, paddingVertical: 12 },
-  bankSelectText: { fontSize: 16, color: THEME.primaryText },
-  bankSelectPlaceholder: { fontSize: 16, color: THEME.secondaryText },
+  submitBtnText: { fontSize: 16, fontWeight: "700", color: c.primaryBackground },
+  bankSelectBtn: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, borderRadius: theme.borderRadius.input, paddingHorizontal: 14, paddingVertical: 12 },
+  bankSelectText: { fontSize: 16, color: c.primaryText },
+  bankSelectPlaceholder: { fontSize: 16, color: c.secondaryText },
   resolvedRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 10, paddingHorizontal: 4 },
-  resolvedLabel: { fontSize: 14, color: THEME.secondaryText },
-  resolvedName: { fontSize: 16, color: THEME.primaryText, fontWeight: "600", flex: 1 },
-  resolveError: { fontSize: 14, color: THEME.error, marginTop: 4 },
-  resolvedHint: { fontSize: 14, color: THEME.secondaryText, marginTop: 4 },
+  resolvedLabel: { fontSize: 14, color: c.secondaryText },
+  resolvedName: { fontSize: 16, color: c.primaryText, fontWeight: "600", flex: 1 },
+  resolveError: { fontSize: 14, color: c.error, marginTop: 4 },
+  resolvedHint: { fontSize: 14, color: c.secondaryText, marginTop: 4 },
   pickerBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  pickerBox: { backgroundColor: THEME.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%", paddingBottom: 40 },
-  pickerHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing.md, paddingVertical: 12, borderBottomWidth: 1, borderColor: THEME.border },
-  pickerTitle: { fontSize: 18, fontWeight: "700", color: THEME.primaryText },
-  pickerSearch: { margin: theme.spacing.md, backgroundColor: THEME.background, borderWidth: 1, borderColor: THEME.border, borderRadius: theme.borderRadius.input, paddingHorizontal: 14, paddingVertical: 10, fontSize: 16, color: THEME.primaryText },
+  pickerBox: { backgroundColor: c.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%", paddingBottom: 40 },
+  pickerHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing.md, paddingVertical: 12, borderBottomWidth: 1, borderColor: c.border },
+  pickerTitle: { fontSize: 18, fontWeight: "700", color: c.primaryText },
+  pickerSearch: { margin: theme.spacing.md, backgroundColor: c.primaryBackground, borderWidth: 1, borderColor: c.border, borderRadius: theme.borderRadius.input, paddingHorizontal: 14, paddingVertical: 10, fontSize: 16, color: c.primaryText },
   pickerList: { maxHeight: 400 },
-  pickerItem: { paddingVertical: 14, paddingHorizontal: theme.spacing.md, borderBottomWidth: 1, borderColor: THEME.border },
-  pickerItemText: { fontSize: 16, color: THEME.primaryText },
-  pickerEmpty: { padding: theme.spacing.lg, textAlign: "center", color: THEME.secondaryText },
+  pickerItem: { paddingVertical: 14, paddingHorizontal: theme.spacing.md, borderBottomWidth: 1, borderColor: c.border },
+  pickerItemText: { fontSize: 16, color: c.primaryText },
+  pickerEmpty: { padding: theme.spacing.lg, textAlign: "center", color: c.secondaryText },
   actionSheetBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  actionSheetBox: { backgroundColor: THEME.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: theme.spacing.md, paddingBottom: 40 },
+  actionSheetBox: { backgroundColor: c.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: theme.spacing.md, paddingBottom: 40 },
   actionSheetOption: { paddingVertical: 16, alignItems: "center" },
-  actionSheetOptionText: { fontSize: 16, color: THEME.primaryText },
+  actionSheetOptionText: { fontSize: 16, color: c.primaryText },
   actionSheetOptionDanger: {},
-  actionSheetOptionTextDanger: { fontSize: 16, color: THEME.error, fontWeight: "600" },
+  actionSheetOptionTextDanger: { fontSize: 16, color: c.error, fontWeight: "600" },
   actionSheetCancel: { paddingVertical: 16, alignItems: "center", marginTop: 8 },
-  actionSheetCancelText: { fontSize: 16, color: THEME.secondaryText },
-});
+  actionSheetCancelText: { fontSize: 16, color: c.secondaryText },
+  });
+}

@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,9 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, theme } from '@/constants/theme';
+import { theme } from '@/constants/theme';
+import { Colors } from '@/constants/colors';
+import { useColors } from '@/store/appStore';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -21,7 +23,7 @@ const SLIDES = [
   {
     id: 'hero',
     icon: 'flash' as const,
-    iconColor: colors.primaryAccent,
+    iconColor: c.primaryAccent,
     title: 'Got Crypto?\nGet Naira.',
     titleAccent: 'Get Naira.',
     subtitle: 'The smartest way to convert crypto to Naira.\nFast, simple, secure.',
@@ -71,7 +73,7 @@ const SLIDES = [
   },
 ];
 
-function Slide({ item }: { item: (typeof SLIDES)[number] }) {
+function Slide({ item, styles, c }: { item: (typeof SLIDES)[number]; styles: ReturnType<typeof createStyles>; c: Colors }) {
   return (
     <View style={[styles.slide, { width: SCREEN_WIDTH }]}>
       <View style={[styles.iconWrap, { borderColor: item.iconColor + '40' }]}>
@@ -121,6 +123,8 @@ function Slide({ item }: { item: (typeof SLIDES)[number] }) {
 
 export default function WelcomeScreen() {
   const router = useRouter();
+  const c = useColors();
+  const styles = useMemo(() => createStyles(c), [c]);
   const flatListRef = useRef<FlatList>(null);
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -159,7 +163,7 @@ export default function WelcomeScreen() {
           showsHorizontalScrollIndicator={false}
           onScroll={onScroll}
           scrollEventThrottle={16}
-          renderItem={({ item }) => <Slide item={item} />}
+          renderItem={({ item }) => <Slide item={item} styles={styles} c={c} />}
           getItemLayout={(_, index) => ({
             length: SCREEN_WIDTH,
             offset: SCREEN_WIDTH * index,
@@ -189,7 +193,7 @@ export default function WelcomeScreen() {
             <Ionicons
               name={isLast ? 'arrow-forward' : 'chevron-forward'}
               size={20}
-              color={colors.buttonTextOnAccent}
+              color={c.buttonTextOnAccent}
               style={styles.buttonArrow}
             />
           </TouchableOpacity>
@@ -209,10 +213,11 @@ export default function WelcomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+function createStyles(c: Colors) {
+  return StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: colors.primaryBackground,
+    backgroundColor: c.primaryBackground,
   },
   container: {
     flex: 1,
@@ -226,7 +231,7 @@ const styles = StyleSheet.create({
   skipText: {
     fontSize: 14,
     fontWeight: '600',
-    color: colors.secondaryText,
+    color: c.secondaryText,
   },
   slide: {
     paddingHorizontal: theme.spacing.lg,
@@ -237,7 +242,7 @@ const styles = StyleSheet.create({
     width: 96,
     height: 96,
     borderRadius: 24,
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
@@ -249,7 +254,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 40,
     letterSpacing: -0.5,
-    color: colors.primaryText,
+    color: c.primaryText,
     marginBottom: theme.spacing.md,
     maxWidth: 300,
   },
@@ -258,7 +263,7 @@ const styles = StyleSheet.create({
   },
   slideSubtitle: {
     fontSize: 15,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     textAlign: 'center',
     lineHeight: 22,
     maxWidth: 300,
@@ -271,10 +276,10 @@ const styles = StyleSheet.create({
   stepRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    backgroundColor: colors.surface,
+    backgroundColor: c.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: c.border,
     padding: 14,
     gap: 14,
   },
@@ -297,12 +302,12 @@ const styles = StyleSheet.create({
   stepTitle: {
     fontSize: 14,
     fontWeight: '700',
-    color: colors.primaryText,
+    color: c.primaryText,
     marginBottom: 4,
   },
   stepDesc: {
     fontSize: 13,
-    color: colors.secondaryText,
+    color: c.secondaryText,
     lineHeight: 18,
   },
   bulletsBlock: {
@@ -324,7 +329,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 15,
     fontWeight: '500',
-    color: colors.primaryText,
+    color: c.primaryText,
     lineHeight: 22,
   },
   footer: {
@@ -342,14 +347,14 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: colors.border,
+    backgroundColor: c.border,
   },
   dotActive: {
     width: 20,
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
   },
   primaryButton: {
-    backgroundColor: colors.primaryAccent,
+    backgroundColor: c.primaryAccent,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -360,7 +365,7 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     fontSize: 17,
     fontWeight: '700',
-    color: colors.buttonTextOnAccent,
+    color: c.buttonTextOnAccent,
     letterSpacing: 0.3,
   },
   buttonArrow: {
@@ -374,7 +379,7 @@ const styles = StyleSheet.create({
   },
   loginPrompt: {
     fontSize: 15,
-    color: colors.secondaryText,
+    color: c.secondaryText,
   },
   loginLinkWrap: {
     paddingVertical: theme.spacing.xs,
@@ -383,9 +388,10 @@ const styles = StyleSheet.create({
   loginLink: {
     fontSize: 15,
     fontWeight: '600',
-    color: colors.primaryAccent,
+    color: c.primaryAccent,
   },
   loginPressed: {
     opacity: 0.8,
   },
-});
+  });
+}
