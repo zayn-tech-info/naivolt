@@ -1,7 +1,9 @@
 import { View, Text, Pressable, StyleSheet, Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { BlurView } from "expo-blur";
 import { useColors } from "@/store/appStore";
+import { useAppStore } from "@/store/appStore";
 import { useConvertGuard } from "@/hooks/useConvertGuard";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 
@@ -18,6 +20,7 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
   const c = useColors();
   const insets = useSafeAreaInsets();
   const { hasBankDetails, isLoading: convertLoading } = useConvertGuard();
+  const mode = useAppStore((s) => s.mode);
 
   const handlePress = (routeName: string, routeKey: string, isFocused: boolean) => {
     if (routeName === "convert") {
@@ -43,7 +46,11 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
 
   return (
     <View style={[styles.wrapper, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-      <View style={[styles.pill, { backgroundColor: c.surface }]}>
+      <BlurView
+        intensity={80}
+        tint={mode === "dark" ? "dark" : "light"}
+        style={styles.pill}
+      >
         {state.routes.map((route, index) => {
           const isFocused = state.index === index;
           const config = TAB_CONFIG[route.name];
@@ -71,7 +78,7 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
             </Pressable>
           );
         })}
-      </View>
+      </BlurView>
     </View>
   );
 }
@@ -90,13 +97,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     borderRadius: 999,
+    overflow: "hidden",
     paddingVertical: 6,
     paddingHorizontal: 6,
     ...Platform.select({
       ios: {
         shadowColor: "#000",
         shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 0.15,
+        shadowOpacity: 0.18,
         shadowRadius: 16,
       },
       android: { elevation: 10 },
