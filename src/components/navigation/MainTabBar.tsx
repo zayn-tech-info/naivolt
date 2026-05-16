@@ -42,9 +42,7 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
   };
 
   return (
-    // outer wrapper — screen background, holds safe-area padding
-    <View style={[styles.wrapper, { backgroundColor: c.primaryBackground, paddingBottom: Math.max(insets.bottom, 8) }]}>
-      {/* floating pill */}
+    <View style={[styles.wrapper, { paddingBottom: Math.max(insets.bottom, 12) }]}>
       <View style={[styles.pill, { backgroundColor: c.surface }]}>
         {state.routes.map((route, index) => {
           const isFocused = state.index === index;
@@ -58,11 +56,10 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
               style={styles.tabWrap}
               android_ripple={{ color: "transparent" }}
             >
-              {/* active = accent chip that looks cut out of the pill */}
               <View style={[styles.chip, isFocused && { backgroundColor: c.primaryAccent }]}>
                 <Ionicons
                   name={isFocused ? config.iconFocused : config.icon}
-                  size={20}
+                  size={22}
                   color={isFocused ? "#fff" : c.secondaryText}
                 />
                 {isFocused && (
@@ -81,23 +78,28 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
 
 const styles = StyleSheet.create({
   wrapper: {
-    paddingHorizontal: 20,
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 24,
     paddingTop: 8,
+    backgroundColor: "transparent",
   },
   pill: {
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: 50,
-    paddingVertical: 5,
-    paddingHorizontal: 5,
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: 6,
     ...Platform.select({
       ios: {
         shadowColor: "#000",
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.10,
-        shadowRadius: 12,
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.15,
+        shadowRadius: 16,
       },
-      android: { elevation: 6 },
+      android: { elevation: 10 },
     }),
   },
   tabWrap: {
@@ -109,13 +111,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
-    paddingVertical: 9,
-    paddingHorizontal: 14,
-    borderRadius: 50,
+    gap: 7,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    borderRadius: 999,
   },
   chipLabel: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "700",
     color: "#fff",
     letterSpacing: 0.1,
