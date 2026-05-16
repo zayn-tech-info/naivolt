@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 export default function MainTabsLayout() {
   const insets = useSafeAreaInsets();
   // Extra padding so content clears the floating pill (pill ~56px + inset + 8px gap)
-  const tabBarHeight = 56 + Math.max(insets.bottom, 12) + 8;
+  const tabBarHeight = 66 + Math.max(insets.bottom, 12) + 10;
 
   return (
     <Tabs

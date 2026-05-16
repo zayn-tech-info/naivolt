@@ -47,8 +47,8 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
   return (
     <View style={[styles.wrapper, { paddingBottom: Math.max(insets.bottom, 12) }]}>
       <BlurView
-        intensity={80}
-        tint={mode === "dark" ? "dark" : "light"}
+        intensity={100}
+        tint={mode === "dark" ? "systemChromeMaterialDark" : "systemChromeMaterial"}
         style={styles.pill}
       >
         {state.routes.map((route, index) => {
@@ -89,8 +89,8 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    paddingHorizontal: 24,
-    paddingTop: 8,
+    paddingHorizontal: 20,
+    paddingTop: 10,
     backgroundColor: "transparent",
   },
   pill: {
@@ -98,16 +98,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     borderRadius: 999,
     overflow: "hidden",
-    paddingVertical: 6,
-    paddingHorizontal: 6,
+    paddingVertical: 7,
+    paddingHorizontal: 7,
     ...Platform.select({
       ios: {
         shadowColor: "#000",
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 0.18,
-        shadowRadius: 16,
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.2,
+        shadowRadius: 20,
       },
-      android: { elevation: 10 },
+      android: { elevation: 12 },
     }),
   },
   tabWrap: {
@@ -119,9 +119,9 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 7,
-    paddingVertical: 11,
-    paddingHorizontal: 16,
+    gap: 8,
+    paddingVertical: 13,
+    paddingHorizontal: 18,
     borderRadius: 999,
   },
   chipLabel: {
