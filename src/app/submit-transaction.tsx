@@ -52,6 +52,7 @@ export default function SubmitTransactionScreen() {
   const [submitError, setSubmitError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [submittedTxId, setSubmittedTxId] = useState<string | null>(null);
 
   const coinSymbol = (coin || "USDT").toUpperCase();
   const coinId = coinSymbol.toLowerCase();
@@ -152,6 +153,12 @@ export default function SubmitTransactionScreen() {
 
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const body = JSON.parse(xhr.responseText);
+              const txId: string | undefined =
+                body?.data?._id ?? body?.data?.id ?? body?._id ?? body?.id;
+              if (txId) setSubmittedTxId(txId);
+            } catch {}
             resolve();
           } else {
             let message = "Failed to submit. Please try again.";
@@ -191,7 +198,11 @@ export default function SubmitTransactionScreen() {
 
   const closeSuccessAndGoToHistory = () => {
     setShowSuccessModal(false);
-    router.replace("/(tabs)/(main)/history");
+    if (submittedTxId) {
+      router.replace(`/(tabs)/transaction/${submittedTxId}`);
+    } else {
+      router.replace("/(tabs)/(main)/history");
+    }
   };
 
   return (
@@ -404,7 +415,9 @@ export default function SubmitTransactionScreen() {
               onPress={closeSuccessAndGoToHistory}
               activeOpacity={0.9}
             >
-              <Text style={styles.modalBtnText}>View Transaction</Text>
+              <Text style={styles.modalBtnText}>
+                {submittedTxId ? "View Transaction" : "View History"}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>

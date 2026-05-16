@@ -5,7 +5,7 @@ import { useHasBankDetails } from "./useHasBankDetails";
 
 const BANK_DETAILS_ALERT_TITLE = "Bank details required";
 const BANK_DETAILS_ALERT_MESSAGE =
-  "You need to set your bank details first before you can convert. Add a bank account in Profile to receive Naira payments.";
+  "You need to add a bank account before you can convert. We'll send your Naira payments there.";
 
 export function useConvertGuard() {
   const router = useRouter();
@@ -15,10 +15,10 @@ export function useConvertGuard() {
     if (isLoading) return;
     if (!hasBankDetails) {
       Alert.alert(BANK_DETAILS_ALERT_TITLE, BANK_DETAILS_ALERT_MESSAGE, [
-        { text: "OK", style: "cancel" },
+        { text: "Not now", style: "cancel" },
         {
-          text: "Go to Profile",
-          onPress: () => router.replace("/(tabs)/(main)/profile"),
+          text: "Add bank account",
+          onPress: () => router.push("/bank-details"),
         },
       ]);
       return;
