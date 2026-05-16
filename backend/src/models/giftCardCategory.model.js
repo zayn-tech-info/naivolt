@@ -15,6 +15,7 @@ const giftCardCategorySchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true, unique: true },  // "Amazon"
     slug: { type: String, required: true, trim: true, unique: true, lowercase: true }, // "amazon"
     emoji: { type: String, trim: true, default: '🎁' },
+    imageUrl: { type: String, trim: true, default: null },
     isActive: { type: Boolean, default: true },
     countries: { type: [countryRateSchema], default: [] },
   },

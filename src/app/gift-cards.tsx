@@ -36,7 +36,63 @@ interface GiftCardCategory {
   name: string;
   slug: string;
   emoji: string;
+  imageUrl?: string | null;
   countries: CountryRate[];
+}
+
+// Map known gift card brand slugs → logo image URLs
+const BRAND_IMAGE: Record<string, string> = {
+  amazon:       "https://logo.clearbit.com/amazon.com",
+  "amazon-gift-card": "https://logo.clearbit.com/amazon.com",
+  apple:        "https://logo.clearbit.com/apple.com",
+  itunes:       "https://logo.clearbit.com/apple.com",
+  "apple-itunes": "https://logo.clearbit.com/apple.com",
+  "google-play": "https://logo.clearbit.com/play.google.com",
+  google:       "https://logo.clearbit.com/google.com",
+  steam:        "https://logo.clearbit.com/steampowered.com",
+  netflix:      "https://logo.clearbit.com/netflix.com",
+  spotify:      "https://logo.clearbit.com/spotify.com",
+  playstation:  "https://logo.clearbit.com/playstation.com",
+  "playstation-network": "https://logo.clearbit.com/playstation.com",
+  xbox:         "https://logo.clearbit.com/xbox.com",
+  "xbox-live":  "https://logo.clearbit.com/xbox.com",
+  nintendo:     "https://logo.clearbit.com/nintendo.com",
+  ebay:         "https://logo.clearbit.com/ebay.com",
+  walmart:      "https://logo.clearbit.com/walmart.com",
+  target:       "https://logo.clearbit.com/target.com",
+  visa:         "https://logo.clearbit.com/visa.com",
+  mastercard:   "https://logo.clearbit.com/mastercard.com",
+  vanilla:      "https://logo.clearbit.com/vanillagift.com",
+};
+
+const BRAND_COLOR: Record<string, string> = {
+  amazon: "#FF9900",
+  apple: "#1C1C1E",
+  itunes: "#FC3C44",
+  "google-play": "#34A853",
+  google: "#4285F4",
+  steam: "#1B2838",
+  netflix: "#E50914",
+  spotify: "#1DB954",
+  playstation: "#003791",
+  xbox: "#107C10",
+  nintendo: "#E4000F",
+  ebay: "#E53238",
+  walmart: "#0071CE",
+  visa: "#1A1F71",
+  mastercard: "#EB001B",
+};
+
+function getBrandImage(cat: GiftCardCategory): string | null {
+  if (cat.imageUrl) return cat.imageUrl;
+  const slug = cat.slug?.toLowerCase() ?? "";
+  const name = cat.name?.toLowerCase() ?? "";
+  return BRAND_IMAGE[slug] ?? BRAND_IMAGE[name] ?? null;
+}
+
+function getBrandColor(cat: GiftCardCategory): string {
+  const slug = cat.slug?.toLowerCase() ?? "";
+  return BRAND_COLOR[slug] ?? "#6366F1";
 }
 
 interface CategoriesResponse {
@@ -204,25 +260,37 @@ export default function GiftCardsScreen() {
               <>
                 <Text style={styles.sectionLabel}>Available cards</Text>
                 <View style={styles.grid}>
-                  {categories.map((cat) => (
-                    <TouchableOpacity
-                      key={cat._id}
-                      style={styles.categoryCard}
-                      onPress={() => handleSelectCategory(cat)}
-                      activeOpacity={0.82}
-                    >
-                      <Text style={styles.categoryEmoji}>{cat.emoji}</Text>
-                      <Text style={styles.categoryName}>{cat.name}</Text>
-                      <Text style={styles.categoryCountries}>
-                        {cat.countries.length} {cat.countries.length === 1 ? 'country' : 'countries'}
-                      </Text>
-                      <View style={styles.categoryRateRow}>
-                        <Text style={styles.categoryRate}>
-                          Up to ₦{Math.max(...cat.countries.map((c) => c.ratePerUnit)).toLocaleString()}/unit
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  ))}
+                  {categories.map((cat) => {
+                    const brandImg = getBrandImage(cat);
+                    const brandColor = getBrandColor(cat);
+                    return (
+                      <TouchableOpacity
+                        key={cat._id}
+                        style={styles.categoryCard}
+                        onPress={() => handleSelectCategory(cat)}
+                        activeOpacity={0.82}
+                      >
+                        {/* Card image area */}
+                        <View style={[styles.cardImageWrap, { backgroundColor: brandColor }]}>
+                          {brandImg ? (
+                            <Image
+                              source={{ uri: brandImg }}
+                              style={styles.cardBrandLogo}
+                              resizeMode="contain"
+                            />
+                          ) : (
+                            <Text style={styles.cardEmojiFallback}>{cat.emoji}</Text>
+                          )}
+                        </View>
+                        <View style={styles.cardBody}>
+                          <Text style={styles.categoryName} numberOfLines={1}>{cat.name}</Text>
+                          <Text style={styles.categoryRate}>
+                            ₦{Math.max(...cat.countries.map((c) => c.ratePerUnit)).toLocaleString()}/unit
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
               </>
             )}
@@ -463,12 +531,25 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 16,
+    overflow: 'hidden',
   },
-  categoryEmoji: { fontSize: 32, marginBottom: 10 },
-  categoryName: { fontSize: 15, fontWeight: '700', color: colors.primaryText, marginBottom: 4 },
-  categoryCountries: { fontSize: 12, color: colors.secondaryText, marginBottom: 8 },
-  categoryRateRow: {},
+  cardImageWrap: {
+    width: '100%',
+    height: 90,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardBrandLogo: {
+    width: '70%',
+    height: '70%',
+  },
+  cardEmojiFallback: {
+    fontSize: 36,
+  },
+  cardBody: {
+    padding: 12,
+  },
+  categoryName: { fontSize: 13, fontWeight: '700', color: colors.primaryText, marginBottom: 3 },
   categoryRate: { fontSize: 12, fontWeight: '600', color: colors.primaryAccent },
   // Detail form
   card: {
