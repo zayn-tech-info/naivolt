@@ -1,19 +1,17 @@
-import { View, Text, Pressable, StyleSheet } from "react-native";
+import { View, Text, Pressable, StyleSheet, Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useColors } from "@/store/appStore";
 import { useConvertGuard } from "@/hooks/useConvertGuard";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 
-const ICON_SIZE = 24;
-
 type IoniconName = React.ComponentProps<typeof Ionicons>["name"];
 
 const TAB_CONFIG: Record<string, { icon: IoniconName; iconFocused: IoniconName; label: string }> = {
-  index:   { icon: "home-outline",            iconFocused: "home",            label: "Home"    },
-  convert: { icon: "swap-horizontal-outline",  iconFocused: "swap-horizontal",  label: "Convert" },
-  history: { icon: "receipt-outline",          iconFocused: "receipt",          label: "History" },
-  profile: { icon: "person-circle-outline",    iconFocused: "person-circle",    label: "Profile" },
+  index:   { icon: "home-outline",           iconFocused: "home",           label: "Home"    },
+  convert: { icon: "swap-horizontal-outline", iconFocused: "swap-horizontal", label: "Convert" },
+  history: { icon: "receipt-outline",         iconFocused: "receipt",         label: "History" },
+  profile: { icon: "person-circle-outline",   iconFocused: "person-circle",   label: "Profile" },
 };
 
 export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
@@ -44,60 +42,82 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
   };
 
   return (
-    <View style={[styles.bar, { paddingBottom: Math.max(insets.bottom, 10), borderTopColor: c.border, backgroundColor: c.surface }]}>
-      {state.routes.map((route, index) => {
-        const isFocused = state.index === index;
-        const config = TAB_CONFIG[route.name];
-        if (!config) return null;
+    // outer wrapper — screen background, holds safe-area padding
+    <View style={[styles.wrapper, { backgroundColor: c.primaryBackground, paddingBottom: Math.max(insets.bottom, 8) }]}>
+      {/* floating pill */}
+      <View style={[styles.pill, { backgroundColor: c.surface }]}>
+        {state.routes.map((route, index) => {
+          const isFocused = state.index === index;
+          const config = TAB_CONFIG[route.name];
+          if (!config) return null;
 
-        return (
-          <Pressable
-            key={route.key}
-            onPress={() => handlePress(route.name, route.key, isFocused)}
-            style={styles.tab}
-            android_ripple={{ color: c.accentDim, borderless: true, radius: 32 }}
-          >
-            {isFocused && <View style={[styles.dot, { backgroundColor: c.primaryAccent }]} />}
-            <Ionicons
-              name={isFocused ? config.iconFocused : config.icon}
-              size={ICON_SIZE}
-              color={isFocused ? c.primaryAccent : c.secondaryText}
-            />
-            <Text
-              style={[styles.label, { color: isFocused ? c.primaryAccent : c.secondaryText }]}
-              numberOfLines={1}
+          return (
+            <Pressable
+              key={route.key}
+              onPress={() => handlePress(route.name, route.key, isFocused)}
+              style={styles.tabWrap}
+              android_ripple={{ color: "transparent" }}
             >
-              {config.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+              {/* active = accent chip that looks cut out of the pill */}
+              <View style={[styles.chip, isFocused && { backgroundColor: c.primaryAccent }]}>
+                <Ionicons
+                  name={isFocused ? config.iconFocused : config.icon}
+                  size={20}
+                  color={isFocused ? "#fff" : c.secondaryText}
+                />
+                {isFocused && (
+                  <Text style={styles.chipLabel} numberOfLines={1}>
+                    {config.label}
+                  </Text>
+                )}
+              </View>
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  bar: {
-    flexDirection: "row",
-    borderTopWidth: StyleSheet.hairlineWidth,
+  wrapper: {
+    paddingHorizontal: 20,
     paddingTop: 8,
   },
-  tab: {
+  pill: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 50,
+    paddingVertical: 5,
+    paddingHorizontal: 5,
+    ...Platform.select({
+      ios: {
+        shadowColor: "#000",
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.10,
+        shadowRadius: 12,
+      },
+      android: { elevation: 6 },
+    }),
+  },
+  tabWrap: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingTop: 4,
-    gap: 3,
   },
-  dot: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    marginBottom: 1,
+  chip: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderRadius: 50,
   },
-  label: {
-    fontSize: 10,
-    fontWeight: "600",
+  chipLabel: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#fff",
     letterSpacing: 0.1,
   },
 });
