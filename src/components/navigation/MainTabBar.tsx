@@ -45,12 +45,14 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
   };
 
   return (
-    <View style={[styles.wrapper, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-      <BlurView
-        intensity={100}
-        tint={mode === "dark" ? "systemChromeMaterialDark" : "systemChromeMaterial"}
-        style={styles.pill}
-      >
+    // BlurView covers the entire bottom strip — replaces the old black bg
+    <BlurView
+      intensity={90}
+      tint={mode === "dark" ? "systemChromeMaterialDark" : "systemChromeMaterial"}
+      style={[styles.blurWrapper, { paddingBottom: Math.max(insets.bottom, 12) }]}
+    >
+      {/* Pill sits on top of the blur */}
+      <View style={[styles.pill, { backgroundColor: mode === "dark" ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)" }]}>
         {state.routes.map((route, index) => {
           const isFocused = state.index === index;
           const config = TAB_CONFIG[route.name];
@@ -78,37 +80,26 @@ export function MainTabBar({ state, descriptors, navigation }: BottomTabBarProps
             </Pressable>
           );
         })}
-      </BlurView>
-    </View>
+      </View>
+    </BlurView>
   );
 }
 
 const styles = StyleSheet.create({
-  wrapper: {
+  blurWrapper: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
     paddingHorizontal: 20,
     paddingTop: 10,
-    backgroundColor: "transparent",
   },
   pill: {
     flexDirection: "row",
     alignItems: "center",
     borderRadius: 999,
-    overflow: "hidden",
     paddingVertical: 7,
     paddingHorizontal: 7,
-    ...Platform.select({
-      ios: {
-        shadowColor: "#000",
-        shadowOffset: { width: 0, height: 8 },
-        shadowOpacity: 0.2,
-        shadowRadius: 20,
-      },
-      android: { elevation: 12 },
-    }),
   },
   tabWrap: {
     flex: 1,
