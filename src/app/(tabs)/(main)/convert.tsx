@@ -119,6 +119,11 @@ export default function ConvertScreen() {
   const rate = rateData?.rate ?? DEFAULT_PLACEHOLDER_RATE;
   const rateFormatted = rate > 0 ? formatCurrency(rate, 'NGN', true) : '—';
 
+  const [rateUpdatedAt, setRateUpdatedAt] = useState<Date | null>(null);
+  useEffect(() => {
+    if (rateData) setRateUpdatedAt(new Date());
+  }, [rateData]);
+
   const cryptoAmount = useMemo(() => {
     const n = parseFloat(cryptoInput.replace(/,/g, '')) || 0;
     return Number.isFinite(n) ? n : 0;
@@ -222,6 +227,11 @@ export default function ConvertScreen() {
               </View>
             )}
           </View>
+          {!rateLoading && !rateError && rateUpdatedAt && (
+            <Text style={styles.rateUpdated}>
+              Updated {formatTimeSince(rateUpdatedAt)}
+            </Text>
+          )}
           {rateLoading ? (
             <ActivityIndicator size="small" color={c.primaryAccent} style={styles.rateLoader} />
           ) : rateError ? (
@@ -378,6 +388,15 @@ export default function ConvertScreen() {
       </ScrollView>
     </SafeAreaView>
   );
+}
+
+function formatTimeSince(date: Date | null): string {
+  if (!date) return '';
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 10) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ago`;
 }
 
 function createStyles(c: Colors) {
@@ -550,6 +569,12 @@ function createStyles(c: Colors) {
       fontWeight: '800',
       color: c.primaryAccent,
       letterSpacing: -0.3,
+    },
+    rateUpdated: {
+      fontSize: 10,
+      color: c.tertiaryText,
+      marginBottom: 8,
+      letterSpacing: 0.3,
     },
     rateLoader: {
       marginVertical: 8,

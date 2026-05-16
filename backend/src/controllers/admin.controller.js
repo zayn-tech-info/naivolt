@@ -3,6 +3,7 @@ const User = require("../models/user.model");
 const BankAccount = require("../models/bankAccount.model");
 const { successResponse, errorResponse } = require("../utils/apiResponse");
 const { createTransferRecipient, initiateTransfer } = require("../services/paystack.service");
+const { sendPushNotification } = require('../services/notifications.service');
 
 const userPopulate = { path: "user", select: "name username email phone" };
 
@@ -156,6 +157,18 @@ exports.approveTransaction = async (req, res, next) => {
       .populate(userPopulate)
       .lean();
 
+    // Notify user
+    try {
+      const notifyUser = await User.findById(transaction.user._id).select('pushToken');
+      if (notifyUser?.pushToken) {
+        await sendPushNotification(notifyUser.pushToken, {
+          title: '💸 Payment Processing',
+          body: `Your ${transaction.amountCrypto} ${transaction.coin} conversion is being processed. Expect ₦${Number(transaction.amountNaira || 0).toLocaleString()} in your account shortly.`,
+          data: { transactionId: id, type: 'transaction_update', status: 'processing' },
+        });
+      }
+    } catch {}
+
     return successResponse(res, 200, "Payout initiated — transaction is processing", {
       data: updated,
     });
@@ -195,6 +208,18 @@ exports.rejectTransaction = async (req, res, next) => {
     )
       .populate(userPopulate)
       .lean();
+
+    // Notify user
+    try {
+      const notifyUser = await User.findById(transaction.user._id).select('pushToken');
+      if (notifyUser?.pushToken) {
+        await sendPushNotification(notifyUser.pushToken, {
+          title: '❌ Transaction Not Approved',
+          body: `Your transaction was not approved. Reason: ${String(adminNote).trim()}`,
+          data: { transactionId: id, type: 'transaction_update', status: 'rejected' },
+        });
+      }
+    } catch {}
 
     return successResponse(res, 200, "Transaction rejected", {
       data: updated,

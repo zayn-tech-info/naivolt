@@ -162,3 +162,14 @@ exports.deleteAccount = async (req, res) => {
     return errorResponse(res, 500, err.message || 'Failed to deactivate account');
   }
 };
+
+exports.savePushToken = async (req, res, next) => {
+  try {
+    const { pushToken } = req.body;
+    if (!pushToken) return errorResponse(res, 400, 'pushToken is required');
+    await User.findByIdAndUpdate(req.user._id, { pushToken });
+    return successResponse(res, 200, 'Push token saved');
+  } catch (err) {
+    next(err);
+  }
+};

@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const Transaction = require('../models/transaction.model');
 const { verifyWebhookSignature } = require('../services/paystack.service');
+const User = require('../models/user.model');
+const { sendPushNotification } = require('../services/notifications.service');
 
 // Paystack sends raw JSON body — must be parsed before this point as raw buffer
 router.post('/paystack', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -41,6 +43,26 @@ router.post('/paystack', express.raw({ type: 'application/json' }), async (req, 
     }
 
     await transaction.save();
+
+    // Notify user of final status
+    try {
+      const txUser = await User.findById(transaction.user).select('pushToken');
+      if (txUser?.pushToken) {
+        if (eventType === 'transfer.success') {
+          await sendPushNotification(txUser.pushToken, {
+            title: '✅ Payment Sent!',
+            body: `₦${Number(transaction.amountNaira || 0).toLocaleString()} has been sent to your bank account.`,
+            data: { transactionId: transaction._id.toString(), type: 'transaction_update', status: 'paid' },
+          });
+        } else {
+          await sendPushNotification(txUser.pushToken, {
+            title: '⚠️ Payout Failed',
+            body: `Your payout could not be processed: ${data?.gateway_response || 'Please contact support.'}`,
+            data: { transactionId: transaction._id.toString(), type: 'transaction_update', status: 'rejected' },
+          });
+        }
+      }
+    } catch {}
   } catch (err) {
     console.error('Webhook handler error:', err.message);
   }

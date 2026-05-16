@@ -246,6 +246,12 @@ export default function LoginScreen() {
               )}
             />
 
+            <View style={styles.forgotRow}>
+              <Pressable onPress={() => router.push('/forgot-password')} hitSlop={12}>
+                <Text style={styles.forgotLink}>Forgot password?</Text>
+              </Pressable>
+            </View>
+
             {apiError ? (
               <Text style={styles.apiError}>{apiError}</Text>
             ) : null}
@@ -407,6 +413,16 @@ function createStyles(c: Colors) {
     signupLink: {
       fontSize: 17,
       fontWeight: "700",
+      color: c.primaryAccent,
+    },
+    forgotRow: {
+      alignItems: "flex-end",
+      marginTop: theme.spacing.xs,
+      marginBottom: theme.spacing.sm,
+    },
+    forgotLink: {
+      fontSize: 13,
+      fontWeight: "600",
       color: c.primaryAccent,
     },
   });

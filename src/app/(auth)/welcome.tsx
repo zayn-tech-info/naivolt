@@ -1,4 +1,5 @@
-import { useRef, useState, useCallback, useMemo } from 'react';
+import { useRef, useState, useCallback, useMemo, useEffect } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View,
   Text,
@@ -132,6 +133,12 @@ export default function WelcomeScreen() {
   const flatListRef = useRef<FlatList>(null);
   const [activeIndex, setActiveIndex] = useState(0);
 
+  useEffect(() => {
+    AsyncStorage.getItem('naivolt_onboarding_done').then((done) => {
+      if (done === 'yes') router.replace('/login');
+    });
+  }, []);
+
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
     setActiveIndex(index);
@@ -141,6 +148,7 @@ export default function WelcomeScreen() {
     if (activeIndex < slides.length - 1) {
       flatListRef.current?.scrollToIndex({ index: activeIndex + 1, animated: true });
     } else {
+      AsyncStorage.setItem('naivolt_onboarding_done', 'yes');
       router.push('/register');
     }
   }, [activeIndex, router]);
@@ -152,7 +160,13 @@ export default function WelcomeScreen() {
       <View style={styles.container}>
         {/* Skip */}
         <View style={styles.topBar}>
-          <Pressable onPress={() => router.push('/register')} hitSlop={12}>
+          <Pressable
+            onPress={() => {
+              AsyncStorage.setItem('naivolt_onboarding_done', 'yes');
+              router.push('/register');
+            }}
+            hitSlop={12}
+          >
             <Text style={styles.skipText}>Skip</Text>
           </Pressable>
         </View>

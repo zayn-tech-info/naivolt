@@ -12,7 +12,22 @@ const depositAddressRoutes = require("./src/routes/depositAddress.routes");
 const giftCardRoutes = require("./src/routes/giftCard.routes");
 
 const app = express();
-app.use(cors());
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : [];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 
 // Webhook must be registered before express.json() — needs raw body for signature verification
 app.use("/api/v1/webhooks", webhookRoutes);
