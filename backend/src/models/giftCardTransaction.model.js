@@ -23,6 +23,9 @@ const giftCardTransactionSchema = new mongoose.Schema(
     paidAt: { type: Date },
     paystackRecipientCode: { type: String, trim: true },
     paystackTransferCode: { type: String, trim: true },
+    prestmitReference: { type: String, trim: true, default: null },
+    prestmitGiftcardId: { type: Number, default: null },
+    prestmitStatus: { type: String, enum: ['PENDING', 'COMPLETED', 'REJECTED', null], default: null },
   },
   { timestamps: true, versionKey: false }
 );

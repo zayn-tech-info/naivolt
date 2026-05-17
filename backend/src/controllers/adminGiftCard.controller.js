@@ -3,6 +3,7 @@ const GiftCardTransaction = require('../models/giftCardTransaction.model');
 const BankAccount = require('../models/bankAccount.model');
 const { successResponse, errorResponse } = require('../utils/apiResponse');
 const { createTransferRecipient, initiateTransfer } = require('../services/paystack.service');
+const { submitSellTransaction } = require('../services/prestmit.service');
 
 const userPopulate = { path: 'user', select: 'name username email phone' };
 
@@ -109,6 +110,44 @@ exports.approveGiftCardTransaction = async (req, res, next) => {
       return errorResponse(res, 400, 'Only pending or processing transactions can be approved');
     }
 
+    const update = { status: 'processing' };
+    if (adminNote?.trim()) update.adminNote = adminNote.trim();
+
+    // If Prestmit is configured and we have a giftcard ID, submit to Prestmit
+    // Paystack payout will be triggered automatically via Prestmit webhook
+    const prestmitConfigured = process.env.PRESTMIT_API_KEY && process.env.PRESTMIT_API_SECRET;
+    const prestmitGiftcardId = transaction.prestmitGiftcardId;
+
+    if (prestmitConfigured && prestmitGiftcardId) {
+      // Not already submitted to Prestmit
+      if (!transaction.prestmitReference) {
+        try {
+          const result = await submitSellTransaction({
+            giftcardId: prestmitGiftcardId,
+            amount: transaction.denomination,
+            imagePath: transaction.proofImage,
+            cardCode: transaction.cardCode,
+            uniqueId: transaction._id.toString(),
+          });
+          if (result?.trade?.reference) {
+            update.prestmitReference = result.trade.reference;
+            update.prestmitStatus = 'PENDING';
+          }
+        } catch (prestmitErr) {
+          console.error('[Prestmit] submitSellTransaction error:', prestmitErr?.response?.data || prestmitErr.message);
+          // Fall through to manual Paystack payout below
+        }
+      }
+
+      if (update.prestmitReference) {
+        // Submitted to Prestmit — payout triggered by webhook, not now
+        const updated = await GiftCardTransaction.findByIdAndUpdate(id, update, { new: true })
+          .populate(userPopulate).lean();
+        return successResponse(res, 200, 'Submitted to Prestmit for verification. Payout will be sent on approval.', { data: updated });
+      }
+    }
+
+    // Fallback: manual Paystack payout (no Prestmit or submission failed)
     const bankAccount = await BankAccount.findOne({ userId: transaction.user._id, isDefault: true });
     if (!bankAccount) return errorResponse(res, 400, 'User has no default bank account');
     if (!bankAccount.bankCode) return errorResponse(res, 400, 'Bank account is missing a bank code');
@@ -129,16 +168,11 @@ exports.approveGiftCardTransaction = async (req, res, next) => {
       reference: `naivolt_gc_${transaction._id}`,
     });
 
-    const update = {
-      status: 'processing',
-      paystackRecipientCode: recipientCode,
-      paystackTransferCode: transfer.transfer_code,
-    };
-    if (adminNote?.trim()) update.adminNote = adminNote.trim();
+    update.paystackRecipientCode = recipientCode;
+    update.paystackTransferCode = transfer.transfer_code;
 
     const updated = await GiftCardTransaction.findByIdAndUpdate(id, update, { new: true })
-      .populate(userPopulate)
-      .lean();
+      .populate(userPopulate).lean();
 
     return successResponse(res, 200, 'Payout initiated', { data: updated });
   } catch (err) {
