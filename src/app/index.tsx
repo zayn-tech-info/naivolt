@@ -28,7 +28,7 @@ export default function Index() {
       if (user.role === "admin") {
         router.replace("/(admin)/dashboard");
       } else {
-        router.replace("/(tabs)");
+        router.replace("/(tabs)/(main)");
       }
     } else {
       router.replace("/(auth)/welcome");

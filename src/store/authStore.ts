@@ -2,13 +2,17 @@
 
 import { create } from 'zustand';
 import { clearSession } from '@/services/tokenStorage';
+import { identifyUser } from '@/services/monitoring';
 
 export interface User {
   _id?: string;
+  /** May be empty — phone signup collects no name, and none is required. */
   name: string;
   username?: string;
   email: string;
   phone?: string;
+  /** 0 = signed up but unverified. Gates withdrawal, nothing else. */
+  kycTier?: number;
   role?: 'user' | 'admin';
 }
 
@@ -28,11 +32,16 @@ export const useAuthStore = create<AuthState>((set) => ({
   token: null,
   isHydrated: false,
   isAuthenticated: false,
-  setUser: (user) => set({ user, isAuthenticated: !!user }),
+  setUser: (user) => {
+    set({ user, isAuthenticated: !!user });
+    // Id only — never email, name or phone. See services/monitoring.ts.
+    identifyUser(user?._id ?? null);
+  },
   setToken: (token) => set({ token }),
   setHydrated: (value) => set({ isHydrated: value }),
   logout: () => {
     set({ user: null, token: null, isAuthenticated: false });
+    identifyUser(null);
     void clearSession();
   },
 }));

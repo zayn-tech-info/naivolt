@@ -3,18 +3,26 @@ import { decode } from "base-64";
 import axios from "axios";
 import { useAuthStore, type User } from "@/store/authStore";
 import { getToken, clearSession, TOKEN_KEY, saveUser } from "@/services/tokenStorage";
+import { resetIfStaleSchema } from "@/services/sessionReset";
 import { config } from "@/constants/config";
 
-const AUTH_ME_URL = `${config.apiUrl}/api/v1/auth/me`;
-const REQUEST_TIMEOUT_MS = 15000;
+const AUTH_ME_URL = `${config.apiUrl}/v2/me`;
+const REQUEST_TIMEOUT_MS = 8000;
 
-function toUser(apiUser: { _id?: string; id?: string; name: string; username?: string; email: string; phone?: string; role?: string }): User {
+function toUser(apiUser: {
+  id: string;
+  displayName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  kycTier?: number;
+  role?: string;
+}): User {
   return {
-    _id: apiUser._id ?? apiUser.id,
-    name: apiUser.name,
-    username: apiUser.username,
-    email: apiUser.email,
-    phone: apiUser.phone,
+    _id: apiUser.id,
+    name: apiUser.displayName ?? "",
+    email: apiUser.email ?? "",
+    phone: apiUser.phone ?? undefined,
+    kycTier: apiUser.kycTier ?? 0,
     role: apiUser.role as "user" | "admin" | undefined,
   };
 }
@@ -25,6 +33,14 @@ export function useAuthHydration() {
   useEffect(() => {
     async function hydrate() {
       try {
+        // Sessions from the v1 backend can never validate — that server is gone.
+        // Clearing them here is what returns the device to onboarding.
+        const wasReset = await resetIfStaleSchema();
+        if (wasReset) {
+          setHydrated(true);
+          return;
+        }
+
         const token = await getToken(TOKEN_KEY);
         if (!token) {
           setHydrated(true);
@@ -47,14 +63,17 @@ export function useAuthHydration() {
           return;
         }
 
-        const { data, status } = await axios.get<{ user?: User }>(AUTH_ME_URL, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: REQUEST_TIMEOUT_MS,
-          validateStatus: () => true,
-        });
+        const { data, status } = await axios.get<{ user?: Parameters<typeof toUser>[0] }>(
+          AUTH_ME_URL,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: REQUEST_TIMEOUT_MS,
+            validateStatus: () => true,
+          },
+        );
 
         if (status === 200 && data?.user) {
-          const user = toUser(data.user as Parameters<typeof toUser>[0]);
+          const user = toUser(data.user);
           setToken(token);
           setUser(user);
           await saveUser(user);

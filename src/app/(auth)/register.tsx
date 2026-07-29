@@ -1,595 +1,239 @@
-import { useState, useMemo } from "react";
+/**
+ * The whole of signup.
+ *
+ * v1 asked for full name, username, email, phone, password and confirm password
+ * — six fields and a keyboard, before the user had seen a single thing the app
+ * does. This asks for one tap, or one phone number.
+ *
+ * There is no separate login screen any more, because passwordless auth makes
+ * the distinction meaningless: the same Google tap and the same phone number
+ * either find an existing account or create one, and the server decides which.
+ * Presenting "Sign up" and "Sign in" as different doors would just make people
+ * pick the wrong one.
+ *
+ * Name, email and everything else either arrive free with the OIDC token or are
+ * never needed. KYC comes later, at withdrawal — see ARCHITECTURE.md §10.3.
+ */
+
+import { useCallback, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TextInput,
-  TouchableOpacity,
-  Pressable,
-  ScrollView,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
-} from "react-native";
-import { useRouter } from "expo-router";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useForm, Controller } from "react-hook-form";
-import { Ionicons } from "@expo/vector-icons";
-import { setToken as setTokenInStorage, saveUser, TOKEN_KEY } from "@/services/tokenStorage";
-import { theme } from "@/constants/theme";
-import { type Colors } from "@/constants/colors";
-import { useColors } from "@/store/appStore";
-import { api } from "@/services/api";
-import { useAuthStore } from "@/store/authStore";
+  Pressable,
+  ScrollView,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import Animated, { FadeInDown } from 'react-native-reanimated';
+import { useTheme } from '@/design';
+import { Button, Input, Text } from '@/components/ui';
+import { useAuthStore } from '@/store/authStore';
+import { saveUser, setToken as persistToken, TOKEN_KEY } from '@/services/tokenStorage';
+import { AuthError, normalizePhone, requestOtp, signInWithIdToken } from '@/services/authV2';
+import { isProviderAvailable, signInWithApple, signInWithGoogle } from '@/services/oauthProviders';
 
-interface RegisterForm {
-  fullName: string;
-  username: string;
-  email: string;
-  phone: string;
-  password: string;
-  confirmPassword: string;
-}
-
-export default function RegisterScreen() {
+export default function AuthScreen() {
   const router = useRouter();
-  const c = useColors();
-  const styles = useMemo(() => createStyles(c), [c]);
+  const { c, space } = useTheme();
   const { setUser, setToken } = useAuthStore();
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [focusedField, setFocusedField] = useState<string | null>(null);
-  const [apiError, setApiError] = useState<string | null>(null);
 
-  const {
-    control,
-    handleSubmit,
-    setError,
-    formState: { errors, isSubmitting },
-  } = useForm<RegisterForm>({
-    defaultValues: {
-      fullName: "",
-      username: "",
-      email: "",
-      phone: "",
-      password: "",
-      confirmPassword: "",
+  const [phone, setPhone] = useState('');
+  const [busy, setBusy] = useState<'google' | 'apple' | 'phone' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const phoneIsValid = normalizePhone(phone) !== null;
+
+  const onSocial = useCallback(
+    async (provider: 'google' | 'apple') => {
+      setError(null);
+      setBusy(provider);
+      try {
+        const result =
+          provider === 'google' ? await signInWithGoogle() : await signInWithApple();
+
+        // The user backed out of the system sheet — not an error worth shouting about.
+        if (!result) return;
+
+        const session = await signInWithIdToken(provider, result.idToken, result.fullName);
+        await persistToken(TOKEN_KEY, session.token);
+        setToken(session.token);
+        setUser(session.user);
+        await saveUser(session.user);
+
+        // Branch rather than a ternary: a union of hrefs doesn't satisfy
+        // expo-router's Href type, which resolves per literal.
+        if (session.isNewAccount) router.replace('/set-pin');
+        else router.replace('/(tabs)/(main)');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not sign in');
+      } finally {
+        setBusy(null);
+      }
     },
-  });
+    [router, setToken, setUser],
+  );
 
-  const onSubmit = async (data: RegisterForm) => {
-    setApiError(null);
-    if (!data.fullName?.trim()) {
-      setError("fullName", { message: "Full name is required" });
-      return;
-    }
-    if (!data.username?.trim()) {
-      setError("username", { message: "Username is required" });
-      return;
-    }
-    if (data.username.trim().length < 3) {
-      setError("username", { message: "Username must be at least 3 characters" });
-      return;
-    }
-    if (!data.email?.trim()) {
-      setError("email", { message: "Email is required" });
-      return;
-    }
-    if (!data.phone?.trim()) {
-      setError("phone", { message: "Phone is required" });
-      return;
-    }
-    if (!data.password || data.password.length < 6) {
-      setError("password", { message: "Password must be at least 6 characters" });
-      return;
-    }
-    if (data.password !== data.confirmPassword) {
-      setError("confirmPassword", { message: "Passwords do not match" });
-      return;
-    }
-
+  const onPhone = useCallback(async () => {
+    setError(null);
+    setBusy('phone');
     try {
-      const res = await api.post<{
-        token: string;
-        user: {
-          _id?: string;
-          id?: string;
-          name: string;
-          username?: string;
-          email: string;
-          phone?: string;
-          role?: string;
-        };
-      }>("/auth/register", {
-        name: data.fullName,
-        username: data.username.trim().toLowerCase(),
-        email: data.email,
-        phone: data.phone,
-        password: data.password,
-        confirmPassword: data.confirmPassword,
-      });
-      const { token, user } = res.data;
-      if (token && user) {
-        try {
-          await setTokenInStorage(TOKEN_KEY, token);
-        } catch {
-          // Storage failed (e.g. Expo Go); token may be in memory only
-        }
-        const userPayload = {
-          _id: user._id ?? user.id,
-          name: user.name,
-          username: user.username,
-          email: user.email,
-          phone: user.phone,
-          role: user.role as "user" | "admin" | undefined,
-        };
-        setToken(token);
-        setUser(userPayload);
-        await saveUser(userPayload);
-        if (user.role === "admin") {
-          router.replace("/(admin)/dashboard");
-        } else {
-          router.replace("/(tabs)");
+      const normalized = await requestOtp(phone);
+      router.push({ pathname: '/verify', params: { phone: normalized } });
+    } catch (err) {
+      if (err instanceof AuthError && err.offline && __DEV__) {
+        // The v2 API does not exist yet. In development, walk on to the OTP
+        // screen anyway so the flow can be reviewed end to end.
+        const normalized = normalizePhone(phone);
+        if (normalized) {
+          router.push({ pathname: '/verify', params: { phone: normalized, mock: '1' } });
+          return;
         }
       }
-    } catch (err: unknown) {
-      let message = "Something went wrong. Please try again.";
-      if (err && typeof err === "object" && "response" in err) {
-        const res = (err as { response?: { data?: unknown; status?: number } })
-          .response;
-        const data = res?.data as Record<string, string> | undefined;
-        message =
-          data?.message ||
-          data?.error ||
-          data?.msg ||
-          (res?.status === 404 || res?.status === 502
-            ? "Cannot reach server. Is the backend running? Use your computer IP (e.g. http://192.168.x.x:5000) if on a device."
-            : message);
-      } else if (
-        err &&
-        typeof err === "object" &&
-        "message" in err &&
-        typeof (err as Error).message === "string"
-      ) {
-        const msg = (err as Error).message;
-        if (msg.includes("timeout") || msg.includes("ECONNABORTED"))
-          message =
-            "Request timed out. Check your connection and that the backend is running.";
-        else if (msg.includes("Network Error") || msg.includes("ECONNREFUSED"))
-          message =
-            "Cannot connect to server. Is the backend running? On Android emulator set EXPO_PUBLIC_API_URL=http://10.0.2.2:5000; on a physical device use your computer IP (e.g. http://192.168.1.1:5000).";
-        else message = msg;
-      }
-      setApiError(message);
+      setError(err instanceof Error ? err.message : 'Could not send code');
+    } finally {
+      setBusy(null);
     }
-  };
-
-  const inputBorder = (fieldName: string) =>
-    focusedField === fieldName ? c.primaryAccent : c.border;
+  }, [phone, router]);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: c.primaryBackground }}>
       <KeyboardAvoidingView
-        style={styles.keyboard}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={styles.scrollContent}
+          contentContainerStyle={{
+            flexGrow: 1,
+            paddingHorizontal: space.roomy,
+            paddingBottom: space.roomy,
+          }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          <Pressable
-            onPress={() => router.back()}
-            style={styles.backBtn}
-            hitSlop={12}
-          >
-            <Ionicons name="arrow-back" size={24} color={c.primaryText} />
-          </Pressable>
-
-          <Text style={styles.heading}>Create Account</Text>
-          <Text style={styles.subtext}>
-            Join Naivolt and start converting crypto to Naira
-          </Text>
-
-          <View style={styles.form}>
-            <Controller
-              control={control}
-              name="fullName"
-              render={({ field }) => (
-                <View style={styles.field}>
-                  <Text style={styles.label}>Full Name</Text>
-                  <TextInput
-                    placeholder="Enter your full name"
-                    placeholderTextColor={c.secondaryText}
-                    value={field.value}
-                    onChangeText={field.onChange}
-                    onBlur={() => {
-                      field.onBlur();
-                      setFocusedField(null);
-                    }}
-                    onFocus={() => setFocusedField("fullName")}
-                    style={[
-                      styles.input,
-                      { borderColor: inputBorder("fullName") },
-                    ]}
-                    cursorColor={c.primaryAccent}
-                    selectionColor={c.primaryAccent}
-                    underlineColorAndroid="transparent"
-                  />
-                  {errors.fullName ? (
-                    <Text style={styles.inlineError}>
-                      {errors.fullName.message}
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-            />
-
-            <Controller
-              control={control}
-              name="username"
-              render={({ field }) => (
-                <View style={styles.field}>
-                  <Text style={styles.label}>Username</Text>
-                  <TextInput
-                    placeholder="3–30 characters, e.g. johndoe"
-                    placeholderTextColor={c.secondaryText}
-                    value={field.value}
-                    onChangeText={(text) => field.onChange(text)}
-                    onBlur={() => {
-                      field.onBlur();
-                      setFocusedField(null);
-                    }}
-                    onFocus={() => setFocusedField("username")}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    style={[
-                      styles.input,
-                      { borderColor: inputBorder("username") },
-                    ]}
-                    cursorColor={c.primaryAccent}
-                    selectionColor={c.primaryAccent}
-                    underlineColorAndroid="transparent"
-                  />
-                  {errors.username ? (
-                    <Text style={styles.inlineError}>
-                      {errors.username.message}
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-            />
-
-            <Controller
-              control={control}
-              name="email"
-              render={({ field }) => (
-                <View style={styles.field}>
-                  <Text style={styles.label}>Email Address</Text>
-                  <TextInput
-                    placeholder="Enter your email"
-                    placeholderTextColor={c.secondaryText}
-                    value={field.value}
-                    onChangeText={field.onChange}
-                    onBlur={() => {
-                      field.onBlur();
-                      setFocusedField(null);
-                    }}
-                    onFocus={() => setFocusedField("email")}
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    style={[
-                      styles.input,
-                      { borderColor: inputBorder("email") },
-                    ]}
-                    cursorColor={c.primaryAccent}
-                    selectionColor={c.primaryAccent}
-                    underlineColorAndroid="transparent"
-                  />
-                  {errors.email ? (
-                    <Text style={styles.inlineError}>
-                      {errors.email.message}
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-            />
-
-            <Controller
-              control={control}
-              name="phone"
-              render={({ field }) => (
-                <View style={styles.field}>
-                  <Text style={styles.label}>Phone Number</Text>
-                  <TextInput
-                    placeholder="e.g 08012345678"
-                    placeholderTextColor={c.secondaryText}
-                    value={field.value}
-                    onChangeText={field.onChange}
-                    onBlur={() => {
-                      field.onBlur();
-                      setFocusedField(null);
-                    }}
-                    onFocus={() => setFocusedField("phone")}
-                    keyboardType="phone-pad"
-                    style={[
-                      styles.input,
-                      { borderColor: inputBorder("phone") },
-                    ]}
-                    cursorColor={c.primaryAccent}
-                    selectionColor={c.primaryAccent}
-                    underlineColorAndroid="transparent"
-                  />
-                  {errors.phone ? (
-                    <Text style={styles.inlineError}>
-                      {errors.phone.message}
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-            />
-
-            <Controller
-              control={control}
-              name="password"
-              render={({ field }) => (
-                <View style={styles.field}>
-                  <Text style={styles.label}>Password</Text>
-                  <View
-                    style={[
-                      styles.inputRow,
-                      { borderColor: inputBorder("password") },
-                    ]}
-                  >
-                    <TextInput
-                      placeholder="Minimum 6 characters"
-                      placeholderTextColor={c.secondaryText}
-                      value={field.value}
-                      onChangeText={field.onChange}
-                      onBlur={() => {
-                        field.onBlur();
-                        setFocusedField(null);
-                      }}
-                      onFocus={() => setFocusedField("password")}
-                      secureTextEntry={!showPassword}
-                      style={styles.inputInner}
-                      cursorColor={c.primaryAccent}
-                      selectionColor={c.primaryAccent}
-                      underlineColorAndroid="transparent"
-                    />
-                    <Pressable
-                      onPress={() => setShowPassword((p) => !p)}
-                      hitSlop={8}
-                      style={styles.eyeBtn}
-                    >
-                      <Ionicons
-                        name={showPassword ? "eye-off-outline" : "eye-outline"}
-                        size={22}
-                        color={c.secondaryText}
-                      />
-                    </Pressable>
-                  </View>
-                  {errors.password ? (
-                    <Text style={styles.inlineError}>
-                      {errors.password.message}
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-            />
-
-            <Controller
-              control={control}
-              name="confirmPassword"
-              render={({ field }) => (
-                <View style={styles.field}>
-                  <Text style={styles.label}>Confirm Password</Text>
-                  <View
-                    style={[
-                      styles.inputRow,
-                      { borderColor: inputBorder("confirmPassword") },
-                    ]}
-                  >
-                    <TextInput
-                      placeholder="Re-enter your password"
-                      placeholderTextColor={c.secondaryText}
-                      value={field.value}
-                      onChangeText={field.onChange}
-                      onBlur={() => {
-                        field.onBlur();
-                        setFocusedField(null);
-                      }}
-                      onFocus={() => setFocusedField("confirmPassword")}
-                      secureTextEntry={!showConfirmPassword}
-                      style={styles.inputInner}
-                      cursorColor={c.primaryAccent}
-                      selectionColor={c.primaryAccent}
-                      underlineColorAndroid="transparent"
-                    />
-                    <Pressable
-                      onPress={() => setShowConfirmPassword((p) => !p)}
-                      hitSlop={8}
-                      style={styles.eyeBtn}
-                    >
-                      <Ionicons
-                        name={
-                          showConfirmPassword
-                            ? "eye-off-outline"
-                            : "eye-outline"
-                        }
-                        size={22}
-                        color={c.secondaryText}
-                      />
-                    </Pressable>
-                  </View>
-                  {errors.confirmPassword ? (
-                    <Text style={styles.inlineError}>
-                      {errors.confirmPassword.message}
-                    </Text>
-                  ) : null}
-                </View>
-              )}
-            />
-
-            {apiError ? <Text style={styles.apiError}>{apiError}</Text> : null}
-
-            <TouchableOpacity
-              activeOpacity={0.8}
-              style={[styles.submitBtn, isSubmitting && styles.submitBtnDisabled]}
-              onPress={handleSubmit(onSubmit)}
-              disabled={isSubmitting}
+          {router.canGoBack() ? (
+            <Pressable
+              onPress={() => router.back()}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+              style={{ height: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
             >
-              {isSubmitting ? (
-                <ActivityIndicator
-                  color={c.buttonTextOnAccent}
-                  size="small"
-                />
-              ) : (
-                <Text style={styles.submitBtnText}>Create Account</Text>
-              )}
-            </TouchableOpacity>
-            <View style={styles.loginRow}>
-              <Text style={styles.loginPrompt}>Already have an account?</Text>
-              <Pressable
-                onPress={() => router.push("/login")}
-                style={({ pressed }) => [styles.loginLinkTouch, pressed && { opacity: 0.8 }]}
-                hitSlop={{ top: 16, bottom: 16, left: 12, right: 12 }}
-              >
-                <Text style={styles.loginLink}>Login</Text>
-              </Pressable>
-            </View>
+              <Ionicons name="arrow-back" size={24} color={c.primaryText} />
+            </Pressable>
+          ) : (
+            <View style={{ height: 44 }} />
+          )}
+
+          <Animated.View entering={FadeInDown.duration(320)} style={{ marginTop: space.major }}>
+            <Text variant="title">Get started</Text>
+            <Text variant="body" color="secondaryText" style={{ marginTop: space.snug }}>
+              Sign in or create an account — it&apos;s the same tap. No password to
+              remember.
+            </Text>
+          </Animated.View>
+
+          <View style={{ gap: space.base, marginTop: space.major }}>
+            <Button
+              title="Continue with Google"
+              icon="logo-google"
+              variant="secondary"
+              size="lg"
+              fullWidth
+              loading={busy === 'google'}
+              disabled={busy !== null}
+              onPress={() => onSocial('google')}
+            />
+
+            {/* App Store Guideline 4.8: offering Google without a private
+                alternative gets the build rejected. Apple-only on iOS, since
+                Android has no Sign in with Apple. */}
+            {Platform.OS === 'ios' && isProviderAvailable('apple') ? (
+              <Button
+                title="Continue with Apple"
+                icon="logo-apple"
+                variant="secondary"
+                size="lg"
+                fullWidth
+                loading={busy === 'apple'}
+                disabled={busy !== null}
+                onPress={() => onSocial('apple')}
+              />
+            ) : null}
           </View>
+
+          <Divider />
+
+          <View style={{ gap: space.base }}>
+            <Input
+              label="Phone number"
+              prefix="+234"
+              placeholder="801 234 5678"
+              value={phone}
+              onChangeText={(t) => {
+                setPhone(t);
+                setError(null);
+              }}
+              keyboardType="phone-pad"
+              autoComplete="tel"
+              textContentType="telephoneNumber"
+              returnKeyType="go"
+              onSubmitEditing={phoneIsValid ? onPhone : undefined}
+              maxLength={14}
+              hint="We'll text you a 6-digit code."
+            />
+
+            <Button
+              title="Continue"
+              size="lg"
+              fullWidth
+              iconRight="arrow-forward"
+              loading={busy === 'phone'}
+              disabled={!phoneIsValid || busy !== null}
+              onPress={onPhone}
+            />
+          </View>
+
+          {error ? (
+            <Animated.View entering={FadeInDown.duration(200)} style={{ marginTop: space.base }}>
+              <Text variant="bodySmall" color="negative">
+                {error}
+              </Text>
+            </Animated.View>
+          ) : null}
+
+          <View style={{ flex: 1, minHeight: space.major }} />
+
+          <Text
+            variant="caption"
+            color="tertiaryText"
+            style={{ textAlign: 'center', maxWidth: 320, alignSelf: 'center' }}
+          >
+            By continuing you agree to our Terms of Service and Privacy Policy.
+          </Text>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-function createStyles(c: Colors) {
-  return StyleSheet.create({
-    safe: {
-      flex: 1,
-      backgroundColor: c.primaryBackground,
-    },
-    keyboard: {
-      flex: 1,
-    },
-    scroll: {
-      flex: 1,
-    },
-    scrollContent: {
-      paddingHorizontal: theme.spacing.lg,
-      paddingTop: theme.spacing.sm,
-      paddingBottom: theme.spacing.xl,
-    },
-    backBtn: {
-      alignSelf: "flex-start",
-      padding: theme.spacing.sm,
-      marginBottom: theme.spacing.md,
-    },
-    heading: {
-      fontSize: 26,
-      fontWeight: "800",
-      color: c.primaryText,
-      marginBottom: theme.spacing.xs,
-    },
-    subtext: {
-      fontSize: 14,
-      color: c.secondaryText,
-      marginBottom: theme.spacing.lg,
-    },
-    form: {
-      marginBottom: theme.spacing.lg,
-    },
-    field: {
-      marginBottom: theme.spacing.md,
-    },
-    label: {
-      fontSize: 12,
-      color: c.secondaryText,
-      marginBottom: theme.spacing.xs,
-    },
-    input: {
-      backgroundColor: c.surface,
-      borderWidth: 1,
-      borderRadius: 12,
-      color: c.primaryText,
-      fontSize: 16,
-      padding: 16,
-    },
-    inputRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      backgroundColor: c.surface,
-      borderWidth: 1,
-      borderRadius: 12,
-      paddingRight: 12,
-      overflow: "hidden",
-    },
-    inputInner: {
-      flex: 1,
-      backgroundColor: "transparent",
-      borderWidth: 0,
-      color: c.primaryText,
-      fontSize: 16,
-      paddingVertical: 16,
-      paddingHorizontal: 16,
-      minHeight: 52,
-    },
-    eyeBtn: {
-      padding: 4,
-    },
-    inlineError: {
-      fontSize: 12,
-      color: c.error,
-      marginTop: theme.spacing.xs,
-    },
-    apiError: {
-      fontSize: 12,
-      color: c.error,
-      marginTop: theme.spacing.sm,
-      marginBottom: theme.spacing.sm,
-    },
-    submitBtn: {
-      backgroundColor: c.primaryAccent,
-      paddingVertical: 16,
-      borderRadius: 12,
-      alignItems: "center",
-      justifyContent: "center",
-      minHeight: 52,
-      marginTop: theme.spacing.lg,
-    },
-    submitBtnDisabled: {
-      opacity: 0.8,
-    },
-    submitBtnText: {
-      fontSize: 17,
-      fontWeight: "700",
-      color: c.buttonTextOnAccent,
-    },
-    loginRow: {
-      flexDirection: "row",
-      justifyContent: "center",
-      alignItems: "center",
-      gap: 8,
-      marginTop: theme.spacing.lg,
-      minHeight: 48,
-    },
-    loginPrompt: {
-      fontSize: 16,
-      color: c.secondaryText,
-    },
-    loginLinkTouch: {
-      paddingVertical: 12,
-      paddingHorizontal: 16,
-    },
-    loginLink: {
-      fontSize: 17,
-      fontWeight: "700",
-      color: c.primaryAccent,
-    },
-  });
+function Divider() {
+  const { c, space } = useTheme();
+  return (
+    <View
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: space.base,
+        marginVertical: space.major,
+      }}
+    >
+      <View style={{ flex: 1, height: 1, backgroundColor: c.border }} />
+      <Text variant="caption" color="tertiaryText">
+        or
+      </Text>
+      <View style={{ flex: 1, height: 1, backgroundColor: c.border }} />
+    </View>
+  );
 }

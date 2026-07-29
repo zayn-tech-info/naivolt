@@ -4,9 +4,12 @@ export default function AuthLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="welcome" />
-      <Stack.Screen name="login" />
+      {/* One screen for both sign-in and sign-up — see register.tsx. */}
       <Stack.Screen name="register" />
-      <Stack.Screen name="forgot-password" />
+      <Stack.Screen name="verify" />
+      {/* Gesture off: backing out mid-setup would leave an account with no PIN. */}
+      <Stack.Screen name="set-pin" options={{ gestureEnabled: false }} />
+      <Stack.Screen name="login" />
     </Stack>
   );
 }

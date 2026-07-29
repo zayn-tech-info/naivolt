@@ -1,415 +1,325 @@
-import { useRef, useState, useCallback, useMemo, useEffect } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+/**
+ * Welcome — onboarding.
+ *
+ * The hero is the product's actual proposition, stated as arithmetic:
+ *
+ *     ₮ 100.00  USDT
+ *     ↓
+ *     ₦ 153,000
+ *
+ * Not an illustration of a wallet, not a shield icon over the word "Secure".
+ * The one thing a Nigerian user weighing this app against Breet or a Telegram
+ * trader wants to know is what their coins turn into and how fast, so the first
+ * screen answers it in the same mono numerals the rest of the app uses. The type
+ * treatment carries the message and there is no decoration around it.
+ *
+ * Progress is a segmented hairline rather than dots. Dots are the default choice
+ * for any carousel; the hairline reuses the motif established by the quote timer
+ * and deposit tracker, so by the time someone sees a rate expiring they've
+ * already learned what a filling bar means here.
+ *
+ * Three slides, not four. The previous version had a fourth explaining the
+ * manual screenshot flow that v2 removes, and onboarding length is inversely
+ * proportional to how much of it gets read.
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Pressable,
-  FlatList,
   Dimensions,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
+  FlatList,
+  Pressable,
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { theme } from '@/constants/theme';
-import { Colors } from '@/constants/colors';
-import { useColors } from '@/store/appStore';
+import Animated, { FadeIn, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import { useTheme } from '@/design';
+import { Button, Money, Text } from '@/components/ui';
+import { ONBOARDING_KEY } from '@/services/sessionReset';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const SCREEN_WIDTH = Dimensions.get('window').width;
 
-function getSlides(c: Colors) {
-  return [
-  {
-    id: 'hero',
-    icon: 'flash' as const,
-    iconColor: c.primaryAccent,
-    title: 'Got Crypto?\nGet Naira.',
-    titleAccent: 'Get Naira.',
-    subtitle: 'The smartest way to convert crypto to Naira.\nFast, simple, secure.',
-    bullets: [
-      'Real-time rates, zero hidden charges',
-      'Supports USDT, BTC, ETH and more',
-      'Naira paid straight to your bank',
-    ],
-  },
-  {
-    id: 'how',
-    icon: 'list-circle' as const,
-    iconColor: '#a78bfa',
-    title: 'How It Works',
-    titleAccent: null,
-    subtitle: 'Three steps to turn your crypto into cash.',
-    steps: [
-      {
-        num: '1',
-        title: 'Send Crypto',
-        desc: 'Copy your unique deposit address and send USDT or BTC from any wallet.',
-      },
-      {
-        num: '2',
-        title: 'Upload Proof',
-        desc: 'Screenshot your transaction and upload it as payment proof in the app.',
-      },
-      {
-        num: '3',
-        title: 'Get Naira',
-        desc: 'We verify and send Naira directly to your Nigerian bank account.',
-      },
-    ],
-  },
-  {
-    id: 'giftcards',
-    icon: 'gift' as const,
-    iconColor: '#a855f7',
-    title: 'Sell Gift Cards\nfor Naira too.',
-    titleAccent: 'for Naira too.',
-    subtitle: 'Amazon, iTunes, Google Play, Steam and more — all converted to Naira instantly.',
-    bullets: [
-      'Upload your gift card details & proof',
-      'Get the best NGN rates per card',
-      'Payout to your bank in minutes',
-    ],
-  },
-  ];
+interface Slide {
+  id: string;
+  eyebrow: string;
+  title: string;
+  body: string;
+  /** The figure that carries the slide. */
+  figure: 'conversion' | 'speed' | 'custody';
 }
 
-type SlideItem = ReturnType<typeof getSlides>[number];
-function Slide({ item, styles, c }: { item: SlideItem; styles: ReturnType<typeof createStyles>; c: Colors }) {
-  return (
-    <View style={[styles.slide, { width: SCREEN_WIDTH }]}>
-      <View style={[styles.iconWrap, { borderColor: item.iconColor + '40' }]}>
-        <Ionicons name={item.icon} size={48} color={item.iconColor} />
-      </View>
-
-      <Text style={styles.slideTitle}>
-        {item.titleAccent
-          ? item.title.replace(item.titleAccent, '').trim() + '\n'
-          : item.title}
-        {item.titleAccent && (
-          <Text style={[styles.slideTitleAccent, { color: item.iconColor }]}>
-            {item.titleAccent}
-          </Text>
-        )}
-      </Text>
-
-      <Text style={styles.slideSubtitle}>{item.subtitle}</Text>
-
-      {'steps' in item && item.steps ? (
-        <View style={styles.stepsBlock}>
-          {item.steps.map((s) => (
-            <View key={s.num} style={styles.stepRow}>
-              <View style={[styles.stepCircle, { backgroundColor: item.iconColor }]}>
-                <Text style={styles.stepNum}>{s.num}</Text>
-              </View>
-              <View style={styles.stepText}>
-                <Text style={styles.stepTitle}>{s.title}</Text>
-                <Text style={styles.stepDesc}>{s.desc}</Text>
-              </View>
-            </View>
-          ))}
-        </View>
-      ) : (
-        <View style={styles.bulletsBlock}>
-          {'bullets' in item && item.bullets?.map((line, i) => (
-            <View key={i} style={styles.bulletRow}>
-              <View style={[styles.bulletDot, { backgroundColor: item.iconColor }]} />
-              <Text style={styles.bulletText}>{line}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-    </View>
-  );
-}
+const SLIDES: Slide[] = [
+  {
+    id: 'rate',
+    eyebrow: 'Live rate',
+    title: 'Your crypto, in naira',
+    body: 'Sell USDT, BTC, ETH and more at a rate you lock before you commit. What you see is what lands.',
+    figure: 'conversion',
+  },
+  {
+    id: 'speed',
+    eyebrow: 'Payouts',
+    title: 'Straight to your bank',
+    body: 'Naira goes to your own account, usually within minutes. No middlemen, no waiting on a trader to wake up.',
+    figure: 'speed',
+  },
+  {
+    id: 'custody',
+    eyebrow: 'Your wallet',
+    title: 'An address that stays yours',
+    body: 'You get a permanent deposit address on every network you use. Send whenever you like — it never changes.',
+    figure: 'custody',
+  },
+];
 
 export default function WelcomeScreen() {
   const router = useRouter();
-  const c = useColors();
-  const styles = useMemo(() => createStyles(c), [c]);
-  const slides = useMemo(() => getSlides(c), [c]);
-  const flatListRef = useRef<FlatList>(null);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const { c, space } = useTheme();
+  const listRef = useRef<FlatList<Slide>>(null);
+  const [index, setIndex] = useState(0);
 
+  // Returning users who already onboarded go straight to the auth screen.
   useEffect(() => {
-    AsyncStorage.getItem('naivolt_onboarding_done').then((done) => {
-      if (done === 'yes') router.replace('/login');
-    });
-  }, []);
+    AsyncStorage.getItem(ONBOARDING_KEY)
+      .then((done) => {
+        if (done === 'yes') router.replace('/register');
+      })
+      .catch(() => {});
+  }, [router]);
 
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
-    setActiveIndex(index);
+    setIndex(Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH));
   }, []);
 
-  const handleNext = useCallback(() => {
-    if (activeIndex < slides.length - 1) {
-      flatListRef.current?.scrollToIndex({ index: activeIndex + 1, animated: true });
-    } else {
-      AsyncStorage.setItem('naivolt_onboarding_done', 'yes');
-      router.push('/register');
-    }
-  }, [activeIndex, router]);
+  const finish = useCallback(() => {
+    AsyncStorage.setItem(ONBOARDING_KEY, 'yes').catch(() => {});
+    router.push('/register');
+  }, [router]);
 
-  const isLast = activeIndex === slides.length - 1;
+  const next = useCallback(() => {
+    if (index < SLIDES.length - 1) {
+      listRef.current?.scrollToIndex({ index: index + 1, animated: true });
+    } else {
+      finish();
+    }
+  }, [index, finish]);
+
+  const isLast = index === SLIDES.length - 1;
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
-      <View style={styles.container}>
-        {/* Skip */}
-        <View style={styles.topBar}>
-          <Pressable
-            onPress={() => {
-              AsyncStorage.setItem('naivolt_onboarding_done', 'yes');
-              router.push('/register');
-            }}
-            hitSlop={12}
-          >
-            <Text style={styles.skipText}>Skip</Text>
+    <SafeAreaView
+      edges={['top', 'bottom']}
+      style={{ flex: 1, backgroundColor: c.primaryBackground }}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'flex-end',
+          paddingHorizontal: space.roomy,
+          height: 44,
+          alignItems: 'center',
+        }}
+      >
+        {!isLast ? (
+          <Pressable onPress={finish} hitSlop={12} accessibilityRole="button">
+            <Text variant="label" color="tertiaryText">
+              Skip
+            </Text>
           </Pressable>
-        </View>
+        ) : null}
+      </View>
 
-        {/* Slides */}
-        <FlatList
-          ref={flatListRef}
-          data={slides}
-          keyExtractor={(item) => item.id}
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          onScroll={onScroll}
-          scrollEventThrottle={16}
-          renderItem={({ item }) => <Slide item={item} styles={styles} c={c} />}
-          getItemLayout={(_, index) => ({
-            length: SCREEN_WIDTH,
-            offset: SCREEN_WIDTH * index,
-            index,
-          })}
+      <FlatList
+        ref={listRef}
+        data={SLIDES}
+        keyExtractor={(item) => item.id}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        renderItem={({ item }) => <SlideView slide={item} />}
+        getItemLayout={(_, i) => ({
+          length: SCREEN_WIDTH,
+          offset: SCREEN_WIDTH * i,
+          index: i,
+        })}
+      />
+
+      <View style={{ paddingHorizontal: space.roomy, gap: space.roomy }}>
+        <Progress count={SLIDES.length} active={index} />
+
+        <Button
+          title={isLast ? 'Create an account' : 'Next'}
+          onPress={next}
+          iconRight={isLast ? 'arrow-forward' : 'chevron-forward'}
+          size="lg"
+          fullWidth
         />
 
-        {/* Dots + CTA */}
-        <View style={styles.footer}>
-          <View style={styles.dots}>
-            {slides.map((_, i) => (
-              <View
-                key={i}
-                style={[styles.dot, i === activeIndex && styles.dotActive]}
-              />
-            ))}
-          </View>
-
-          <TouchableOpacity
-            activeOpacity={0.85}
-            style={styles.primaryButton}
-            onPress={handleNext}
-          >
-            <Text style={styles.primaryButtonText}>
-              {isLast ? 'Get Started' : 'Next'}
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: 6,
+            paddingBottom: space.snug,
+          }}
+        >
+          <Text variant="bodySmall" color="tertiaryText">
+            Already have an account?
+          </Text>
+          {/* Same destination as "Create an account" — signing in and signing up
+              are one screen now. */}
+          <Pressable onPress={finish} hitSlop={8} accessibilityRole="button">
+            <Text variant="action" color="primaryAccent">
+              Sign in
             </Text>
-            <Ionicons
-              name={isLast ? 'arrow-forward' : 'chevron-forward'}
-              size={20}
-              color={c.buttonTextOnAccent}
-              style={styles.buttonArrow}
-            />
-          </TouchableOpacity>
-
-          <View style={styles.loginRow}>
-            <Text style={styles.loginPrompt}>Already have an account?</Text>
-            <Pressable
-              onPress={() => router.push('/login')}
-              style={({ pressed }) => [styles.loginLinkWrap, pressed && styles.loginPressed]}
-            >
-              <Text style={styles.loginLink}>Login</Text>
-            </Pressable>
-          </View>
+          </Pressable>
         </View>
       </View>
     </SafeAreaView>
   );
 }
 
-function createStyles(c: Colors) {
-  return StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: c.primaryBackground,
-  },
-  container: {
-    flex: 1,
-  },
-  topBar: {
-    alignItems: 'flex-end',
-    paddingHorizontal: theme.spacing.lg,
-    paddingTop: theme.spacing.sm,
-    paddingBottom: theme.spacing.xs,
-  },
-  skipText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: c.secondaryText,
-  },
-  slide: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingTop: theme.spacing.lg,
-    alignItems: 'center',
-  },
-  iconWrap: {
-    width: 96,
-    height: 96,
-    borderRadius: 24,
-    backgroundColor: c.surface,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: theme.spacing.xl,
-  },
-  slideTitle: {
-    fontSize: 32,
-    fontWeight: '800',
-    textAlign: 'center',
-    lineHeight: 40,
-    letterSpacing: -0.5,
-    color: c.primaryText,
-    marginBottom: theme.spacing.md,
-    maxWidth: 300,
-  },
-  slideTitleAccent: {
-    fontWeight: '800',
-  },
-  slideSubtitle: {
-    fontSize: 15,
-    color: c.secondaryText,
-    textAlign: 'center',
-    lineHeight: 22,
-    maxWidth: 300,
-    marginBottom: theme.spacing.xl,
-  },
-  stepsBlock: {
-    width: '100%',
-    gap: 16,
-  },
-  stepRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: c.surface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: c.border,
-    padding: 14,
-    gap: 14,
-  },
-  stepCircle: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexShrink: 0,
-  },
-  stepNum: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: '#000',
-  },
-  stepText: {
-    flex: 1,
-  },
-  stepTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: c.primaryText,
-    marginBottom: 4,
-  },
-  stepDesc: {
-    fontSize: 13,
-    color: c.secondaryText,
-    lineHeight: 18,
-  },
-  bulletsBlock: {
-    width: '100%',
-    gap: 14,
-  },
-  bulletRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  bulletDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    flexShrink: 0,
-  },
-  bulletText: {
-    flex: 1,
-    fontSize: 15,
-    fontWeight: '500',
-    color: c.primaryText,
-    lineHeight: 22,
-  },
-  footer: {
-    paddingHorizontal: theme.spacing.lg,
-    paddingBottom: theme.spacing.lg,
-    paddingTop: theme.spacing.md,
-  },
-  dots: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 6,
-    marginBottom: theme.spacing.lg,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: c.border,
-  },
-  dotActive: {
-    width: 20,
-    backgroundColor: c.primaryAccent,
-  },
-  primaryButton: {
-    backgroundColor: c.primaryAccent,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 18,
-    borderRadius: theme.borderRadius.button,
-    marginBottom: theme.spacing.lg,
-  },
-  primaryButtonText: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: c.buttonTextOnAccent,
-    letterSpacing: 0.3,
-  },
-  buttonArrow: {
-    marginLeft: theme.spacing.sm,
-  },
-  loginRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 6,
-  },
-  loginPrompt: {
-    fontSize: 15,
-    color: c.secondaryText,
-  },
-  loginLinkWrap: {
-    paddingVertical: theme.spacing.xs,
-    paddingHorizontal: theme.spacing.xs,
-  },
-  loginLink: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: c.primaryAccent,
-  },
-  loginPressed: {
-    opacity: 0.8,
-  },
-  });
+function SlideView({ slide }: { slide: Slide }) {
+  const { space } = useTheme();
+
+  return (
+    <View
+      style={{
+        width: SCREEN_WIDTH,
+        paddingHorizontal: space.roomy,
+        justifyContent: 'center',
+        flex: 1,
+      }}
+    >
+      <View style={{ minHeight: 190, justifyContent: 'center' }}>
+        <Figure kind={slide.figure} />
+      </View>
+
+      <Text variant="eyebrow" color="primaryAccent" style={{ marginTop: space.major }}>
+        {slide.eyebrow}
+      </Text>
+      <Text variant="title" style={{ marginTop: space.snug }}>
+        {slide.title}
+      </Text>
+      <Text variant="body" color="secondaryText" style={{ marginTop: space.base, maxWidth: 320 }}>
+        {slide.body}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * The slide's visual. Each is built from type and hairlines rather than
+ * illustration — the app has no illustration language, and inventing one for
+ * three onboarding screens would be the only place it ever appeared.
+ */
+function Figure({ kind }: { kind: Slide['figure'] }) {
+  const { c, space, radius } = useTheme();
+
+  if (kind === 'conversion') {
+    return (
+      <Animated.View entering={FadeIn.duration(400)} style={{ gap: space.base }}>
+        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.snug }}>
+          <Money value={100} currency="none" suffix="USDT" variant="figure" color="secondaryText" />
+        </View>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}>
+          <View style={{ height: 1, width: 28, backgroundColor: c.border }} />
+          <Ionicons name="arrow-down" size={15} color={c.primaryAccent} />
+          <Text variant="caption" color="tertiaryText">
+            at ₦1,530 / USDT
+          </Text>
+        </View>
+
+        <Money value={153000} variant="display" whole />
+      </Animated.View>
+    );
+  }
+
+  if (kind === 'speed') {
+    return (
+      <Animated.View entering={FadeIn.duration(400)} style={{ gap: space.comfy }}>
+        <Money value={150000} variant="display" whole />
+        <View style={{ gap: space.snug }}>
+          <Text variant="ticker" color="positive">
+            SETTLED IN 2 MIN 14 SEC
+          </Text>
+          {/* A filled bar — the same language as the deposit tracker. */}
+          <View
+            style={{
+              height: 3,
+              borderRadius: radius.chip,
+              backgroundColor: c.surfaceElevated,
+              overflow: 'hidden',
+            }}
+          >
+            <View style={{ width: '100%', height: '100%', backgroundColor: c.positive }} />
+          </View>
+          <Text variant="caption" color="tertiaryText">
+            GTBank ···4821
+          </Text>
+        </View>
+      </Animated.View>
+    );
+  }
+
+  return (
+    <Animated.View entering={FadeIn.duration(400)} style={{ gap: space.base }}>
+      <Text variant="eyebrow" color="tertiaryText">
+        Your USDT · TRC-20 address
+      </Text>
+      <View
+        style={{
+          backgroundColor: c.surface,
+          borderRadius: radius.field,
+          padding: space.comfy,
+        }}
+      >
+        <Text variant="code" color="primaryText">
+          TQn9 Y2kh EsLJ W1Ch VWFM SMeR Dow5 KcbL SE
+        </Text>
+      </View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <Ionicons name="infinite-outline" size={14} color={c.primaryAccent} />
+        <Text variant="caption" color="tertiaryText">
+          Permanent — reuse it for every deposit
+        </Text>
+      </View>
+    </Animated.View>
+  );
+}
+
+/** Segmented hairline progress. The active segment widens and takes the accent. */
+function Progress({ count, active }: { count: number; active: number }) {
+  const { space } = useTheme();
+  return (
+    <View style={{ flexDirection: 'row', gap: 5, paddingHorizontal: space.tight }}>
+      {Array.from({ length: count }).map((_, i) => (
+        <Segment key={i} active={i === active} />
+      ))}
+    </View>
+  );
+}
+
+function Segment({ active }: { active: boolean }) {
+  const { c, motion, radius } = useTheme();
+  const progress = useSharedValue(active ? 1 : 0);
+
+  useEffect(() => {
+    progress.value = withTiming(active ? 1 : 0, { duration: motion.duration.base });
+  }, [active, progress, motion]);
+
+  const style = useAnimatedStyle(() => ({
+    flexGrow: 1 + progress.value * 2.2,
+    backgroundColor: progress.value > 0.5 ? c.primaryAccent : c.borderLight,
+  }));
+
+  return <Animated.View style={[{ height: 3, borderRadius: radius.chip }, style]} />;
 }
