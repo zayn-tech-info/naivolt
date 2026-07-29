@@ -1,0 +1,25 @@
+[package]
+name = "naivolt-devtools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"
+
+[dependencies]
+naivolt-core = { path = "../core" }
+naivolt-wallet = { path = "../wallet" }
+naivolt-ledger = { path = "../ledger" }
+naivolt-auth = { path = "../auth" }
+
+anyhow.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
