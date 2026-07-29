@@ -110,35 +110,46 @@ populating at different times.
 The rates board. Every asset we price, not only the ones the user holds.
 
 ```json
-[
-  { "asset": "BTC", "rate": "97806770.0000", "changePct24h": -1.42 },
-  { "asset": "USDT", "rate": "1518.0900", "changePct24h": 0.03 }
-]
+{
+  "ngnPerUsd": "1520.0000",
+  "asOf": "2026-07-29T22:14:03Z",
+  "assets": [
+    { "asset": "BTC",  "usdPrice": "63892.00000000", "rate": "97115840.0000", "changePct24h": -1.42 },
+    { "asset": "USDT", "usdPrice": "0.99900000",     "rate": "1518.5300",     "changePct24h": 0.03 }
+  ]
+}
 ```
 
-`rate` is **net** — what the user receives per unit, spread already deducted.
+**`ngnPerUsd` is the headline and the pricing primitive.** It's what we pay per
+dollar of value, margin already deducted, and it's the number Nigerian users mean
+when they ask "what's the rate today?" — the one they compare between apps.
+Every asset's `rate` is `usdPrice × ngnPerUsd`, so one figure drives the board.
 
-> **There is deliberately no `mid` field, and there must never be one.** The app
-> quotes one number and pays exactly that number; our margin is not itemised. A
-> mid price on this payload is a value some screen eventually renders by accident,
-> and it's visible to anyone watching the network regardless. Spread stays
-> server-side — which is also the only place it can be *enforced*, since a
-> client-computed spread can be patched out of the bundle.
+`usdPrice` is the market price. Send it: the client leads each coin row with it
+because it's the real market signal, and repeating a nine-digit naira figure on
+every row is noise.
 
-`changePct24h` is the asset's own 24h move (same in USD or NGN terms), nullable.
+> **There is deliberately no mid rate and no spread field, and there must never
+> be one.** The app quotes one number and pays exactly that number; our margin is
+> embedded, not itemised. A mid rate on this payload is a value some screen
+> eventually renders by accident, and it's visible to anyone watching the network
+> regardless. Spread stays server-side — which is also the only place it can be
+> *enforced*, since a client-computed one can be patched out of the bundle.
+
+`changePct24h` is the asset's own 24h move (identical in USD or NGN terms),
+nullable — send `null` rather than `0` when unavailable, so the client hides the
+indicator instead of claiming a flat day.
 
 **Interim client behaviour:** until this endpoint exists, the mock prices from
-CoinGecko's USD feed and applies the spread locally via
-`src/constants/pricing.ts`. Two things there need porting into the `rates`
-service, not reimplementing:
+CoinGecko's USD feed and applies the margin locally via
+`src/constants/pricing.ts`. One thing there needs porting rather than
+reimplementing:
 
-1. **Don't use CoinGecko's `vs_currency=ngn`.** It's derived from the official
-   USD/NGN rate and currently prices USDT around ₦1,364 against a parallel market
-   well north of that — roughly 10-12% below what competitors quote. Take the USD
-   price and multiply by our own NGN rate, which is a business input tracking the
-   parallel market.
-2. **A flat naira spread doesn't scale across assets.** One BTC is worth ~64,000×
-   one USDT, so a flat ₦10 is 0.65% on USDT and 0.00001% on BTC. See §12.
+> **Don't use CoinGecko's `vs_currency=ngn`.** It's derived from the *official*
+> USD/NGN rate and currently prices USDT around ₦1,364, against a parallel market
+> well north of that — roughly 10-12% below what competitors quote. Take the USD
+> price, which is a real deep-market number, and multiply by our own naira rate.
+> That rate is a business input and should track the parallel market.
 
 ---
 
@@ -504,35 +515,42 @@ them lands, the client shows gift card status only via the v1
 
 ---
 
-## 12. Spread model — flat naira vs percentage
+## 12. The margin model
 
-The client is currently configured with a **flat ₦10 per unit** spread, as
-requested. It's implemented and configurable per asset in
-`src/constants/pricing.ts`, which supports both `flat` and `percent`.
+Pricing runs through **one number**: naira per dollar of value.
 
-Measured against live CoinGecko prices at ₦1,530/USD, here is what flat ₦10
-actually earns:
+```
+payout = assetAmount × assetUsdPrice × (ngnPerUsdMid − SPREAD_NAIRA_PER_USD)
+```
 
-| Asset | Mid rate | Effective spread | Margin on a ₦1,000,000 sale |
+Config lives in `src/constants/pricing.ts`:
+
+| Constant | Env override | Default |
+|---|---|---|
+| `USD_NGN_MID` | `EXPO_PUBLIC_USD_NGN_RATE` | 1530 |
+| `SPREAD_NAIRA_PER_USD` | `EXPO_PUBLIC_SPREAD_NGN_PER_USD` | 10 |
+
+Because the margin is charged per *dollar* and not per *coin*, it lands
+identically on every asset. Verified against live CoinGecko prices at a ₦1,530
+mid, ₦10 margin (headline rate ₦1,520/$):
+
+| Asset | USD price | ₦ per unit | Margin on a ₦1,000,000 sale |
 |---|---|---|---|
-| BTC | ₦97,806,780 | 0.00001% | **₦0.10** |
-| ETH | ₦2,914,528 | 0.00034% | ₦3.43 |
-| BNB | ₦873,125 | 0.00115% | ₦11.45 |
-| SOL | ₦112,608 | 0.00888% | ₦88.80 |
-| USDT | ₦1,528 | 0.65% | ₦6,544 |
-| USDC | ₦1,530 | 0.65% | ₦6,537 |
-| TRX | ₦498 | 2.01% | ₦20,063 |
+| BTC | $63,892 | ₦97,115,840 | ₦6,536 |
+| ETH | $1,903.42 | ₦2,893,198 | ₦6,536 |
+| BNB | $570.35 | ₦866,932 | ₦6,536 |
+| SOL | $73.50 | ₦111,720 | ₦6,536 |
+| USDT | $0.999 | ₦1,518.53 | ₦6,536 |
+| TRX | $0.326 | ₦494.83 | ₦6,536 |
 
-The problem is structural, not a tuning issue: a flat per-unit fee is a fee *per
-coin*, and one BTC is worth ~64,000 USDT. So a ₦98,000,000 BTC sale earns ₦10,
-while TRX is charged 2% — above the 1.3% target in ARCHITECTURE.md §9.
+**₦10/$ works out to 0.65% flat.** ARCHITECTURE.md §9 targets 1.3%, which is
+`SPREAD_NAIRA_PER_USD = 20` — one constant, no per-asset table.
 
-Switching `SPREAD` to `{ kind: 'percent', fraction: 0.013 }` gives a uniform 1.3%
-on every asset — ₦13,000 on that ₦1m sale regardless of which coin it was. The
-per-asset shape means a hybrid also works (percentage on the majors, flat on
-stablecoins) if that suits the pricing strategy better.
-
-This is a business call, so the flat ₦10 stands until it's changed deliberately.
+This is worth contrasting with the alternative reading of "a ₦10 gap", which is
+₦10 off each *coin's* rate. That model collapses, because one BTC is worth
+~64,000 USDT: it earns ₦10 total on a ₦98,000,000 BTC sale (0.00001%) while
+charging 2% on TRX. Per dollar, one constant covers everything — which is also
+why the client has no per-asset spread config to keep in sync.
 
 ---
 

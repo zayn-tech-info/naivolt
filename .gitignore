@@ -42,3 +42,7 @@ app-example
 # generated native folders
 /ios
 /android
+
+# legacy secrets rescued from the deleted Express backend
+.env.dev
+.env.legacy

@@ -2,9 +2,22 @@ import { Stack } from "expo-router";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StatusBar } from "expo-status-bar";
-import { useEffect } from "react";
+import * as SplashScreen from "expo-splash-screen";
+import { useCallback, useEffect } from "react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ToastProvider } from "@/components/ui";
+import { useAppFonts } from "@/design";
+import { darkColors, lightColors } from "@/constants/colors";
 import { useAppStore } from "@/store/appStore";
+import { initMonitoring, Sentry } from "@/services/monitoring";
+
+// Before anything else renders, so a crash during startup is still reported.
+initMonitoring();
+
+// Hold the native splash until fonts and persisted theme are ready. Without
+// this the first frame renders in the fallback system font at the wrong metrics
+// and then reflows once Instrument Sans loads, which reads as a broken launch.
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,28 +29,45 @@ const queryClient = new QueryClient({
 });
 
 function AppShell() {
-  const { hydrate, mode } = useAppStore();
+  const hydrate = useAppStore((s) => s.hydrate);
+  const mode = useAppStore((s) => s.mode);
+  const [fontsLoaded, fontError] = useAppFonts();
 
   useEffect(() => {
     hydrate();
   }, [hydrate]);
 
-  const bg = mode === "dark" ? "#0A0A0B" : "#F5F5F7";
+  const onReady = useCallback(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
+
+  // A font that fails to download shouldn't strand the user on the splash
+  // screen — fall through to system fonts and let the app run.
+  const ready = fontsLoaded || !!fontError;
+
+  useEffect(() => {
+    if (ready) onReady();
+  }, [ready, onReady]);
+
+  if (!ready) return null;
+
+  const palette = mode === "dark" ? darkColors : lightColors;
 
   return (
-    <>
+    <ToastProvider>
       <StatusBar style={mode === "dark" ? "light" : "dark"} />
       <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: bg },
+          contentStyle: { backgroundColor: palette.primaryBackground },
+          animation: "slide_from_right",
         }}
       />
-    </>
+    </ToastProvider>
   );
 }
 
-export default function RootLayout() {
+function RootLayout() {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
@@ -48,3 +78,8 @@ export default function RootLayout() {
     </ErrorBoundary>
   );
 }
+
+// Sentry.wrap adds native crash context and touch/navigation breadcrumbs. It
+// wraps the outermost component, outside the ErrorBoundary, so a render error
+// the boundary catches is still reported rather than only shown.
+export default Sentry.wrap(RootLayout);

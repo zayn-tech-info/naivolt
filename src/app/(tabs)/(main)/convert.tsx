@@ -1,903 +1,241 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TextInput,
-  TouchableOpacity,
-  ActivityIndicator,
-  Platform,
-  Image,
-  useWindowDimensions,
-  Alert,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+/**
+ * Convert — the rates board.
+ *
+ * Nigerian users check the rate the way others check a stock: repeatedly, and
+ * against what they saw an hour ago. So this tab is built around the one figure
+ * they mean by "the rate" — **naira per dollar**, not naira per coin.
+ *
+ * That framing is why the per-dollar rate is the hero and the coin list is
+ * secondary. "₦1,520/$" is the number people compare between apps and quote to
+ * each other; "1 BTC = ₦97,806,770" is a fact nobody holds in their head. Every
+ * naira figure on the screen is the headline rate times a USD price, so leading
+ * with it means one number explains the whole board.
+ *
+ * Coin rows lead with the **USD** price for the same reason: it's the real market
+ * signal, and repeating a nine-digit naira figure on every row is noise. The
+ * naira-per-unit sits beneath it, small, for anyone who wants it.
+ *
+ * This is the one place `Money live` is used — these figures genuinely move on
+ * their own and the tick shows which way. Elsewhere, motion on a number would
+ * imply a change that didn't happen.
+ *
+ * Every rate shown is what the user actually receives. Our margin is already
+ * inside it (see constants/pricing.ts) and is never displayed or itemised —
+ * standard for an exchange, and the reason the copy can honestly say nothing gets
+ * deducted afterwards.
+ */
+
+import { useCallback, useMemo, useState } from 'react';
+import { View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
-import { useHasBankDetails } from '@/hooks/useHasBankDetails';
-import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
-import { api } from '@/services/api';
-import { type WalletCoinId } from '@/constants/config';
-import { type Colors } from '@/constants/colors';
-import { useColors } from '@/store/appStore';
-import { formatCurrency } from '@/utils/formatCurrency';
-
-interface DepositAddressResponse {
-  data?: {
-    addressId: string;
-    coin: string;
-    network: string;
-    address: string;
-  };
-}
-
-const COINS: {
-  id: WalletCoinId;
-  symbol: string;
-  name: string;
-  network: string;
-  color: string;
-  warning: string;
-}[] = [
-  { id: 'usdt', symbol: 'USDT', name: 'Tether', network: 'TRC20', color: '#26A17B', warning: 'Only send on TRC20 network. Wrong network = permanent loss.' },
-  { id: 'eth', symbol: 'ETH', name: 'Ethereum', network: 'ERC20', color: '#627EEA', warning: 'Only send on ERC20 (Ethereum) network.' },
-  { id: 'btc', symbol: 'BTC', name: 'Bitcoin', network: 'Bitcoin', color: '#F7931A', warning: 'Only send on the Bitcoin network.' },
-  { id: 'bnb', symbol: 'BNB', name: 'BNB', network: 'BEP20 (BSC)', color: '#F3BA2F', warning: 'Only send on BEP20 (BSC) network.' },
-  { id: 'sol', symbol: 'SOL', name: 'Solana', network: 'Solana', color: '#9945FF', warning: 'Only send on the Solana network.' },
-];
-
-interface RateResponse {
-  rate?: number;
-  usdtToNgn?: number;
-}
-
-const DEFAULT_PLACEHOLDER_RATE = 0;
-const COIN_GAP = 8;
-const BANK_DETAILS_ALERT_TITLE = 'Bank details required';
-const BANK_DETAILS_ALERT_MESSAGE =
-  'You need to set your bank details first before you can convert. Add a bank account in Profile to receive Naira payments.';
+import { useTheme } from '@/design';
+import {
+  AssetGlyph,
+  Money,
+  Screen,
+  Section,
+  Skeleton,
+  Stagger,
+  Surface,
+  Text,
+} from '@/components/ui';
+import ActionBar, { type Action } from '@/components/home/ActionBar';
+import { useRates } from '@/hooks/useExchange';
+import { ASSET_META } from '@/components/ui/AssetGlyph';
 
 export default function ConvertScreen() {
-  const { width: screenWidth } = useWindowDimensions();
   const router = useRouter();
-  const c = useColors();
-  const styles = useMemo(() => createStyles(c), [c]);
-  const { hasBankDetails, isLoading: bankLoading } = useHasBankDetails();
-  const [selectedCoinId, setSelectedCoinId] = useState<WalletCoinId>('usdt');
-  const [cryptoInput, setCryptoInput] = useState('');
-  const [copied, setCopied] = useState(false);
-  const bankAlertShown = useRef(false);
+  const { c, space } = useTheme();
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    if (bankLoading) return;
-    if (!hasBankDetails && !bankAlertShown.current) {
-      bankAlertShown.current = true;
-      Alert.alert(BANK_DETAILS_ALERT_TITLE, BANK_DETAILS_ALERT_MESSAGE, [
-        { text: 'Not now', style: 'cancel' },
-        {
-          text: 'Add Bank Account',
-          onPress: () => router.replace('/(tabs)/(main)/profile'),
-        },
-      ]);
+  const rates = useRates();
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await rates.refetch();
+    } finally {
+      setRefreshing(false);
     }
-  }, [hasBankDetails, bankLoading, router]);
+  }, [rates]);
 
-  const selectedCoin = COINS.find((coin) => coin.id === selectedCoinId) ?? COINS[0];
-  const coinButtonWidth = (screenWidth - 40 - (COINS.length - 1) * COIN_GAP) / COINS.length;
-
-  const {
-    data: depositData,
-    isLoading: depositLoading,
-    isError: depositError,
-    refetch: refetchDeposit,
-  } = useQuery({
-    queryKey: ['depositAddress', selectedCoinId],
-    queryFn: async () => {
-      const res = await api.get<DepositAddressResponse>(`/deposit-address?coin=${selectedCoin.symbol}`);
-      return res.data?.data ?? null;
-    },
-    staleTime: 10 * 60 * 1000,
-    retry: 2,
-  });
-
-  const { data: rateData, isLoading: rateLoading, isError: rateError } = useQuery({
-    queryKey: ['rate', selectedCoinId],
-    queryFn: async () => {
-      try {
-        const res = await api.get<RateResponse>(`/rate?coin=${selectedCoinId}`);
-        const rate = res.data?.rate ?? res.data?.usdtToNgn ?? DEFAULT_PLACEHOLDER_RATE;
-        return { rate: Number(rate) || DEFAULT_PLACEHOLDER_RATE };
-      } catch {
-        return { rate: DEFAULT_PLACEHOLDER_RATE };
-      }
-    },
-    refetchInterval: 60 * 1000,
-  });
-
-  const rate = rateData?.rate ?? DEFAULT_PLACEHOLDER_RATE;
-  const rateFormatted = rate > 0 ? formatCurrency(rate, 'NGN', true) : '—';
-
-  const [rateUpdatedAt, setRateUpdatedAt] = useState<Date | null>(null);
-  useEffect(() => {
-    if (rateData) setRateUpdatedAt(new Date());
-  }, [rateData]);
-
-  const cryptoAmount = useMemo(() => {
-    const n = parseFloat(cryptoInput.replace(/,/g, '')) || 0;
-    return Number.isFinite(n) ? n : 0;
-  }, [cryptoInput]);
-
-  const nairaAmount = useMemo(() => {
-    if (!rate || cryptoAmount <= 0) return 0;
-    return cryptoAmount * rate;
-  }, [rate, cryptoAmount]);
-
-  const nairaDisplay = nairaAmount > 0
-    ? formatCurrency(nairaAmount, 'NGN', true)
-    : '0';
-
-  const walletAddress = depositData?.address ?? '';
-  const walletAddressId = depositData?.addressId ?? '';
-
-  const handleCopy = async () => {
-    if (!walletAddress) return;
-    await Clipboard.setStringAsync(walletAddress);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleSubmitProof = () => {
-    if (cryptoAmount <= 0) {
-      Alert.alert('Enter amount', `Please enter the amount of ${selectedCoin.symbol} you sent before continuing.`);
-      return;
-    }
-    if (!walletAddress || !walletAddressId) {
-      Alert.alert('No deposit address', 'Could not assign a deposit address. Please try again.');
-      return;
-    }
-    router.push({
-      pathname: '/submit-transaction',
-      params: {
-        amount: String(cryptoAmount),
-        coin: selectedCoin.symbol,
-        network: selectedCoin.network,
-        rate: String(rate),
-        depositAddressId: walletAddressId,
+  const actions: Action[] = useMemo(
+    () => [
+      {
+        key: 'deposit',
+        label: 'Deposit',
+        icon: 'arrow-down-outline',
+        onPress: () => router.push('/deposit'),
       },
-    });
-  };
+      {
+        key: 'gift-cards',
+        label: 'Gift cards',
+        icon: 'gift-outline',
+        onPress: () => router.push('/gift-cards'),
+        primary: true,
+      },
+      {
+        key: 'withdraw',
+        label: 'Withdraw',
+        icon: 'arrow-up-outline',
+        onPress: () => router.push('/withdraw'),
+      },
+    ],
+    [router]
+  );
+
+  const board = rates.data?.assets ?? [];
+  const ngnPerUsd = rates.data ? Number(rates.data.ngnPerUsd) : null;
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Header */}
-        <View style={styles.headerRow}>
-          <View>
-            <Text style={styles.title}>Convert</Text>
-            <Text style={styles.titleAccent}>{selectedCoin.symbol} → NGN</Text>
-          </View>
-          <View style={styles.headerBadge}>
-            <View style={styles.headerBadgeDot} />
-            <Text style={styles.headerBadgeText}>Instant</Text>
-          </View>
-        </View>
-        <Text style={styles.subtitle}>Send crypto and receive Naira at live rates</Text>
+    <Screen tabBarClearance refreshing={refreshing} onRefresh={onRefresh}>
+      <View style={{ marginTop: space.snug, marginBottom: space.comfy }}>
+        <Text variant="title">Convert</Text>
+      </View>
 
-        {/* Coin Selector */}
-        <View style={styles.coinSelector}>
-          <View style={[styles.coinSelectorRow, { gap: COIN_GAP }]}>
-            {COINS.map((coin) => {
-              const isSelected = coin.id === selectedCoinId;
-              return (
-                <TouchableOpacity
-                  key={coin.id}
-                  style={[
-                    styles.coinButton,
-                    { width: coinButtonWidth },
-                    isSelected && styles.coinButtonSelected,
-                  ]}
-                  onPress={() => setSelectedCoinId(coin.id)}
-                  activeOpacity={0.8}
-                >
-                  <View style={[styles.coinLogo, { backgroundColor: coin.color }]}>
-                    <Text style={styles.coinSymbol}>{coin.symbol}</Text>
-                  </View>
-                  <Text style={styles.coinName} numberOfLines={1}>{coin.name}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        {/* Rate Card */}
-        <View style={styles.rateCard}>
-          <View style={styles.rateCardTop}>
-            <Text style={styles.rateCardLabel}>Live rate</Text>
-            {!rateError && (
-              <View style={styles.livePill}>
-                <View style={styles.livePillDot} />
-                <Text style={styles.livePillText}>LIVE</Text>
-              </View>
-            )}
-          </View>
-          {!rateLoading && !rateError && rateUpdatedAt && (
-            <Text style={styles.rateUpdated}>
-              Updated {formatTimeSince(rateUpdatedAt)}
+      {/* The headline rate. This is the number people mean when they ask "what's
+          the rate today?" — naira per dollar, not naira per coin. It leads the
+          screen because every asset price below is this figure times a USD price,
+          and because it's the one number users compare between apps. */}
+      <Stagger index={0}>
+        <Surface level={1} style={{ gap: space.tight }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: c.positive }} />
+            <Text variant="eyebrow" color="tertiaryText">
+              Today’s rate
             </Text>
-          )}
-          {rateLoading ? (
-            <ActivityIndicator size="small" color={c.primaryAccent} style={styles.rateLoader} />
-          ) : rateError ? (
-            <Text style={styles.rateError}>Unable to load rate</Text>
+          </View>
+
+          {rates.isLoading ? (
+            <Skeleton width={200} height={36} radius={8} style={{ marginTop: 4 }} />
           ) : (
-            <View style={styles.rateRow}>
-              <Text style={styles.rateFrom}>1 {selectedCoin.symbol}</Text>
-              <Ionicons name="arrow-forward" size={18} color={c.tertiaryText} style={styles.rateArrow} />
-              <Text style={styles.rateTo}>{rateFormatted}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.snug }}>
+              <Money value={ngnPerUsd} variant="figure" whole />
+              <Text variant="body" color="secondaryText">
+                per $1
+              </Text>
             </View>
           )}
+
+          <Text variant="caption" color="tertiaryText">
+            This is what you get. No fees deducted after.
+          </Text>
+        </Surface>
+      </Stagger>
+
+      <Stagger index={1}>
+        <View style={{ marginTop: space.comfy }}>
+          <ActionBar actions={actions} />
         </View>
+      </Stagger>
 
-        {/* Calculator */}
-        <View style={styles.calcCard}>
-          <Text style={styles.calcCardTitle}>Quick convert</Text>
-          <View style={styles.calcPanel}>
-            <Text style={styles.calcPanelLabel}>You send</Text>
-            <View style={styles.calcInputWrap}>
-              <TextInput
-                style={styles.calcInput}
-                value={cryptoInput}
-                onChangeText={setCryptoInput}
-                placeholder="0.00"
-                placeholderTextColor={c.tertiaryText}
-                keyboardType="decimal-pad"
-                editable={!rateLoading}
-              />
-              <View style={[styles.calcAssetBadge, { backgroundColor: selectedCoin.color }]}>
-                <Text style={styles.calcAssetText}>{selectedCoin.symbol}</Text>
-              </View>
-            </View>
-          </View>
-          <View style={styles.calcArrowWrap}>
-            <View style={styles.calcArrowLine} />
-            <View style={styles.calcArrowCircle}>
-              <Ionicons name="arrow-down" size={20} color={c.primaryBackground} />
-            </View>
-            <View style={styles.calcArrowLine} />
-          </View>
-          <View style={[styles.calcPanel, styles.calcPanelReceive]}>
-            <Text style={styles.calcPanelLabel}>You receive</Text>
-            <View style={styles.calcOutputWrap}>
-              <Text style={[styles.calcOutput, nairaAmount <= 0 && styles.calcOutputMuted]}>
-                {nairaDisplay}
-              </Text>
-              <View style={[styles.calcAssetBadge, styles.calcAssetBadgeNgn]}>
-                <Text style={styles.calcAssetText}>NGN</Text>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        {/* Wallet Address Card */}
-        <View style={styles.walletCard}>
-          <View style={styles.walletCardHeader}>
-            <View style={styles.walletTitleRow}>
-              <View style={[styles.walletIconWrap, { backgroundColor: `${selectedCoin.color}20` }]}>
-                <Ionicons name="wallet-outline" size={20} color={selectedCoin.color} />
-              </View>
-              <Text style={styles.walletTitle}>Deposit address</Text>
-            </View>
-            <View style={[styles.networkBadge, { backgroundColor: `${selectedCoin.color}20` }]}>
-              <Text style={[styles.networkBadgeText, { color: selectedCoin.color }]}>{selectedCoin.network}</Text>
-            </View>
-          </View>
-          <Text style={styles.walletSubtitle}>Send {selectedCoin.symbol} to this address only</Text>
-
-          {depositLoading ? (
-            <View style={styles.addressPlaceholder}>
-              <ActivityIndicator size="small" color={c.primaryAccent} />
-              <Text style={[styles.addressPlaceholderText, { marginTop: 10 }]}>
-                Generating your deposit address…
-              </Text>
-            </View>
-          ) : depositError || !walletAddress ? (
-            <View style={styles.addressPlaceholder}>
-              <Ionicons name="alert-circle-outline" size={28} color={c.error} />
-              <Text style={[styles.addressPlaceholderText, { marginTop: 8 }]}>
-                No address available for {selectedCoin.symbol} right now.
-              </Text>
-              <TouchableOpacity onPress={() => refetchDeposit()} style={{ marginTop: 10 }}>
-                <Text style={{ color: c.primaryAccent, fontWeight: '700', fontSize: 14 }}>Try again</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <>
-              <View style={styles.qrSection}>
-                <Text style={styles.qrLabel}>Scan to pay</Text>
-                <View style={styles.qrContainer}>
-                  <Image
-                    source={{
-                      uri: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(walletAddress)}`,
-                    }}
-                    style={styles.qrImage}
-                    resizeMode="contain"
-                  />
-                </View>
-              </View>
-
-              <View style={styles.addressSection}>
-                <View style={styles.addressLabelRow}>
-                  <Text style={styles.addressLabel}>Your unique deposit address</Text>
-                  <View style={styles.uniqueBadge}>
-                    <Text style={styles.uniqueBadgeText}>UNIQUE</Text>
+      <Stagger index={2}>
+        <Section title="Coin prices">
+          {rates.isLoading ? (
+            <Surface level={1} style={{ gap: space.comfy }}>
+              {[0, 1, 2, 3, 4].map((i) => (
+                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}>
+                  <Skeleton width={40} height={40} radius={20} />
+                  <View style={{ flex: 1, gap: 6 }}>
+                    <Skeleton width={70} height={13} />
+                    <Skeleton width={100} height={11} />
                   </View>
+                  <Skeleton width={90} height={16} />
                 </View>
-                <View style={styles.addressBox}>
-                  <Text style={styles.walletAddress} selectable numberOfLines={2}>
-                    {walletAddress}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.copyBtn, copied && styles.copyBtnSuccess]}
-                  onPress={handleCopy}
-                  activeOpacity={0.85}
-                >
-                  <Ionicons
-                    name={copied ? 'checkmark-circle' : 'copy-outline'}
-                    size={20}
-                    color={c.buttonTextOnAccent}
-                  />
-                  <Text style={styles.copyBtnText}>
-                    {copied ? 'Copied!' : 'Copy address'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </>
+              ))}
+            </Surface>
+          ) : board.length === 0 ? (
+            <Surface level={1} style={{ alignItems: 'center', gap: space.snug }}>
+              <Ionicons name="cloud-offline-outline" size={22} color={c.quaternaryText} />
+              <Text variant="bodySmall" color="tertiaryText" align="center">
+                Rates are unavailable right now. Pull down to try again.
+              </Text>
+            </Surface>
+          ) : (
+            <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
+              {board.map((row, i) => {
+                const change = row.changePct24h;
+                const rose = (change ?? 0) >= 0;
+                return (
+                  <View
+                    key={row.asset}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: space.base,
+                      paddingVertical: space.base,
+                      ...(i === board.length - 1
+                        ? null
+                        : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
+                    }}
+                  >
+                    <AssetGlyph asset={row.asset} size={40} />
+
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text variant="subheading">{row.asset}</Text>
+                      <Text variant="caption" color="tertiaryText" style={{ marginTop: 2 }}>
+                        {ASSET_META[row.asset]?.name ?? row.asset}
+                      </Text>
+                    </View>
+
+                    {/* USD price leads. The naira figure below is just this times
+                        the headline rate, and ₦97,806,770 next to every coin is
+                        noise — the dollar price is the actual market signal. */}
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Money
+                        value={Number(row.usdPrice)}
+                        currency="USD"
+                        maxFractionDigits={Number(row.usdPrice) < 10 ? 4 : 2}
+                        live
+                      />
+                      <View
+                        style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2 }}
+                      >
+                        {change != null ? (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+                            <Ionicons
+                              name={rose ? 'caret-up' : 'caret-down'}
+                              size={9}
+                              color={rose ? c.positive : c.negative}
+                            />
+                            <Text variant="ticker" color={rose ? 'positive' : 'negative'}>
+                              {Math.abs(change).toFixed(2)}%
+                            </Text>
+                          </View>
+                        ) : null}
+                        <Money
+                          value={Number(row.rate)}
+                          variant="amountSmall"
+                          color="tertiaryText"
+                          whole
+                        />
+                      </View>
+                    </View>
+                  </View>
+                );
+              })}
+            </Surface>
           )}
-        </View>
+        </Section>
+      </Stagger>
 
-        {/* Important Notice */}
-        <View style={styles.noticeCard}>
-          <View style={styles.noticeTitleRow}>
-            <Ionicons name="information-circle" size={22} color={c.pending} />
-            <Text style={styles.noticeTitle}>Important</Text>
-          </View>
-          <Text style={styles.noticeText}>• {selectedCoin.warning}</Text>
-          <Text style={styles.noticeText}>• Minimum amount may apply</Text>
-          <Text style={styles.noticeText}>• After sending, submit your proof below</Text>
-        </View>
-
-        {/* Submit Button */}
-        <TouchableOpacity
-          style={styles.submitBtn}
-          onPress={handleSubmitProof}
-          activeOpacity={0.9}
+      <Stagger index={3}>
+        <View
+          style={{
+            flexDirection: 'row',
+            gap: space.snug,
+            marginTop: space.roomy,
+            paddingHorizontal: space.tight,
+          }}
         >
-          <Text style={styles.submitBtnText}>{"I've sent"} {selectedCoin.symbol} — Submit proof</Text>
-          <Ionicons name="arrow-forward" size={20} color={c.buttonTextOnAccent} style={styles.submitBtnIcon} />
-        </TouchableOpacity>
-
-        <View style={styles.bottomSpacer} />
-      </ScrollView>
-    </SafeAreaView>
+          <Ionicons name="information-circle-outline" size={14} color={c.tertiaryText} />
+          <Text variant="caption" color="tertiaryText" style={{ flex: 1 }}>
+            Prices update every 30 seconds. The rate above is what you receive per dollar of
+            value — nothing is deducted afterwards.
+          </Text>
+        </View>
+      </Stagger>
+    </Screen>
   );
-}
-
-function formatTimeSince(date: Date | null): string {
-  if (!date) return '';
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 10) return 'just now';
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ago`;
-}
-
-function createStyles(c: Colors) {
-  return StyleSheet.create({
-    safe: {
-      flex: 1,
-      backgroundColor: c.primaryBackground,
-    },
-    scroll: {
-      flex: 1,
-    },
-    scrollContent: {
-      paddingHorizontal: 20,
-      paddingTop: 12,
-    },
-    headerRow: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      justifyContent: 'space-between',
-      marginBottom: 4,
-    },
-    title: {
-      fontSize: 28,
-      fontWeight: '800',
-      color: c.primaryText,
-      letterSpacing: -0.5,
-    },
-    titleAccent: {
-      fontSize: 18,
-      fontWeight: '600',
-      color: c.primaryAccent,
-      marginTop: 2,
-      letterSpacing: 0.3,
-    },
-    headerBadge: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      backgroundColor: c.accentDim,
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      borderRadius: 20,
-    },
-    headerBadgeDot: {
-      width: 6,
-      height: 6,
-      borderRadius: 3,
-      backgroundColor: c.primaryAccent,
-    },
-    headerBadgeText: {
-      fontSize: 12,
-      fontWeight: '700',
-      color: c.primaryAccent,
-      letterSpacing: 0.5,
-    },
-    subtitle: {
-      fontSize: 14,
-      color: c.secondaryText,
-      marginBottom: 16,
-      lineHeight: 20,
-    },
-    coinSelector: {
-      marginBottom: 20,
-      marginHorizontal: -20,
-    },
-    coinSelectorRow: {
-      flexDirection: 'row',
-      paddingHorizontal: 20,
-    },
-    coinButton: {
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingVertical: 10,
-      paddingHorizontal: 6,
-      borderRadius: 14,
-      borderWidth: 2,
-      borderColor: 'transparent',
-      backgroundColor: c.surface,
-    },
-    coinButtonSelected: {
-      borderColor: c.primaryAccent,
-      backgroundColor: c.surface,
-    },
-    coinLogo: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginBottom: 6,
-    },
-    coinSymbol: {
-      fontSize: 12,
-      fontWeight: '800',
-      color: '#FFFFFF',
-    },
-    coinName: {
-      fontSize: 11,
-      fontWeight: '600',
-      color: c.secondaryText,
-      textAlign: 'center',
-    },
-    rateCard: {
-      backgroundColor: c.surface,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: c.border,
-      padding: 20,
-      marginBottom: 20,
-      overflow: 'hidden',
-      ...Platform.select({
-        ios: {
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.25,
-          shadowRadius: 12,
-        },
-        android: { elevation: 6 },
-      }),
-    },
-    rateCardTop: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: 12,
-    },
-    rateCardLabel: {
-      fontSize: 11,
-      fontWeight: '600',
-      color: c.secondaryText,
-      textTransform: 'uppercase',
-      letterSpacing: 1.2,
-    },
-    livePill: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      backgroundColor: c.accentDim,
-      paddingHorizontal: 10,
-      paddingVertical: 4,
-      borderRadius: 12,
-    },
-    livePillDot: {
-      width: 6,
-      height: 6,
-      borderRadius: 3,
-      backgroundColor: c.primaryAccent,
-    },
-    livePillText: {
-      fontSize: 10,
-      fontWeight: '800',
-      color: c.primaryAccent,
-      letterSpacing: 0.8,
-    },
-    rateRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      flexWrap: 'wrap',
-    },
-    rateFrom: {
-      fontSize: 18,
-      fontWeight: '600',
-      color: c.primaryText,
-    },
-    rateArrow: {
-      marginHorizontal: 10,
-    },
-    rateTo: {
-      fontSize: 22,
-      fontWeight: '800',
-      color: c.primaryAccent,
-      letterSpacing: -0.3,
-    },
-    rateUpdated: {
-      fontSize: 10,
-      color: c.tertiaryText,
-      marginBottom: 8,
-      letterSpacing: 0.3,
-    },
-    rateLoader: {
-      marginVertical: 8,
-    },
-    rateError: {
-      fontSize: 14,
-      color: c.error,
-      marginTop: 4,
-    },
-    calcCard: {
-      backgroundColor: c.surface,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: c.border,
-      padding: 20,
-      marginBottom: 20,
-      ...Platform.select({
-        ios: {
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.2,
-          shadowRadius: 12,
-        },
-        android: { elevation: 4 },
-      }),
-    },
-    calcCardTitle: {
-      fontSize: 11,
-      fontWeight: '600',
-      color: c.secondaryText,
-      textTransform: 'uppercase',
-      letterSpacing: 1.2,
-      marginBottom: 16,
-    },
-    calcPanel: {
-      marginBottom: 0,
-    },
-    calcPanelReceive: {
-      marginBottom: 0,
-      marginTop: 0,
-    },
-    calcPanelLabel: {
-      fontSize: 12,
-      fontWeight: '500',
-      color: c.secondaryText,
-      marginBottom: 10,
-    },
-    calcInputWrap: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: c.surfaceInput,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingHorizontal: 16,
-      paddingVertical: Platform.OS === 'ios' ? 14 : 10,
-    },
-    calcInput: {
-      flex: 1,
-      fontSize: 24,
-      fontWeight: '700',
-      color: c.primaryText,
-      paddingVertical: 0,
-      paddingHorizontal: 0,
-      textAlign: 'left',
-    },
-    calcAssetBadge: {
-      backgroundColor: c.borderLight,
-      paddingHorizontal: 12,
-      paddingVertical: 8,
-      borderRadius: 10,
-      marginLeft: 12,
-    },
-    calcAssetBadgeNgn: {
-      backgroundColor: c.successDim,
-    },
-    calcAssetText: {
-      fontSize: 13,
-      fontWeight: '700',
-      color: c.primaryText,
-    },
-    calcArrowWrap: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginVertical: 16,
-    },
-    calcArrowLine: {
-      flex: 1,
-      height: 1,
-      backgroundColor: c.border,
-    },
-    calcArrowCircle: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: c.primaryAccent,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginHorizontal: 12,
-    },
-    calcOutputWrap: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: c.surfaceInput,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: c.border,
-      paddingHorizontal: 16,
-      paddingVertical: Platform.OS === 'ios' ? 14 : 10,
-    },
-    calcOutput: {
-      flex: 1,
-      fontSize: 24,
-      fontWeight: '700',
-      color: c.primaryAccent,
-    },
-    calcOutputMuted: {
-      color: c.tertiaryText,
-    },
-    walletCard: {
-      backgroundColor: c.surface,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: c.border,
-      padding: 20,
-      marginBottom: 20,
-      ...Platform.select({
-        ios: {
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 2 },
-          shadowOpacity: 0.15,
-          shadowRadius: 8,
-        },
-        android: { elevation: 3 },
-      }),
-    },
-    walletCardHeader: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      marginBottom: 6,
-    },
-    walletTitleRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-    },
-    walletIconWrap: {
-      width: 36,
-      height: 36,
-      borderRadius: 10,
-      backgroundColor: c.accentDim,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    walletTitle: {
-      fontSize: 18,
-      fontWeight: '700',
-      color: c.primaryText,
-    },
-    networkBadge: {
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      borderRadius: 8,
-    },
-    networkBadgeText: {
-      fontSize: 11,
-      fontWeight: '700',
-      letterSpacing: 0.5,
-    },
-    walletSubtitle: {
-      fontSize: 13,
-      color: c.secondaryText,
-      marginBottom: 20,
-    },
-    qrSection: {
-      alignItems: 'center',
-      marginBottom: 24,
-    },
-    qrLabel: {
-      fontSize: 11,
-      fontWeight: '600',
-      color: c.secondaryText,
-      textTransform: 'uppercase',
-      letterSpacing: 1.2,
-      marginBottom: 12,
-    },
-    qrContainer: {
-      padding: 16,
-      backgroundColor: '#FFFFFF',
-      borderRadius: 16,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    qrImage: {
-      width: 200,
-      height: 200,
-    },
-    addressSection: {
-      borderTopWidth: 1,
-      borderTopColor: c.border,
-      paddingTop: 20,
-    },
-    addressLabelRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 8,
-      marginBottom: 10,
-    },
-    addressLabel: {
-      fontSize: 11,
-      fontWeight: '600',
-      color: c.secondaryText,
-      textTransform: 'uppercase',
-      letterSpacing: 1.2,
-    },
-    uniqueBadge: {
-      backgroundColor: c.accentDim,
-      paddingHorizontal: 8,
-      paddingVertical: 3,
-      borderRadius: 6,
-    },
-    uniqueBadgeText: {
-      fontSize: 9,
-      fontWeight: '800',
-      color: c.primaryAccent,
-      letterSpacing: 0.8,
-    },
-    addressBox: {
-      backgroundColor: c.surfaceInput,
-      borderRadius: 14,
-      padding: 14,
-      marginBottom: 14,
-      borderWidth: 1,
-      borderColor: c.border,
-    },
-    walletAddress: {
-      fontSize: 13,
-      color: c.primaryText,
-      fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    },
-    copyBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 8,
-      backgroundColor: c.primaryAccent,
-      borderRadius: 14,
-      paddingVertical: 14,
-    },
-    copyBtnSuccess: {
-      opacity: 0.9,
-    },
-    copyBtnText: {
-      fontSize: 15,
-      fontWeight: '700',
-      color: c.buttonTextOnAccent,
-    },
-    addressPlaceholder: {
-      padding: 20,
-      backgroundColor: c.surfaceInput,
-      borderRadius: 14,
-      alignItems: 'center',
-    },
-    addressPlaceholderText: {
-      fontSize: 13,
-      color: c.secondaryText,
-    },
-    noticeCard: {
-      backgroundColor: c.surface,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: c.border,
-      borderLeftWidth: 4,
-      borderLeftColor: c.pending,
-      padding: 20,
-      marginBottom: 24,
-    },
-    noticeTitleRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 8,
-      marginBottom: 12,
-    },
-    noticeTitle: {
-      fontSize: 16,
-      fontWeight: '700',
-      color: c.pending,
-    },
-    noticeText: {
-      fontSize: 13,
-      color: c.secondaryText,
-      marginBottom: 6,
-      lineHeight: 20,
-    },
-    submitBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: 10,
-      backgroundColor: c.primaryAccent,
-      borderRadius: 14,
-      height: 56,
-      ...Platform.select({
-        ios: {
-          shadowColor: c.primaryAccent,
-          shadowOffset: { width: 0, height: 4 },
-          shadowOpacity: 0.35,
-          shadowRadius: 8,
-        },
-        android: { elevation: 4 },
-      }),
-    },
-    submitBtnText: {
-      fontSize: 16,
-      fontWeight: '700',
-      color: c.buttonTextOnAccent,
-    },
-    submitBtnIcon: {
-      marginLeft: 0,
-    },
-    bottomSpacer: {
-      height: 32,
-    },
-  });
 }

@@ -1,28 +1,47 @@
-import { colors } from '@/constants/colors';
-import { config } from '@/constants/config';
-import { api } from '@/services/api';
-import { useAuthStore } from '@/store/authStore';
-import { formatCurrency } from '@/utils/formatCurrency';
-import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from '@tanstack/react-query';
+/**
+ * Gift cards — sell a card for naira.
+ *
+ * Replaces Sell as the second action on the home bar. Two steps: pick the brand,
+ * then enter the card. The split is what keeps the first screen a clean grid of
+ * recognisable logos — people find their card by its logo, not by reading a list
+ * of names, so the grid is image-led and the text is secondary.
+ *
+ * The payout figure is computed and shown live as the denomination is typed,
+ * before anything is submitted. A gift card sale is a manual-review flow — an
+ * admin verifies the card and pays out — so the one thing the user must be able
+ * to check up front is what they'll get. Leaving that to appear after submission
+ * is how a flow gets abandoned.
+ *
+ * The submit path (multipart XHR to /gift-cards/transactions, with the proof
+ * screenshot) is carried over unchanged from the previous version. It works
+ * against the live backend and is not what this redesign is touching.
+ */
+
+import { useCallback, useMemo, useState } from 'react';
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { Image } from 'expo-image';
+import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '@/design';
 import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
+  Button,
+  EmptyState,
+  Input,
+  Money,
+  Screen,
+  Section,
+  Skeleton,
+  Stagger,
+  Surface,
   Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+  useToast,
+} from '@/components/ui';
+import ScreenHeader from '@/components/navigation/ScreenHeader';
+import { api } from '@/services/api';
+import { config } from '@/constants/config';
+import { useAuthStore } from '@/store/authStore';
+import { reportError } from '@/services/monitoring';
 
 interface CountryRate {
   code: string;
@@ -40,82 +59,93 @@ interface GiftCardCategory {
   countries: CountryRate[];
 }
 
-// Map known gift card brand slugs → logo image URLs
-const BRAND_IMAGE: Record<string, string> = {
-  amazon:       "https://logo.clearbit.com/amazon.com",
-  "amazon-gift-card": "https://logo.clearbit.com/amazon.com",
-  apple:        "https://logo.clearbit.com/apple.com",
-  itunes:       "https://logo.clearbit.com/apple.com",
-  "apple-itunes": "https://logo.clearbit.com/apple.com",
-  "google-play": "https://logo.clearbit.com/play.google.com",
-  google:       "https://logo.clearbit.com/google.com",
-  steam:        "https://logo.clearbit.com/steampowered.com",
-  netflix:      "https://logo.clearbit.com/netflix.com",
-  spotify:      "https://logo.clearbit.com/spotify.com",
-  playstation:  "https://logo.clearbit.com/playstation.com",
-  "playstation-network": "https://logo.clearbit.com/playstation.com",
-  xbox:         "https://logo.clearbit.com/xbox.com",
-  "xbox-live":  "https://logo.clearbit.com/xbox.com",
-  nintendo:     "https://logo.clearbit.com/nintendo.com",
-  ebay:         "https://logo.clearbit.com/ebay.com",
-  walmart:      "https://logo.clearbit.com/walmart.com",
-  target:       "https://logo.clearbit.com/target.com",
-  visa:         "https://logo.clearbit.com/visa.com",
-  mastercard:   "https://logo.clearbit.com/mastercard.com",
-  vanilla:      "https://logo.clearbit.com/vanillagift.com",
-};
-
-const BRAND_COLOR: Record<string, string> = {
-  amazon: "#FF9900",
-  apple: "#1C1C1E",
-  itunes: "#FC3C44",
-  "google-play": "#34A853",
-  google: "#4285F4",
-  steam: "#1B2838",
-  netflix: "#E50914",
-  spotify: "#1DB954",
-  playstation: "#003791",
-  xbox: "#107C10",
-  nintendo: "#E4000F",
-  ebay: "#E53238",
-  walmart: "#0071CE",
-  visa: "#1A1F71",
-  mastercard: "#EB001B",
-};
-
-function getBrandImage(cat: GiftCardCategory): string | null {
-  if (cat.imageUrl) return cat.imageUrl;
-  const slug = cat.slug?.toLowerCase() ?? "";
-  const name = cat.name?.toLowerCase() ?? "";
-  return BRAND_IMAGE[slug] ?? BRAND_IMAGE[name] ?? null;
-}
-
-function getBrandColor(cat: GiftCardCategory): string {
-  const slug = cat.slug?.toLowerCase() ?? "";
-  return BRAND_COLOR[slug] ?? "#6366F1";
-}
-
 interface CategoriesResponse {
   data?: GiftCardCategory[];
 }
 
-const DENOMINATIONS = [10, 25, 50, 100, 200, 500];
+/**
+ * Brand logos by slug. The backend may send `imageUrl`, which wins; this is the
+ * fallback for categories that don't carry one.
+ *
+ * These are remote, unlike the coin marks which are bundled. That's a deliberate
+ * difference: the brand list is server-driven and open-ended, so bundling it
+ * would mean shipping an app update to add a card type. A brand logo failing to
+ * load is also recoverable — the lettermark below reads fine — whereas a missing
+ * coin mark sits on the screen where someone picks which chain to send on.
+ */
+const BRAND_IMAGE: Record<string, string> = {
+  amazon: 'https://logo.clearbit.com/amazon.com',
+  'amazon-gift-card': 'https://logo.clearbit.com/amazon.com',
+  apple: 'https://logo.clearbit.com/apple.com',
+  itunes: 'https://logo.clearbit.com/apple.com',
+  'apple-itunes': 'https://logo.clearbit.com/apple.com',
+  'google-play': 'https://logo.clearbit.com/play.google.com',
+  google: 'https://logo.clearbit.com/google.com',
+  steam: 'https://logo.clearbit.com/steampowered.com',
+  netflix: 'https://logo.clearbit.com/netflix.com',
+  spotify: 'https://logo.clearbit.com/spotify.com',
+  playstation: 'https://logo.clearbit.com/playstation.com',
+  'playstation-network': 'https://logo.clearbit.com/playstation.com',
+  xbox: 'https://logo.clearbit.com/xbox.com',
+  'xbox-live': 'https://logo.clearbit.com/xbox.com',
+  nintendo: 'https://logo.clearbit.com/nintendo.com',
+  ebay: 'https://logo.clearbit.com/ebay.com',
+  walmart: 'https://logo.clearbit.com/walmart.com',
+  target: 'https://logo.clearbit.com/target.com',
+  visa: 'https://logo.clearbit.com/visa.com',
+  mastercard: 'https://logo.clearbit.com/mastercard.com',
+  vanilla: 'https://logo.clearbit.com/vanillagift.com',
+};
+
+const BRAND_COLOR: Record<string, string> = {
+  amazon: '#FF9900',
+  apple: '#A2AAAD',
+  itunes: '#FC3C44',
+  'google-play': '#34A853',
+  google: '#4285F4',
+  steam: '#66C0F4',
+  netflix: '#E50914',
+  spotify: '#1DB954',
+  playstation: '#0070D1',
+  xbox: '#107C10',
+  nintendo: '#E4000F',
+  ebay: '#E53238',
+  walmart: '#0071CE',
+  visa: '#1A1F71',
+  mastercard: '#EB001B',
+};
+
+function brandImage(cat: GiftCardCategory): string | null {
+  if (cat.imageUrl) return cat.imageUrl;
+  const slug = cat.slug?.toLowerCase() ?? '';
+  const name = cat.name?.toLowerCase() ?? '';
+  return BRAND_IMAGE[slug] ?? BRAND_IMAGE[name] ?? null;
+}
+
+function brandColor(cat: GiftCardCategory): string {
+  return BRAND_COLOR[cat.slug?.toLowerCase() ?? ''] ?? '#6366F1';
+}
+
+/** Common face values, offered as chips so the usual case is one tap. */
+const DENOMINATIONS = [25, 50, 100, 200];
 
 export default function GiftCardsScreen() {
   const router = useRouter();
-  const [step, setStep] = useState<'select' | 'details'>('select');
-  const [selectedCategory, setSelectedCategory] = useState<GiftCardCategory | null>(null);
-  const [selectedCountry, setSelectedCountry] = useState<CountryRate | null>(null);
+  const { c, space, radius } = useTheme();
+  const { show } = useToast();
+
+  const [step, setStep] = useState<'select' | 'details' | 'done'>('select');
+  const [category, setCategory] = useState<GiftCardCategory | null>(null);
+  const [country, setCountry] = useState<CountryRate | null>(null);
   const [denomination, setDenomination] = useState('');
   const [cardCode, setCardCode] = useState('');
   const [cardPin, setCardPin] = useState('');
   const [proofImage, setProofImage] = useState<{ uri: string } | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
-  const [showSuccess, setShowSuccess] = useState(false);
-  const [countryPickerOpen, setCountryPickerOpen] = useState(false);
+  const [countryOpen, setCountryOpen] = useState(false);
 
-  const { data: categoriesData, isLoading, isError } = useQuery({
+  const { data: categories = [], isLoading, isError, refetch } = useQuery({
     queryKey: ['giftCardCategories'],
     queryFn: async () => {
       const res = await api.get<CategoriesResponse>('/gift-cards/categories');
@@ -123,27 +153,27 @@ export default function GiftCardsScreen() {
     },
   });
 
-  const categories = categoriesData ?? [];
+  const faceValue = useMemo(() => parseFloat(denomination) || 0, [denomination]);
+  const payout = useMemo(
+    () => (country && faceValue > 0 ? Math.round(faceValue * country.ratePerUnit) : 0),
+    [country, faceValue]
+  );
 
-  const denomNum = useMemo(() => parseFloat(denomination) || 0, [denomination]);
-  const nairaAmount = useMemo(() => {
-    if (!selectedCountry || denomNum <= 0) return 0;
-    return Math.round(denomNum * selectedCountry.ratePerUnit);
-  }, [selectedCountry, denomNum]);
+  const canSubmit =
+    !!category && !!country && faceValue > 0 && cardCode.trim().length > 0 && !!proofImage;
 
-  const canSubmit = !!selectedCategory && !!selectedCountry && denomNum > 0 && cardCode.trim().length > 0 && !!proofImage;
-
-  const handleSelectCategory = (cat: GiftCardCategory) => {
-    setSelectedCategory(cat);
-    setSelectedCountry(cat.countries.length === 1 ? cat.countries[0] : null);
+  const selectCategory = useCallback((cat: GiftCardCategory) => {
+    setCategory(cat);
+    // Single-country cards have no choice to make.
+    setCountry(cat.countries.length === 1 ? cat.countries[0] : null);
     setStep('details');
-  };
+  }, []);
 
-  const handleBack = () => {
+  const goBack = useCallback(() => {
     if (step === 'details') {
       setStep('select');
-      setSelectedCategory(null);
-      setSelectedCountry(null);
+      setCategory(null);
+      setCountry(null);
       setDenomination('');
       setCardCode('');
       setCardPin('');
@@ -152,14 +182,14 @@ export default function GiftCardsScreen() {
     } else {
       router.back();
     }
-  };
+  }, [step, router]);
 
-  const pickImage = async () => {
+  const pickImage = useCallback(async () => {
     try {
       const ImagePicker = await import('expo-image-picker');
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission needed', 'Allow access to your photos to upload a screenshot.');
+        show('Allow photo access to upload the card image', 'warning');
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -171,22 +201,22 @@ export default function GiftCardsScreen() {
         setProofImage({ uri: result.assets[0].uri });
       }
     } catch {
-      Alert.alert('Error', 'Could not open photo library.');
+      show('Could not open your photo library', 'negative');
     }
-  };
+  }, [show]);
 
-  const handleSubmit = async () => {
-    if (!canSubmit || isSubmitting) return;
+  const submit = useCallback(async () => {
+    if (!canSubmit || submitting) return;
     setSubmitError('');
-    setIsSubmitting(true);
+    setSubmitting(true);
 
     try {
       const token = useAuthStore.getState().token;
 
       const formData = new FormData();
-      formData.append('categoryId', selectedCategory!._id);
-      formData.append('country', selectedCountry!.code);
-      formData.append('denomination', String(denomNum));
+      formData.append('categoryId', category!._id);
+      formData.append('country', country!.code);
+      formData.append('denomination', String(faceValue));
       formData.append('cardCode', cardCode.trim());
       if (cardPin.trim()) formData.append('cardPin', cardPin.trim());
 
@@ -194,9 +224,15 @@ export default function GiftCardsScreen() {
         const filename = proofImage.uri.split('/').pop() || 'proof.jpg';
         const match = /\.(jpe?g|png|webp)$/i.exec(filename);
         const mime = match ? `image/${match[1].toLowerCase()}` : 'image/jpeg';
-        formData.append('proofImage', { uri: proofImage.uri, name: filename, type: mime } as unknown as Blob);
+        formData.append('proofImage', {
+          uri: proofImage.uri,
+          name: filename,
+          type: mime,
+        } as unknown as Blob);
       }
 
+      // XHR rather than axios: React Native's fetch/axios multipart handling
+      // drops the file on some Android builds. Carried over unchanged.
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${config.apiUrl}/api/v1/gift-cards/transactions`);
@@ -205,458 +241,426 @@ export default function GiftCardsScreen() {
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve();
           } else {
-            let msg = 'Submission failed. Please try again.';
-            try { msg = JSON.parse(xhr.responseText)?.message ?? msg; } catch {}
+            let msg = 'Could not submit the card. Try again.';
+            try {
+              msg = JSON.parse(xhr.responseText)?.message ?? msg;
+            } catch {}
             reject(new Error(msg));
           }
         };
-        xhr.onerror = () => reject(new Error(`Cannot reach server (${config.apiUrl})`));
-        xhr.ontimeout = () => reject(new Error('Request timed out.'));
+        xhr.onerror = () => reject(new Error('Cannot reach Naivolt. Check your connection.'));
+        xhr.ontimeout = () => reject(new Error('That took too long. Try again.'));
         xhr.timeout = 30000;
         xhr.send(formData);
       });
 
-      setShowSuccess(true);
-    } catch (err: unknown) {
-      const e = err as { message?: string };
-      setSubmitError(e?.message ?? 'Failed to submit. Please try again.');
+      setStep('done');
+    } catch (err) {
+      const message = (err as { message?: string })?.message ?? 'Could not submit the card.';
+      setSubmitError(message);
+      reportError(err, { flow: 'giftCardSubmit', categorySlug: category?.slug });
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(false);
     }
-  };
+  }, [canSubmit, submitting, category, country, faceValue, cardCode, cardPin, proofImage]);
 
-  return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={handleBack} hitSlop={12} activeOpacity={0.8}>
-            <Ionicons name="arrow-back" size={22} color={colors.primaryText} />
-          </TouchableOpacity>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.headerTitle}>
-              {step === 'select' ? 'Sell Gift Cards' : selectedCategory?.name ?? 'Gift Card'}
-            </Text>
-            <Text style={styles.headerSub}>
-              {step === 'select' ? 'Select a card type to sell' : 'Enter card details'}
-            </Text>
+  // ── Submitted ───────────────────────────────────────────────────────
+  if (step === 'done') {
+    return (
+      <Screen edges={['top']} scroll={false}>
+        <ScreenHeader />
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', gap: space.comfy }}>
+          <View
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 32,
+              backgroundColor: c.positiveDim,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Ionicons name="checkmark" size={30} color={c.positive} />
           </View>
+
+          <Text variant="title" align="center">
+            Card submitted
+          </Text>
+          <Money value={payout} variant="figure" />
+          <Text
+            variant="bodySmall"
+            color="secondaryText"
+            align="center"
+            style={{ maxWidth: 300 }}
+          >
+            We’re verifying your {category?.name} card now. Once it clears, this lands in your bank
+            account and you’ll get a notification.
+          </Text>
+
+          <Button
+            title="Done"
+            onPress={() => router.back()}
+            size="lg"
+            style={{ marginTop: space.comfy, minWidth: 200 }}
+          />
         </View>
+      </Screen>
+    );
+  }
 
-        {step === 'select' ? (
-          /* ── STEP 1: Category grid ───────────────────────────────────── */
-          <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-            {isLoading ? (
-              <View style={styles.centered}>
-                <ActivityIndicator size="large" color={colors.primaryAccent} />
-                <Text style={styles.loadingText}>Loading categories…</Text>
-              </View>
-            ) : isError || categories.length === 0 ? (
-              <View style={styles.centered}>
-                <Ionicons name="alert-circle-outline" size={40} color={colors.error} />
-                <Text style={styles.errorText}>Could not load gift card types.</Text>
-              </View>
-            ) : (
-              <>
-                <Text style={styles.sectionLabel}>Available cards</Text>
-                <View style={styles.grid}>
-                  {categories.map((cat) => {
-                    const brandImg = getBrandImage(cat);
-                    const brandColor = getBrandColor(cat);
-                    return (
-                      <TouchableOpacity
-                        key={cat._id}
-                        style={styles.categoryCard}
-                        onPress={() => handleSelectCategory(cat)}
-                        activeOpacity={0.82}
-                      >
-                        {/* Card image area */}
-                        <View style={[styles.cardImageWrap, { backgroundColor: brandColor }]}>
-                          {brandImg ? (
-                            <Image
-                              source={{ uri: brandImg }}
-                              style={styles.cardBrandLogo}
-                              resizeMode="contain"
-                            />
-                          ) : (
-                            <Text style={styles.cardEmojiFallback}>{cat.emoji}</Text>
-                          )}
-                        </View>
-                        <View style={styles.cardBody}>
-                          <Text style={styles.categoryName} numberOfLines={1}>{cat.name}</Text>
-                          <Text style={styles.categoryRate}>
-                            ₦{Math.max(...cat.countries.map((c) => c.ratePerUnit)).toLocaleString()}/unit
-                          </Text>
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </>
-            )}
-          </ScrollView>
+  // ── Step 1: pick a brand ────────────────────────────────────────────
+  if (step === 'select') {
+    return (
+      <Screen edges={['top']} tabBarClearance>
+        <ScreenHeader title="Sell a gift card" onBack={goBack} />
+
+        {isLoading ? (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.base, marginTop: space.comfy }}>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <Skeleton key={i} width="47%" height={112} radius={radius.tile} />
+            ))}
+          </View>
+        ) : isError ? (
+          <View style={{ marginTop: space.major }}>
+            <EmptyState
+              icon="cloud-offline-outline"
+              title="Couldn’t load card types"
+              body="Check your connection and try again."
+              actionLabel="Retry"
+              onAction={() => refetch()}
+            />
+          </View>
+        ) : categories.length === 0 ? (
+          <View style={{ marginTop: space.major }}>
+            <EmptyState
+              icon="gift-outline"
+              title="No cards available right now"
+              body="Card types are added by Naivolt. Check back shortly."
+            />
+          </View>
         ) : (
-          /* ── STEP 2: Details form ────────────────────────────────────── */
-          <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-
-            {/* Country selector */}
-            <Text style={styles.sectionLabel}>Country</Text>
-            <TouchableOpacity
-              style={styles.card}
-              onPress={() => setCountryPickerOpen(true)}
-              activeOpacity={0.85}
-            >
-              {selectedCountry ? (
-                <View style={styles.selectedCountryRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.selectedCountryName}>{selectedCountry.name}</Text>
-                    <Text style={styles.selectedCountryRate}>
-                      Rate: ₦{selectedCountry.ratePerUnit.toLocaleString()} per {selectedCountry.currency}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-down" size={20} color={colors.secondaryText} />
-                </View>
-              ) : (
-                <View style={styles.selectedCountryRow}>
-                  <Text style={styles.placeholderText}>Select country</Text>
-                  <Ionicons name="chevron-down" size={20} color={colors.secondaryText} />
-                </View>
-              )}
-            </TouchableOpacity>
-
-            {/* Denomination */}
-            <Text style={styles.sectionLabel}>Card Value ({selectedCountry?.currency ?? 'USD'})</Text>
-            <View style={styles.card}>
-              <View style={styles.denomRow}>
-                {DENOMINATIONS.map((d) => (
-                  <TouchableOpacity
-                    key={d}
-                    style={[styles.denomChip, denomination === String(d) && styles.denomChipActive]}
-                    onPress={() => setDenomination(String(d))}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={[styles.denomChipText, denomination === String(d) && styles.denomChipTextActive]}>
-                      {d}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <View style={styles.denomInputWrap}>
-                <TextInput
-                  style={styles.denomInput}
-                  value={denomination}
-                  onChangeText={setDenomination}
-                  placeholder="Or enter custom amount"
-                  placeholderTextColor={colors.tertiaryText}
-                  keyboardType="decimal-pad"
-                />
-                <Text style={styles.denomCurrency}>{selectedCountry?.currency ?? 'USD'}</Text>
-              </View>
-              {nairaAmount > 0 && (
-                <View style={styles.nairaRow}>
-                  <Text style={styles.nairaLabel}>You receive</Text>
-                  <Text style={styles.nairaValue}>{formatCurrency(nairaAmount, 'NGN', true)}</Text>
-                </View>
-              )}
-            </View>
-
-            {/* Card code */}
-            <Text style={styles.sectionLabel}>Card Code</Text>
-            <View style={styles.card}>
-              <TextInput
-                style={styles.codeInput}
-                value={cardCode}
-                onChangeText={setCardCode}
-                placeholder="Enter gift card code"
-                placeholderTextColor={colors.tertiaryText}
-                autoCapitalize="characters"
-                autoCorrect={false}
-              />
-            </View>
-
-            {/* PIN (optional) */}
-            <Text style={styles.sectionLabel}>
-              PIN <Text style={styles.optionalLabel}>(Optional)</Text>
+          <>
+            <Text variant="bodySmall" color="tertiaryText" style={{ marginBottom: space.comfy }}>
+              Pick the card you want to sell. Rates are per dollar of face value.
             </Text>
-            <View style={styles.card}>
-              <TextInput
-                style={styles.codeInput}
-                value={cardPin}
-                onChangeText={setCardPin}
-                placeholder="Enter PIN if applicable"
-                placeholderTextColor={colors.tertiaryText}
-                keyboardType="number-pad"
-              />
-            </View>
 
-            {/* Proof image */}
-            <Text style={styles.sectionLabel}>Proof photo</Text>
-            <View style={styles.card}>
-              <Text style={styles.cardHint}>Upload a clear photo of the gift card or receipt</Text>
-              <TouchableOpacity
-                style={styles.uploadBox}
-                onPress={proofImage ? undefined : pickImage}
-                activeOpacity={0.85}
-              >
-                {proofImage ? (
-                  <View style={styles.previewWrap}>
-                    <Image source={{ uri: proofImage.uri }} style={styles.previewImage} resizeMode="cover" />
-                    <TouchableOpacity style={styles.removeBtn} onPress={() => setProofImage(null)} hitSlop={12}>
-                      <View style={styles.removeBtnInner}>
-                        <Ionicons name="close" size={18} color={colors.primaryText} />
-                      </View>
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <>
-                    <Ionicons name="camera-outline" size={36} color={colors.secondaryText} />
-                    <Text style={styles.uploadTitle}>Tap to upload photo</Text>
-                    <Text style={styles.uploadHint}>PNG or JPG · max 5MB</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
-
-            {/* Notice */}
-            <View style={styles.noticeCard}>
-              <Ionicons name="shield-checkmark-outline" size={18} color={colors.primaryAccent} />
-              <Text style={styles.noticeText}>
-                Your card details are reviewed by our team within 30 minutes. Payout is sent directly to your saved bank account.
-              </Text>
-            </View>
-
-            {submitError ? <Text style={styles.submitError}>{submitError}</Text> : null}
-
-            {/* Submit */}
-            <TouchableOpacity
-              style={[styles.submitBtn, (!canSubmit || isSubmitting) && styles.submitBtnDisabled]}
-              onPress={handleSubmit}
-              disabled={!canSubmit || isSubmitting}
-              activeOpacity={0.9}
-            >
-              {isSubmitting ? (
-                <ActivityIndicator size="small" color="#000" />
-              ) : (
-                <>
-                  <Text style={styles.submitBtnText}>Submit Gift Card</Text>
-                  <Ionicons name="arrow-forward" size={20} color="#000" />
-                </>
-              )}
-            </TouchableOpacity>
-
-            <View style={{ height: 32 }} />
-          </ScrollView>
-        )}
-
-        {/* Country picker modal */}
-        <Modal visible={countryPickerOpen} transparent animationType="slide">
-          <Pressable style={styles.modalOverlay} onPress={() => setCountryPickerOpen(false)}>
-            <View style={styles.pickerSheet}>
-              <View style={styles.pickerHandle} />
-              <Text style={styles.pickerTitle}>Select Country</Text>
-              {selectedCategory?.countries.map((c) => (
-                <TouchableOpacity
-                  key={c.code}
-                  style={[styles.pickerRow, selectedCountry?.code === c.code && styles.pickerRowActive]}
-                  onPress={() => { setSelectedCountry(c); setCountryPickerOpen(false); }}
-                  activeOpacity={0.8}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.pickerRowName}>{c.name}</Text>
-                    <Text style={styles.pickerRowRate}>₦{c.ratePerUnit.toLocaleString()} per {c.currency}</Text>
-                  </View>
-                  {selectedCountry?.code === c.code && (
-                    <Ionicons name="checkmark-circle" size={22} color={colors.primaryAccent} />
-                  )}
-                </TouchableOpacity>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.base }}>
+              {categories.map((cat, i) => (
+                <Stagger key={cat._id} index={Math.min(i, 5)} style={{ width: '47.5%' }}>
+                  <BrandTile category={cat} onPress={() => selectCategory(cat)} />
+                </Stagger>
               ))}
             </View>
-          </Pressable>
-        </Modal>
+          </>
+        )}
+      </Screen>
+    );
+  }
 
-        {/* Success modal */}
-        <Modal visible={showSuccess} transparent animationType="fade">
-          <View style={styles.successOverlay}>
-            <View style={styles.successCard}>
-              <Ionicons name="checkmark-circle" size={64} color={colors.primaryAccent} />
-              <Text style={styles.successTitle}>Gift Card Submitted!</Text>
-              <Text style={styles.successMsg}>
-                We'll review your card and send {nairaAmount > 0 ? formatCurrency(nairaAmount, 'NGN', true) : 'Naira'} to your bank within 30 minutes.
+  // ── Step 2: card details ────────────────────────────────────────────
+  const rateLabel = country
+    ? `₦${country.ratePerUnit.toLocaleString('en-NG')} per ${country.currency}`
+    : 'Select a country to see the rate';
+
+  return (
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <Screen edges={['top']}>
+        <ScreenHeader title={category?.name ?? 'Gift card'} onBack={goBack} />
+
+        {/* Payout preview leads: it's what the user is here to find out. */}
+        <Stagger index={0}>
+          <Surface level={1} style={{ alignItems: 'center', gap: space.tight }}>
+            <Text variant="eyebrow" color="tertiaryText">
+              You get
+            </Text>
+            {payout > 0 ? (
+              <Money value={payout} variant="figure" />
+            ) : (
+              <Text variant="figure" color="quaternaryText">
+                ₦0
               </Text>
-              <TouchableOpacity
-                style={styles.successBtn}
-                onPress={() => { setShowSuccess(false); router.replace('/(tabs)/(main)/history'); }}
-                activeOpacity={0.9}
-              >
-                <Text style={styles.successBtnText}>View History</Text>
-              </TouchableOpacity>
+            )}
+            <Text variant="caption" color="tertiaryText">
+              {rateLabel}
+            </Text>
+          </Surface>
+        </Stagger>
+
+        <Stagger index={1}>
+          <Section title="Card country">
+            {category && category.countries.length > 1 ? (
+              <>
+                <Surface
+                  level={1}
+                  radiusToken="field"
+                  onPress={() => setCountryOpen((v) => !v)}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}
+                >
+                  <Text variant="body" color={country ? 'primaryText' : 'tertiaryText'} style={{ flex: 1 }}>
+                    {country ? `${country.name} · ${country.currency}` : 'Select country'}
+                  </Text>
+                  <Ionicons
+                    name={countryOpen ? 'chevron-up' : 'chevron-down'}
+                    size={17}
+                    color={c.secondaryText}
+                  />
+                </Surface>
+
+                {countryOpen ? (
+                  <Surface level={2} padding={0} style={{ marginTop: space.snug, maxHeight: 260 }}>
+                    <ScrollView>
+                      {category.countries.map((option, i) => (
+                        <Pressable
+                          key={option.code}
+                          onPress={() => {
+                            setCountry(option);
+                            setCountryOpen(false);
+                          }}
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            paddingVertical: space.base,
+                            paddingHorizontal: space.comfy,
+                            ...(i === category.countries.length - 1
+                              ? null
+                              : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
+                          }}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <Text variant="subheading">{option.name}</Text>
+                            <Text variant="amountSmall" color="tertiaryText" style={{ marginTop: 2 }}>
+                              ₦{option.ratePerUnit.toLocaleString('en-NG')} / {option.currency}
+                            </Text>
+                          </View>
+                          {country?.code === option.code ? (
+                            <Ionicons name="checkmark" size={17} color={c.primaryAccent} />
+                          ) : null}
+                        </Pressable>
+                      ))}
+                    </ScrollView>
+                  </Surface>
+                ) : null}
+              </>
+            ) : (
+              <Surface level={1} radiusToken="field">
+                <Text variant="body">
+                  {country ? `${country.name} · ${country.currency}` : '—'}
+                </Text>
+              </Surface>
+            )}
+          </Section>
+        </Stagger>
+
+        <Stagger index={2}>
+          <Section title="Face value">
+            <View style={{ flexDirection: 'row', gap: space.snug, marginBottom: space.base }}>
+              {DENOMINATIONS.map((value) => {
+                const active = faceValue === value;
+                return (
+                  <Surface
+                    key={value}
+                    level={active ? 2 : 1}
+                    radiusToken="chip"
+                    padding={space.snug + 2}
+                    onPress={() => setDenomination(String(value))}
+                    style={{
+                      flex: 1,
+                      alignItems: 'center',
+                      borderWidth: 1,
+                      borderColor: active ? c.primaryAccent : 'transparent',
+                    }}
+                  >
+                    <Text variant="amount" color={active ? 'primaryText' : 'secondaryText'}>
+                      {country?.currency === 'USD' || !country ? '$' : ''}
+                      {value}
+                    </Text>
+                  </Surface>
+                );
+              })}
             </View>
-          </View>
-        </Modal>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+
+            <Input
+              value={denomination}
+              onChangeText={setDenomination}
+              placeholder="Or enter another amount"
+              keyboardType="decimal-pad"
+              mono
+              prefix={country?.currency ?? '$'}
+            />
+          </Section>
+        </Stagger>
+
+        <Stagger index={3}>
+          <Section title="Card details">
+            <Input
+              label="Card code"
+              value={cardCode}
+              onChangeText={setCardCode}
+              placeholder="XXXX-XXXX-XXXX"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              mono
+            />
+            <Input
+              label="PIN (if your card has one)"
+              value={cardPin}
+              onChangeText={setCardPin}
+              placeholder="Optional"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              mono
+            />
+          </Section>
+        </Stagger>
+
+        <Stagger index={4}>
+          <Section title="Card image">
+            {proofImage ? (
+              <Surface level={1} style={{ gap: space.base }}>
+                <Image
+                  source={{ uri: proofImage.uri }}
+                  style={{ width: '100%', height: 180, borderRadius: radius.tile }}
+                  contentFit="cover"
+                />
+                <View style={{ flexDirection: 'row', gap: space.snug }}>
+                  <Button title="Replace" variant="secondary" size="sm" onPress={pickImage} />
+                  <Button
+                    title="Remove"
+                    variant="ghost"
+                    size="sm"
+                    onPress={() => setProofImage(null)}
+                  />
+                </View>
+              </Surface>
+            ) : (
+              <Surface
+                level={1}
+                onPress={pickImage}
+                style={{
+                  alignItems: 'center',
+                  gap: space.snug,
+                  paddingVertical: space.section,
+                  borderWidth: 1,
+                  borderColor: c.border,
+                  borderStyle: 'dashed',
+                }}
+              >
+                <Ionicons name="image-outline" size={24} color={c.tertiaryText} />
+                <Text variant="subheading">Add a photo of the card</Text>
+                <Text variant="caption" color="tertiaryText" align="center" style={{ maxWidth: 240 }}>
+                  Clear enough to read the code. This is what our team verifies against.
+                </Text>
+              </Surface>
+            )}
+          </Section>
+        </Stagger>
+
+        {submitError ? (
+          <Surface
+            level={1}
+            accentEdge={c.negative}
+            style={{ marginTop: space.comfy, flexDirection: 'row', gap: space.snug }}
+          >
+            <Ionicons name="alert-circle" size={17} color={c.negative} />
+            <Text variant="bodySmall" color="negative" style={{ flex: 1 }}>
+              {submitError}
+            </Text>
+          </Surface>
+        ) : null}
+
+        <Button
+          title={payout > 0 ? `Sell for ₦${payout.toLocaleString('en-NG')}` : 'Sell card'}
+          onPress={submit}
+          disabled={!canSubmit}
+          loading={submitting}
+          haptic="medium"
+          size="lg"
+          fullWidth
+          style={{ marginTop: space.roomy }}
+        />
+
+        <Text
+          variant="caption"
+          color="tertiaryText"
+          align="center"
+          style={{ marginTop: space.base }}
+        >
+          Cards are checked by our team before payout — usually within an hour.
+        </Text>
+      </Screen>
+    </KeyboardAvoidingView>
   );
 }
 
-const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.primaryBackground },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 16,
-    gap: 12,
-  },
-  backBtn: {
-    width: 40, height: 40, borderRadius: 12,
-    backgroundColor: colors.surface,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  headerTitle: { fontSize: 22, fontWeight: '800', color: colors.primaryText, letterSpacing: -0.5 },
-  headerSub: { fontSize: 13, color: colors.secondaryText, marginTop: 2 },
-  scrollContent: { paddingHorizontal: 20, paddingBottom: 24 },
-  centered: { alignItems: 'center', justifyContent: 'center', paddingVertical: 60 },
-  loadingText: { fontSize: 14, color: colors.secondaryText, marginTop: 12 },
-  errorText: { fontSize: 14, color: colors.error, marginTop: 12 },
-  sectionLabel: {
-    fontSize: 11, fontWeight: '700', color: colors.secondaryText,
-    textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 10, marginTop: 8,
-  },
-  // Category grid
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  categoryCard: {
-    width: '47%',
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: 'hidden',
-  },
-  cardImageWrap: {
-    width: '100%',
-    height: 90,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cardBrandLogo: {
-    width: '70%',
-    height: '70%',
-  },
-  cardEmojiFallback: {
-    fontSize: 36,
-  },
-  cardBody: {
-    padding: 12,
-  },
-  categoryName: { fontSize: 13, fontWeight: '700', color: colors.primaryText, marginBottom: 3 },
-  categoryRate: { fontSize: 12, fontWeight: '600', color: colors.primaryAccent },
-  // Detail form
-  card: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 16,
-    marginBottom: 16,
-  },
-  selectedCountryRow: { flexDirection: 'row', alignItems: 'center' },
-  selectedCountryName: { fontSize: 15, fontWeight: '700', color: colors.primaryText },
-  selectedCountryRate: { fontSize: 12, color: colors.secondaryText, marginTop: 2 },
-  placeholderText: { flex: 1, fontSize: 14, color: colors.tertiaryText },
-  denomRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
-  denomChip: {
-    paddingVertical: 8, paddingHorizontal: 14,
-    borderRadius: 10, borderWidth: 1, borderColor: colors.border,
-    backgroundColor: colors.surfaceInput,
-  },
-  denomChipActive: { borderColor: colors.primaryAccent, backgroundColor: colors.accentDim },
-  denomChipText: { fontSize: 14, fontWeight: '600', color: colors.secondaryText },
-  denomChipTextActive: { color: colors.primaryAccent },
-  denomInputWrap: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.surfaceInput,
-    borderRadius: 12, borderWidth: 1, borderColor: colors.border,
-    paddingHorizontal: 14, paddingVertical: 12,
-  },
-  denomInput: { flex: 1, fontSize: 18, fontWeight: '700', color: colors.primaryText },
-  denomCurrency: { fontSize: 13, fontWeight: '700', color: colors.secondaryText },
-  nairaRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginTop: 14, paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.border,
-  },
-  nairaLabel: { fontSize: 14, color: colors.secondaryText, fontWeight: '500' },
-  nairaValue: { fontSize: 20, fontWeight: '800', color: colors.primaryAccent },
-  codeInput: {
-    fontSize: 16, fontWeight: '600', color: colors.primaryText,
-    backgroundColor: colors.surfaceInput, borderRadius: 12,
-    borderWidth: 1, borderColor: colors.border, padding: 14,
-    letterSpacing: 1,
-  },
-  optionalLabel: { color: colors.tertiaryText, fontWeight: '400', textTransform: 'none', letterSpacing: 0 },
-  cardHint: { fontSize: 13, color: colors.secondaryText, marginBottom: 12 },
-  uploadBox: {
-    height: 160, borderRadius: 14, borderWidth: 2, borderStyle: 'dashed',
-    borderColor: colors.border, backgroundColor: colors.surfaceInput,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  uploadTitle: { fontSize: 14, fontWeight: '600', color: colors.secondaryText, marginTop: 10 },
-  uploadHint: { fontSize: 12, color: colors.tertiaryText, marginTop: 4 },
-  previewWrap: { width: '100%', height: '100%', borderRadius: 12, overflow: 'hidden', position: 'relative' },
-  previewImage: { width: '100%', height: '100%' },
-  removeBtn: { position: 'absolute', top: 10, right: 10 },
-  removeBtnInner: {
-    width: 30, height: 30, borderRadius: 15,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  noticeCard: {
-    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
-    backgroundColor: colors.accentDim, borderRadius: 14,
-    padding: 14, marginBottom: 20,
-  },
-  noticeText: { flex: 1, fontSize: 13, color: colors.primaryText, lineHeight: 19 },
-  submitError: { fontSize: 13, color: colors.error, textAlign: 'center', marginBottom: 12 },
-  submitBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-    backgroundColor: colors.primaryAccent, borderRadius: 14, height: 56,
-    ...Platform.select({
-      ios: { shadowColor: colors.primaryAccent, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
-      android: { elevation: 4 },
-    }),
-  },
-  submitBtnDisabled: { backgroundColor: colors.secondaryText, opacity: 0.6 },
-  submitBtnText: { fontSize: 16, fontWeight: '700', color: '#000' },
-  // Country picker
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  pickerSheet: {
-    backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: 24, paddingBottom: 40,
-  },
-  pickerHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: 'center', marginBottom: 20 },
-  pickerTitle: { fontSize: 18, fontWeight: '700', color: colors.primaryText, marginBottom: 16 },
-  pickerRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 14, paddingHorizontal: 16,
-    borderRadius: 12, marginBottom: 8,
-    backgroundColor: colors.surfaceInput,
-    borderWidth: 1, borderColor: colors.border,
-  },
-  pickerRowActive: { borderColor: colors.primaryAccent, backgroundColor: colors.accentDim },
-  pickerRowName: { fontSize: 15, fontWeight: '700', color: colors.primaryText },
-  pickerRowRate: { fontSize: 12, color: colors.secondaryText, marginTop: 2 },
-  // Success modal
-  successOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  successCard: {
-    backgroundColor: colors.surface, borderRadius: 24, padding: 32,
-    width: '100%', maxWidth: 340, alignItems: 'center',
-    borderWidth: 1, borderColor: colors.border,
-  },
-  successTitle: { fontSize: 22, fontWeight: '800', color: colors.primaryText, marginTop: 16, marginBottom: 12, textAlign: 'center' },
-  successMsg: { fontSize: 14, color: colors.secondaryText, textAlign: 'center', lineHeight: 21, marginBottom: 28 },
-  successBtn: {
-    backgroundColor: colors.primaryAccent, borderRadius: 14,
-    paddingVertical: 16, width: '100%', alignItems: 'center',
-  },
-  successBtnText: { fontSize: 16, fontWeight: '700', color: '#000' },
-});
+/** One brand in the selection grid. Logo-led, since that's how people scan. */
+function BrandTile({
+  category,
+  onPress,
+}: {
+  category: GiftCardCategory;
+  onPress: () => void;
+}) {
+  const { c, space, radius } = useTheme();
+  const [failed, setFailed] = useState(false);
+  const uri = brandImage(category);
+  const tint = brandColor(category);
+
+  // Best rate across countries — the headline number for the tile.
+  const bestRate = category.countries.length
+    ? Math.max(...category.countries.map((x) => x.ratePerUnit))
+    : 0;
+
+  return (
+    <Surface
+      level={1}
+      radiusToken="tile"
+      onPress={onPress}
+      padding={space.comfy}
+      style={{ gap: space.snug, minHeight: 112 }}
+      accessibilityLabel={`${category.name}, up to ${bestRate} naira per unit`}
+    >
+      <View
+        style={{
+          width: 40,
+          height: 40,
+          borderRadius: radius.chip,
+          backgroundColor: failed || !uri ? `${tint}22` : '#FFFFFF',
+          alignItems: 'center',
+          justifyContent: 'center',
+          overflow: 'hidden',
+        }}
+      >
+        {uri && !failed ? (
+          <Image
+            source={{ uri }}
+            style={{ width: 40, height: 40 }}
+            contentFit="contain"
+            transition={120}
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <Text variant="subheading" color={tint} style={{ fontSize: 18 }}>
+            {category.emoji || category.name.slice(0, 1).toUpperCase()}
+          </Text>
+        )}
+      </View>
+
+      <Text variant="subheading" numberOfLines={1}>
+        {category.name}
+      </Text>
+
+      {bestRate > 0 ? (
+        <Text variant="amountSmall" color="tertiaryText">
+          up to ₦{bestRate.toLocaleString('en-NG')}
+        </Text>
+      ) : (
+        <Text variant="caption" color="quaternaryText">
+          Rate on request
+        </Text>
+      )}
+    </Surface>
+  );
+}
