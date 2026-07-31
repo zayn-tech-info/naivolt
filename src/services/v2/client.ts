@@ -8,6 +8,7 @@
 
 import axios from 'axios';
 import { api } from '@/services/api';
+import { useAuthStore } from '@/store/authStore';
 import type { ExchangeService } from './index';
 import type { ApiError, ApiErrorCode } from './types';
 
@@ -101,6 +102,79 @@ export const httpExchange: ExchangeService = {
       // per ARCHITECTURE.md §8.3.
       { 'Idempotency-Key': idempotencyKey }
     ),
+
+  getGiftCardBrands: () => get('/gift-cards/brands'),
+
+  /**
+   * Multipart, because of the card photo.
+   *
+   * Uses XHR rather than axios or fetch: React Native's multipart handling drops
+   * the file body on some Android builds, and this is the one request in the app
+   * that carries a binary. Carried over from the v1 implementation, which hit the
+   * same problem.
+   */
+  submitGiftCard: ({
+    brandId,
+    countryCode,
+    faceValue,
+    cardCode,
+    cardPin,
+    imageUri,
+    idempotencyKey,
+  }) =>
+    new Promise((resolve, reject) => {
+      const form = new FormData();
+      form.append('brandId', brandId);
+      form.append('countryCode', countryCode);
+      form.append('faceValue', faceValue);
+      form.append('cardCode', cardCode);
+      if (cardPin) form.append('cardPin', cardPin);
+
+      if (imageUri) {
+        const filename = imageUri.split('/').pop() || 'card.jpg';
+        const match = /\.(jpe?g|png|webp)$/i.exec(filename);
+        const mime = match ? `image/${match[1].toLowerCase().replace('jpg', 'jpeg')}` : 'image/jpeg';
+        form.append('cardImage', { uri: imageUri, name: filename, type: mime } as unknown as Blob);
+      }
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${api.defaults.baseURL}/gift-cards/submissions`);
+
+      const token = useAuthStore.getState().token;
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.setRequestHeader('Idempotency-Key', idempotencyKey);
+      // Content-Type is deliberately not set — the runtime has to add the
+      // multipart boundary, and setting it manually breaks the body.
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject({ code: 'UNKNOWN', message: 'Unexpected response from the server.' });
+          }
+          return;
+        }
+        let body: { code?: string; message?: string } = {};
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {}
+        reject({
+          code: body.code ?? 'UNKNOWN',
+          message: body.message ?? 'Could not submit the card. Try again.',
+        });
+      };
+      xhr.onerror = () =>
+        reject({
+          code: 'NETWORK',
+          message: 'Cannot reach Naivolt. Check your connection and try again.',
+        });
+      xhr.ontimeout = () =>
+        reject({ code: 'NETWORK', message: 'That took too long. Try again.' });
+      // Generous: this is uploading a photo over a Nigerian mobile connection.
+      xhr.timeout = 60_000;
+      xhr.send(form);
+    }),
 
   getActivity: (cursor) => get(`/activity${cursor ? `?cursor=${cursor}` : ''}`),
 };

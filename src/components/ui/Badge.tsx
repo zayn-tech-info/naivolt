@@ -21,6 +21,7 @@ export const STATUS_TONE: Record<string, StatusTone> = {
   credited: 'positive',
   settled: 'positive',
   success: 'positive',
+  approved: 'positive',
 
   pending: 'warning',
   processing: 'warning',
@@ -28,6 +29,8 @@ export const STATUS_TONE: Record<string, StatusTone> = {
   confirming: 'warning',
   reserved: 'warning',
   queued: 'warning',
+  reviewing: 'warning',
+  detected: 'warning',
 
   rejected: 'negative',
   failed: 'negative',

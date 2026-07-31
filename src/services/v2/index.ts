@@ -18,6 +18,8 @@ import type {
   Chain,
   Deposit,
   DepositAddress,
+  GiftCardBrand,
+  GiftCardSubmission,
   Limits,
   Payout,
   PayoutDestination,
@@ -77,6 +79,25 @@ export interface ExchangeService {
     /** Client-generated UUID — the idempotency key. */
     idempotencyKey: string;
   }): Promise<Payout>;
+
+  // Gift cards
+  /** Brands we buy, with per-country rates. */
+  getGiftCardBrands(): Promise<GiftCardBrand[]>;
+  /**
+   * Submits a card for review. Manual-review flow: this returns `pending`, and
+   * naira is credited only on approval.
+   */
+  submitGiftCard(input: {
+    brandId: string;
+    countryCode: string;
+    faceValue: string;
+    cardCode: string;
+    cardPin?: string;
+    /** Local file URI of the card photo, uploaded as multipart. */
+    imageUri?: string;
+    /** Client-generated UUID, so a retry can't submit the same card twice. */
+    idempotencyKey: string;
+  }): Promise<GiftCardSubmission>;
 
   // History
   getActivity(cursor?: string): Promise<{ items: ActivityItem[]; nextCursor: string | null }>;

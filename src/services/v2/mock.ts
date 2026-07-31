@@ -17,6 +17,7 @@
 import type { ExchangeService } from './index';
 import { MOCK_BANKS, fixtureAccountName } from './banks.mock';
 import { getLiveRates, getSellRates } from './rates';
+import { MOCK_GIFT_CARD_BRANDS } from './giftcards.mock';
 import { netNgnPerUsd, ngnRateForUsdPrice } from '@/constants/pricing';
 import type {
   ActivityItem,
@@ -28,6 +29,8 @@ import type {
   Chain,
   Deposit,
   DepositAddress,
+  GiftCardBrand,
+  GiftCardSubmission,
   Limits,
   Payout,
   PayoutDestination,
@@ -136,6 +139,8 @@ const state = {
     },
   ] as ActivityItem[],
   quotes: new Map<string, Quote>(),
+  /** Keyed by idempotency key, so a replayed submit returns the same record. */
+  giftCardSubmissions: new Map<string, GiftCardSubmission>(),
   /** A deposit mid-confirmation, so the tracker has something to show. */
   depositStartedAt: Date.now() - 45_000,
 
@@ -524,6 +529,92 @@ export const mockExchange: ExchangeService = {
     });
 
     return delay(payout, 900);
+  },
+
+  async getGiftCardBrands(): Promise<GiftCardBrand[]> {
+    return delay(MOCK_GIFT_CARD_BRANDS, 500);
+  },
+
+  async submitGiftCard({
+    brandId,
+    countryCode,
+    faceValue,
+    cardCode,
+    imageUri,
+    idempotencyKey,
+  }): Promise<GiftCardSubmission> {
+    // Replaying the same key returns the original submission rather than
+    // creating a second one — the same guarantee the real endpoint must give.
+    const prior = state.giftCardSubmissions.get(idempotencyKey);
+    if (prior) return delay(prior, 300);
+
+    const brand = MOCK_GIFT_CARD_BRANDS.find((b) => b.id === brandId);
+    if (!brand) {
+      return fail({ code: 'UNKNOWN', message: 'That card type is no longer available.' });
+    }
+
+    const rate = brand.rates.find((r) => r.countryCode === countryCode);
+    if (!rate) {
+      return fail({ code: 'UNKNOWN', message: `We don't buy ${brand.name} cards from there.` });
+    }
+
+    const value = Number(faceValue);
+    if (!Number.isFinite(value) || value <= 0) {
+      return fail({ code: 'UNKNOWN', message: 'Enter the value printed on the card.' });
+    }
+    if (value < Number(rate.minFaceValue)) {
+      return fail({
+        code: 'UNKNOWN',
+        message: `Minimum for ${brand.name} ${rate.countryCode} is ${rate.currency} ${rate.minFaceValue}.`,
+      });
+    }
+    if (value > Number(rate.maxFaceValue)) {
+      return fail({
+        code: 'UNKNOWN',
+        message: `Maximum for ${brand.name} ${rate.countryCode} is ${rate.currency} ${rate.maxFaceValue}.`,
+      });
+    }
+    if (brand.requiresImage && !imageUri) {
+      return fail({ code: 'UNKNOWN', message: 'A photo of the card is required.' });
+    }
+    // A code of all zeros exercises the rejection path, which is the outcome a
+    // real user hits often enough that the UI has to handle it.
+    if (/^0+$/.test(cardCode.replace(/\D/g, '')) && cardCode.replace(/\D/g, '').length > 3) {
+      return fail({
+        code: 'UNKNOWN',
+        message: 'That card code isn’t valid. Check it and try again.',
+      });
+    }
+
+    const payoutNgn = value * Number(rate.ratePerUnit);
+    const submission: GiftCardSubmission = {
+      id: `gcs_${state.giftCardSubmissions.size + 1}`,
+      brandName: brand.name,
+      countryCode,
+      faceValue: value.toFixed(2),
+      currency: rate.currency,
+      payoutNgn: payoutNgn.toFixed(4),
+      status: 'pending',
+      reference: `NVGC-${1_700_000 + state.giftCardSubmissions.size}`,
+      createdAt: new Date().toISOString(),
+    };
+
+    state.giftCardSubmissions.set(idempotencyKey, submission);
+
+    // Show up in Activity immediately as pending. Naira is not credited until
+    // approval, so the balance deliberately does not move here.
+    state.activity.unshift({
+      id: submission.id,
+      kind: 'giftcard',
+      asset: 'NGN',
+      amount: submission.payoutNgn,
+      ngnValue: submission.payoutNgn,
+      status: 'pending',
+      createdAt: submission.createdAt,
+      detail: `${brand.name} ${rate.currency} ${value} · ${countryCode}`,
+    });
+
+    return delay(submission, 900);
   },
 
   async getActivity(): Promise<{ items: ActivityItem[]; nextCursor: string | null }> {

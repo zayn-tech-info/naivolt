@@ -213,10 +213,69 @@ export interface ActivityItem {
   amount: Decimal;
   /** Naira equivalent, where one applies. */
   ngnValue: Decimal | null;
-  status: DepositStatus | PayoutStatus | 'completed';
+  /**
+   * Union of every kind's states. Wide because the feed is unified — a gift card
+   * awaiting review and a deposit awaiting confirmations are both in flight, but
+   * they are not the same state and shouldn't be flattened into one.
+   */
+  status: DepositStatus | PayoutStatus | GiftCardStatus | 'completed';
   createdAt: string;
   /** Kind-specific detail for the row's subtitle. */
   detail?: string;
+}
+
+// ── Gift cards ──────────────────────────────────────────────────────
+
+/**
+ * What we pay for one brand in one country.
+ *
+ * Gift card rates are **not** derived from the crypto per-dollar rate. They're
+ * set per brand and country by the business, and they sit well below it — a card
+ * carries fraud and chargeback risk that a confirmed on-chain deposit does not,
+ * and the market prices that in. Nigerian rates also vary sharply by country for
+ * the same brand, which is why country is a required choice and not a detail.
+ */
+export interface GiftCardRate {
+  countryCode: string;
+  countryName: string;
+  /** Face-value currency, e.g. "USD". */
+  currency: string;
+  /** Naira per unit of face value. */
+  ratePerUnit: Decimal;
+  minFaceValue: Decimal;
+  maxFaceValue: Decimal;
+}
+
+export interface GiftCardBrand {
+  id: string;
+  name: string;
+  slug: string;
+  /** Remote logo. Null falls back to a lettermark. */
+  logoUrl: string | null;
+  rates: GiftCardRate[];
+  /** Whether a photo of the card is required for review. */
+  requiresImage: boolean;
+  /** Whether this brand's cards carry a PIN as well as a code. */
+  hasPin: boolean;
+  /** Operational caveat shown before submitting, e.g. "Receipt required". */
+  note?: string | null;
+}
+
+export type GiftCardStatus = 'pending' | 'reviewing' | 'approved' | 'rejected';
+
+export interface GiftCardSubmission {
+  id: string;
+  brandName: string;
+  countryCode: string;
+  faceValue: Decimal;
+  currency: string;
+  /** Naira we'll credit on approval. */
+  payoutNgn: Decimal;
+  status: GiftCardStatus;
+  reference: string;
+  createdAt: string;
+  /** Present when rejected. */
+  rejectionReason?: string;
 }
 
 // ── Limits ──────────────────────────────────────────────────────────

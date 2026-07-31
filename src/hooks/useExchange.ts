@@ -17,6 +17,7 @@ export const exchangeKeys = {
   limits: ['v2', 'limits'] as const,
   banks: ['v2', 'bank-accounts'] as const,
   banks_list: ['v2', 'banks'] as const,
+  giftCardBrands: ['v2', 'gift-card-brands'] as const,
   deposits: ['v2', 'deposits', 'pending'] as const,
   depositAddress: (asset: Asset, chain: Chain) =>
     ['v2', 'deposit-address', asset, chain] as const,
@@ -134,6 +135,41 @@ export function useRemoveBankAccount() {
     mutationFn: (id) => exchange.removeBankAccount(id),
     retry: false,
     onSuccess: () => qc.invalidateQueries({ queryKey: exchangeKeys.banks }),
+  });
+}
+
+export function useGiftCardBrands() {
+  return useQuery({
+    queryKey: exchangeKeys.giftCardBrands,
+    queryFn: () => exchange.getGiftCardBrands(),
+    // Brands and their rates change on a business cadence, not a market one.
+    staleTime: 10 * 60_000,
+  });
+}
+
+export function useSubmitGiftCard() {
+  const qc = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof exchange.submitGiftCard>>,
+    ApiError,
+    {
+      brandId: string;
+      countryCode: string;
+      faceValue: string;
+      cardCode: string;
+      cardPin?: string;
+      imageUri?: string;
+      idempotencyKey: string;
+    }
+  >({
+    mutationFn: (input) => exchange.submitGiftCard(input),
+    // Never auto-retry: the card code is single-use, and a blind retry after an
+    // ambiguous failure risks submitting the same card twice. The idempotency key
+    // makes a *deliberate* retry safe, which is the user's call, not ours.
+    retry: false,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: exchangeKeys.activity });
+    },
   });
 }
 

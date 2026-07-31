@@ -488,30 +488,94 @@ Two things the client needs decided before building it:
 
 ---
 
-## 10. Gift cards — the feed needs unifying
+## 10. Gift cards
 
-Selling a gift card is now the primary action on the home bar (it replaced the
-crypto Sell flow in the client). But it still posts to the **v1** endpoint:
+Selling a gift card is the primary action on the home bar. It now runs through
+the v2 adapter like every other surface — it was the last screen calling v1
+directly, and the only one that broke when that backend was removed.
+
+### `GET /gift-cards/brands`
+
+```json
+[
+  {
+    "id": "gc_amazon",
+    "name": "Amazon",
+    "slug": "amazon",
+    "logoUrl": "https://…",
+    "requiresImage": true,
+    "hasPin": false,
+    "note": "Receipt required for cards over $200.",
+    "rates": [
+      {
+        "countryCode": "US",
+        "countryName": "United States",
+        "currency": "USD",
+        "ratePerUnit": "1080.0000",
+        "minFaceValue": "10.00",
+        "maxFaceValue": "1000.00"
+      }
+    ]
+  }
+]
+```
+
+- `ratePerUnit` is naira per unit of face value. **Not** derived from the crypto
+  per-dollar rate in §12 — cards carry fraud and chargeback risk a confirmed
+  on-chain deposit doesn't, and clear well below it. These are a business input
+  per brand and country.
+- `requiresImage` / `hasPin` drive which fields the form shows. Sending them per
+  brand means the client doesn't hardcode a list of which brands have PINs.
+- `note` is an operational caveat rendered before submit ("Receipt required").
+- Country is a required user choice because the same brand clears at very
+  different rates by country — that spread is the main thing a seller compares.
+
+### `POST /gift-cards/submissions` (multipart/form-data)
 
 ```
-POST /api/v1/gift-cards/transactions      multipart/form-data
-  categoryId, country, denomination, cardCode, cardPin?, proofImage
-GET  /api/v1/gift-cards/categories        → [{ _id, name, slug, emoji, imageUrl, countries[] }]
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+
+brandId, countryCode, faceValue, cardCode, cardPin?, cardImage
 ```
 
-That leaves a real gap: **gift card sales don't appear in `GET /activity`.** The
-Activity screen reads the v2 feed, so a user's most common transaction is
-currently invisible in their history. Two ways to close it, backend's call:
+Returns the submission:
 
-1. Have the v2 `/activity` feed include gift card rows with `kind: "giftcard"`
-   (the client already renders this kind — label, inbound direction, filters).
-2. Port gift cards onto the ledger properly: a `giftcard` journal kind crediting
-   `user_ngn` on approval, which also gets them into the reconciliation in §2.
+```json
+{
+  "id": "gcs_1",
+  "brandName": "Amazon",
+  "countryCode": "US",
+  "faceValue": "100.00",
+  "currency": "USD",
+  "payoutNgn": "108000.0000",
+  "status": "pending",
+  "reference": "NVGC-1700000",
+  "createdAt": "2026-07-31T09:12:00Z"
+}
+```
 
-The second is the right end state — a manual payout that never touches the ledger
-is exactly the v1 problem ARCHITECTURE.md §1 sets out to remove. Until one of
-them lands, the client shows gift card status only via the v1
-`gift-card-transaction/[id]` route.
+`status` ∈ `pending | reviewing | approved | rejected`; `rejectionReason`
+accompanies `rejected` and is shown to the user.
+
+**Manual review flow**: this returns `pending` and naira is credited only on
+approval. The client does not move the balance on submit.
+
+The idempotency key is minted once per card when the brand is selected and reused
+across retries. A card code is single-use, so the client never auto-retries this
+call — but a *deliberate* retry after an ambiguous failure must not create a
+second submission.
+
+### Still open: gift cards and the ledger
+
+Gift card rows appear in `GET /activity` with `kind: "giftcard"` (the client
+renders the label, inbound direction and filters already). The deeper question is
+whether approval writes a **ledger journal** crediting `user_ngn`, or stays a
+side-channel credit.
+
+It should be a journal. A manual payout that never touches the ledger is exactly
+the v1 problem ARCHITECTURE.md §1 sets out to remove, and without one, gift card
+liabilities are invisible to the reconciliation in §2 — meaning the NGN float
+check silently understates what we owe.
 
 ---
 
