@@ -33,7 +33,6 @@ import type {
   GiftCardSubmission,
   Limits,
   Payout,
-  PayoutDestination,
   Portfolio,
   Quote,
   ResolvedAccount,

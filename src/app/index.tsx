@@ -25,11 +25,8 @@ export default function Index() {
     if (!isHydrated || !splashMinElapsed) return;
 
     if (token && user) {
-      if (user.role === "admin") {
-        router.replace("/(admin)/dashboard");
-      } else {
-        router.replace("/(tabs)/(main)");
-      }
+      // Admin lives in the Next.js panel, not here (ARCHITECTURE.md §11).
+      router.replace("/(tabs)/(main)");
     } else {
       router.replace("/(auth)/welcome");
     }
@@ -46,7 +43,7 @@ export default function Index() {
 const styles = StyleSheet.create({
   placeholder: {
     flex: 1,
-    backgroundColor: "#0A0A0B",
+    backgroundColor: "#08090A",
     justifyContent: "center",
     alignItems: "center",
   },

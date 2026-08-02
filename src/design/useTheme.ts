@@ -7,8 +7,7 @@
  */
 
 import { useMemo } from 'react';
-import { useColors } from '@/store/appStore';
-import { useAppStore } from '@/store/appStore';
+import { useAppStore, useColors } from '@/store/appStore';
 import type { Colors } from '@/constants/colors';
 import { space, radius, motion, elevation, hitSlop, minTouch, disabledOpacity } from './tokens';
 import { type, fontFamily, tabular } from './typography';

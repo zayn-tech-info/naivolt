@@ -42,12 +42,32 @@ export interface Holding {
 }
 
 export interface Portfolio {
-  /** Sum of crypto holdings plus the NGN balance. */
-  totalNgn: Decimal;
-  /** Spendable naira — already sold, not yet withdrawn. */
+  /**
+   * Spendable naira. **The only field the UI renders.**
+   *
+   * Home shows this figure and Withdraw calls it "Available" — they are the same
+   * number by design, so the app can never headline a balance larger than what a
+   * user can actually send to their bank.
+   */
   ngnBalance: Decimal;
+
+  /**
+   * Sum of crypto holdings plus `ngnBalance`.
+   *
+   * Not surfaced. Kept because it's meaningful to the ledger and to admin views,
+   * but deliberately never rendered: a total that includes unconverted crypto
+   * reads as withdrawable money and isn't.
+   */
+  totalNgn: Decimal;
+
+  /**
+   * Per-asset balances. Not surfaced — the app has no in-app path from a crypto
+   * balance to naira, so listing coins would show a number the user can't act on.
+   * Retained so the shape doesn't have to change if that path returns.
+   */
   holdings: Holding[];
-  /** Portfolio change over 24h as a percentage, if computable. */
+
+  /** Not surfaced. Naira doesn't move against naira, so there's nothing to show. */
   changePct24h: number | null;
 }
 

@@ -95,15 +95,25 @@ populating at different times.
 }
 ```
 
-- `totalNgn` — crypto valued at the current sell rate, plus `ngnBalance`. The
-  server computes it; the client must not sum the holdings itself, or the hero
-  figure and the rows can disagree by a rounding step.
-- `ngnBalance` — sold, not yet withdrawn. Rendered as its own row because it's
-  the only balance that can leave the platform.
-- `holdings` — from the **ledger**, never a chain RPC (ARCHITECTURE.md §2). Omit
-  zero balances or include them; the client filters below ₦1.
-- `changePct24h` — nullable. Send `null` rather than `0` when it can't be
-  computed, so the client can hide the row instead of claiming a flat day.
+**`ngnBalance` is the only field the app renders.** Home headlines it and Withdraw
+calls it "Available" — the same number by design, so the app can never show a
+balance larger than what the user can actually send to their bank.
+
+- `ngnBalance` — spendable naira, from the **ledger**, never a chain RPC
+  (ARCHITECTURE.md §2).
+- `totalNgn`, `holdings`, `changePct24h` — still sent, still meaningful to the
+  ledger and admin views, but **not surfaced in the app**. The client has no
+  in-app path from a crypto balance to naira, so listing coins would show a
+  number the user can't act on. Keep sending them; the shape stays stable if that
+  path returns.
+
+> **This raises a question the backend has to answer.** Deposit is still an
+> action, so a user can send USDT to their address — but with no asset list and
+> no sell flow, that crypto credits somewhere they can't see and can't spend.
+> Either deposits auto-convert to naira on crediting (which makes this screen
+> exactly right, and matches the product's original "send crypto, get naira"
+> framing), or the app needs a conversion path back. As it stands, a crypto
+> deposit is a dead end from the user's side. See §13.
 
 ### `GET /rates`
 
@@ -615,6 +625,39 @@ This is worth contrasting with the alternative reading of "a ₦10 gap", which i
 ~64,000 USDT: it earns ₦10 total on a ₦98,000,000 BTC sale (0.00001%) while
 charging 2% on TRX. Per dollar, one constant covers everything — which is also
 why the client has no per-asset spread config to keep in sync.
+
+---
+
+## 13. Open: what happens to a crypto deposit?
+
+The app now shows **one balance — spendable naira** — and no per-asset breakdown.
+Combined with the removal of the crypto Sell flow, that leaves a gap on the
+deposit side that only the backend can close.
+
+Today a user can still tap Deposit, get a real TRC-20 address, and send USDT. The
+watcher credits it (§6). But there is no screen where that balance appears and no
+action that converts it, so from the user's side the money vanishes.
+
+Two coherent resolutions:
+
+1. **Auto-convert on credit.** When a deposit reaches its confirmation threshold,
+   sell it at the prevailing rate in the same journal that credits the user, so
+   `user_ngn` moves and `user_crypto` never holds a balance. This makes the
+   current UI exactly right, and matches the product's original framing — send
+   crypto, get naira, no portfolio. It also removes the spread-timing question,
+   since the rate is applied once, at crediting.
+
+2. **Restore a conversion path** in the app, which means bringing back the sell
+   flow and with it the asset list.
+
+Option 1 is the smaller system and fits what the client now looks like. Whichever
+is chosen, it needs deciding before deposits are enabled for real users — the
+current combination silently strands funds, which is the one failure mode this
+architecture exists to prevent.
+
+If option 1: `GET /activity` should report those as a single `deposit` row with
+the naira credited, not a deposit followed by a synthetic sell. The client renders
+one event per thing that happened to the user.
 
 ---
 

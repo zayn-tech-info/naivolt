@@ -13,7 +13,10 @@ export default function MainTabsLayout() {
       screenOptions={{
         headerShown: false,
         tabBarStyle: { display: "none" },
-        contentStyle: { paddingBottom: tabBarHeight },
+        // `contentStyle` is a Stack option; Tabs uses `sceneStyle`. The old
+        // key was silently ignored, so screens were relying on Screen's own
+        // tabBarClearance for the gap.
+        sceneStyle: { paddingBottom: tabBarHeight },
       }}
       initialRouteName="index"
     >

@@ -50,7 +50,7 @@ export function QuoteTimer({
   onExpire,
   label = 'Rate locked',
 }: QuoteTimerProps) {
-  const { c, space, radius, motion } = useTheme();
+  const { c, space, radius } = useTheme();
   const [left, setLeft] = useState(() => remainingMs(expiresAt));
   const fill = useSharedValue(1);
   const fired = useRef(false);

@@ -1,27 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/services/api";
+/**
+ * Whether the user has somewhere to be paid.
+ *
+ * Reads the v2 beneficiary list rather than the deleted v1 `/bank-accounts`
+ * endpoint, and shares `useBankAccounts`' query key so the two can't disagree —
+ * adding an account anywhere in the app updates this immediately.
+ */
 
-interface BankAccount {
-  _id: string;
-  accountName: string;
-  accountNumber: string;
-  bankName: string;
-  bankCode?: string;
-}
-
-interface ApiResponse {
-  data?: BankAccount[];
-}
+import { useBankAccounts } from './useExchange';
 
 export function useHasBankDetails() {
-  const { data = [], isLoading } = useQuery({
-    queryKey: ["bankAccounts"],
-    queryFn: async () => {
-      const res = await api.get<ApiResponse>("/bank-accounts");
-      return (res.data as ApiResponse)?.data ?? [];
-    },
-  });
-
-  const hasBankDetails = Array.isArray(data) && data.length > 0;
-  return { hasBankDetails, isLoading };
+  const { data = [], isLoading } = useBankAccounts();
+  return { hasBankDetails: data.length > 0, isLoading };
 }

@@ -6,8 +6,15 @@
  * state to action to history, so the screen answers "how much do I have" before
  * it asks anything of the user.
  *
- * Removed from the previous version, and why:
+ * **One balance, not a portfolio.** The screen shows spendable naira and nothing
+ * else. There is no per-asset breakdown, because there is no longer anything a
+ * user can do with a crypto balance from inside the app — listing coins would be
+ * showing them a number they can't act on, and inviting the question "so how do I
+ * turn this into naira?" that the UI has no answer for.
  *
+ * Removed from earlier versions, and why:
+ *
+ *  - The asset list. See above.
  *  - The "trust strip" (Fast payouts · Secure · 24/7). Marketing copy on a
  *    screen someone opens twenty times a day. It belongs on the welcome screen,
  *    which is where a claim like that is actually read.
@@ -20,15 +27,12 @@
  */
 
 import { useCallback, useMemo, useState } from 'react';
-import { View } from 'react-native';
-import { Pressable } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
 import {
-  AssetGlyph,
   EmptyState,
-  Money,
   Screen,
   Section,
   Skeleton,
@@ -97,10 +101,6 @@ export default function HomeScreen() {
     [router]
   );
 
-  const holdings = portfolio.data?.holdings ?? [];
-  // Dust hides the assets that matter. A balance worth less than a naira is
-  // noise on a screen whose job is showing what you have.
-  const meaningful = holdings.filter((h) => Number(h.ngnValue) >= 1);
   const recent = (activity.data?.items ?? []).slice(0, 4);
   const pending = deposits.data ?? [];
 
@@ -143,8 +143,7 @@ export default function HomeScreen() {
 
       <Stagger index={0}>
         <BalanceHero
-          totalNgn={portfolio.data ? Number(portfolio.data.totalNgn) : null}
-          changePct24h={portfolio.data?.changePct24h ?? null}
+          ngnBalance={portfolio.data ? Number(portfolio.data.ngnBalance) : null}
           loading={portfolio.isLoading}
           hidden={balanceHidden}
           onToggleHidden={toggleBalanceHidden}
@@ -169,69 +168,6 @@ export default function HomeScreen() {
       ) : null}
 
       <Stagger index={3}>
-        <Section title="Your assets">
-          {portfolio.isLoading ? (
-            <Surface level={1} style={{ gap: space.comfy }}>
-              {[0, 1, 2].map((i) => (
-                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}>
-                  <Skeleton width={40} height={40} radius={20} />
-                  <View style={{ flex: 1, gap: 6 }}>
-                    <Skeleton width={90} height={13} />
-                    <Skeleton width={60} height={11} />
-                  </View>
-                  <Skeleton width={80} height={15} />
-                </View>
-              ))}
-            </Surface>
-          ) : meaningful.length === 0 ? (
-            <EmptyState
-              icon="wallet-outline"
-              title="Nothing here yet"
-              body="Deposit crypto and it'll show up here, ready to sell for naira."
-              actionLabel="Deposit crypto"
-              onAction={() => router.push('/deposit')}
-            />
-          ) : (
-            <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
-              {/* Naira sits first: it's the only balance that can leave the app. */}
-              {portfolio.data && Number(portfolio.data.ngnBalance) > 0 ? (
-                <HoldingRow
-                  asset="NGN"
-                  primary="Naira"
-                  secondary="Ready to withdraw"
-                  amount={Number(portfolio.data.ngnBalance)}
-                  currency="NGN"
-                  hidden={balanceHidden}
-                  onPress={() => router.push('/withdraw')}
-                  last={meaningful.length === 0}
-                />
-              ) : null}
-
-              {meaningful.map((holding, i) => (
-                <HoldingRow
-                  key={holding.asset}
-                  asset={holding.asset}
-                  primary={holding.asset}
-                  secondary={`₦${Number(holding.rate).toLocaleString('en-NG', {
-                    maximumFractionDigits: 0,
-                  })} each`}
-                  amount={Number(holding.balance)}
-                  currency="none"
-                  suffix={holding.asset}
-                  subAmount={Number(holding.ngnValue)}
-                  hidden={balanceHidden}
-                  // Informational, not tappable. With Sell removed there is no
-                  // action to take on a crypto balance from here, and a row that
-                  // presses but goes nowhere is worse than one that doesn't.
-                  last={i === meaningful.length - 1}
-                />
-              ))}
-            </Surface>
-          )}
-        </Section>
-      </Stagger>
-
-      <Stagger index={4}>
         <Section
           title="Recent activity"
           action={
@@ -263,9 +199,10 @@ export default function HomeScreen() {
           ) : recent.length === 0 ? (
             <EmptyState
               icon="receipt-outline"
-              title="No activity yet"
-              body="Deposits, sales and withdrawals will appear here."
-              inset
+              title="Nothing here yet"
+              body="Sell a gift card to get your first naira in."
+              actionLabel="Sell a gift card"
+              onAction={() => router.push('/gift-cards')}
             />
           ) : (
             <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
@@ -280,74 +217,3 @@ export default function HomeScreen() {
   );
 }
 
-/** One asset line. Kept local — nothing else needs this shape. */
-function HoldingRow({
-  asset,
-  primary,
-  secondary,
-  amount,
-  currency,
-  suffix,
-  subAmount,
-  hidden,
-  onPress,
-  last,
-}: {
-  asset: string;
-  primary: string;
-  secondary: string;
-  amount: number;
-  currency: 'NGN' | 'none';
-  suffix?: string;
-  subAmount?: number;
-  hidden: boolean;
-  /** Omit for rows with no action — the row then renders as plain content. */
-  onPress?: () => void;
-  last: boolean;
-}) {
-  const { c, space } = useTheme();
-
-  return (
-    <Surface
-      level={0}
-      padding={0}
-      onPress={onPress}
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: space.base,
-        paddingVertical: space.base,
-        ...(last ? null : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
-      }}
-    >
-      <AssetGlyph asset={asset} size={40} />
-
-      <View style={{ flex: 1, minWidth: 0 }}>
-        <Text variant="subheading">{primary}</Text>
-        <Text variant="caption" color="tertiaryText" style={{ marginTop: 2 }}>
-          {secondary}
-        </Text>
-      </View>
-
-      <View style={{ alignItems: 'flex-end' }}>
-        {hidden ? (
-          <Text variant="amount" color="quaternaryText">
-            ••••
-          </Text>
-        ) : (
-          <>
-            <Money value={amount} currency={currency} suffix={suffix} maxFractionDigits={6} />
-            {subAmount != null ? (
-              <Money
-                value={subAmount}
-                variant="amountSmall"
-                color="tertiaryText"
-                style={{ marginTop: 1 }}
-              />
-            ) : null}
-          </>
-        )}
-      </View>
-    </Surface>
-  );
-}

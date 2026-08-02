@@ -1,19 +1,25 @@
 /**
  * BalanceHero — the thesis of the app.
  *
- * One number, as large as the screen allows, in mono. This is the thing a user
- * opens Naivolt to see, so it gets the whole top of the screen and nothing
- * competes with it: no card, no border, no gradient. Just the figure on the
- * canvas, with its context set small and dim beneath.
+ * One number: the user's naira balance. As large as the screen allows, in mono,
+ * sitting directly on the canvas with no card around it — a card would imply the
+ * balance is one item among several, and it isn't. It's the whole screen's
+ * subject.
  *
- * It sits flush on the background rather than inside a surface on purpose. A
- * card around the balance implies the balance is one item among several; sitting
- * directly on the canvas makes it the screen's subject.
+ * It shows **spendable naira**, not a portfolio total. That's deliberate: this is
+ * the figure the Withdraw screen calls "Available", so the two agree. A headline
+ * total that included crypto not yet converted would read as money the user can
+ * send to their bank, and then Withdraw would quote them something smaller — the
+ * kind of mismatch that generates support tickets and destroys trust in the
+ * number.
  *
- * Balances can be hidden — people check these in public, on buses and in
- * banking halls, and a five-figure naira total on a bright screen is a real
- * safety concern. The preference persists, because someone who hides their
- * balance wants it hidden next time too.
+ * There is no percentage-change line. Naira doesn't move against naira, so a
+ * "+2.4% today" here would be measuring nothing.
+ *
+ * Balances can be hidden — people check these in public, on buses and in banking
+ * halls, and a five-figure naira total on a bright screen is a real safety
+ * concern. The preference persists, because someone who hides their balance wants
+ * it hidden next time too.
  */
 
 import { useCallback } from 'react';
@@ -24,16 +30,15 @@ import { useTheme } from '@/design';
 import { Money, Skeleton, Text } from '@/components/ui';
 
 export interface BalanceHeroProps {
-  totalNgn: number | null;
-  changePct24h: number | null;
+  /** Spendable naira — the same figure Withdraw calls "Available". */
+  ngnBalance: number | null;
   loading?: boolean;
   hidden: boolean;
   onToggleHidden: () => void;
 }
 
 export function BalanceHero({
-  totalNgn,
-  changePct24h,
+  ngnBalance,
   loading = false,
   hidden,
   onToggleHidden,
@@ -45,13 +50,11 @@ export function BalanceHero({
     onToggleHidden();
   }, [onToggleHidden]);
 
-  const rose = (changePct24h ?? 0) >= 0;
-
   return (
     <View style={{ paddingTop: space.roomy, paddingBottom: space.section }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.snug }}>
         <Text variant="eyebrow" color="tertiaryText">
-          Total balance
+          Available balance
         </Text>
         <Pressable
           onPress={toggle}
@@ -59,7 +62,11 @@ export function BalanceHero({
           accessibilityRole="button"
           accessibilityLabel={hidden ? 'Show balance' : 'Hide balance'}
         >
-          <Ionicons name={hidden ? 'eye-off-outline' : 'eye-outline'} size={15} color={c.tertiaryText} />
+          <Ionicons
+            name={hidden ? 'eye-off-outline' : 'eye-outline'}
+            size={15}
+            color={c.tertiaryText}
+          />
         </Pressable>
       </View>
 
@@ -73,27 +80,14 @@ export function BalanceHero({
             ₦ ••••••
           </Text>
         ) : (
-          <Money value={totalNgn} variant="display" />
+          <Money value={ngnBalance} variant="display" />
         )}
       </View>
 
-      {!loading && !hidden && changePct24h != null ? (
-        <View
-          style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: space.snug }}
-        >
-          <Ionicons
-            name={rose ? 'trending-up' : 'trending-down'}
-            size={14}
-            color={rose ? c.positive : c.negative}
-          />
-          <Text variant="amountSmall" color={rose ? 'positive' : 'negative'}>
-            {rose ? '+' : ''}
-            {changePct24h.toFixed(1)}%
-          </Text>
-          <Text variant="caption" color="tertiaryText">
-            today
-          </Text>
-        </View>
+      {!loading && !hidden ? (
+        <Text variant="caption" color="tertiaryText" style={{ marginTop: space.snug }}>
+          Ready to withdraw to your bank
+        </Text>
       ) : null}
     </View>
   );

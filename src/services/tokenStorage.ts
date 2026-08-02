@@ -20,7 +20,9 @@ function getSecureStore(): typeof import('expo-secure-store') | null {
   }
 }
 
-function getAsyncStorage(): import('@react-native-async-storage/async-storage').default | null {
+type AsyncStorageModule = typeof import('@react-native-async-storage/async-storage').default;
+
+function getAsyncStorage(): AsyncStorageModule | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return require('@react-native-async-storage/async-storage').default;

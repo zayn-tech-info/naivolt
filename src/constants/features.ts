@@ -10,8 +10,17 @@
  * unset gets the safe defaults below.
  */
 
-function flag(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
+/**
+ * Each `process.env.EXPO_PUBLIC_*` reference below must be written out in full,
+ * statically.
+ *
+ * Metro inlines these by literal text substitution at build time — it does not
+ * evaluate the expression. A dynamic `process.env[name]` lookup therefore
+ * resolves to `undefined` in every build, silently falling through to the
+ * default and making the flag unsettable. This file did exactly that until the
+ * `expo/no-dynamic-env-var` rule caught it.
+ */
+function parse(raw: string | undefined, fallback: boolean): boolean {
   if (raw === undefined || raw === '') return fallback;
   return raw === 'true' || raw === '1';
 }
@@ -21,7 +30,7 @@ export const features = {
    * Show the v2 custodial surfaces: balance-first home, deposit addresses,
    * locked-quote sell, PIN-gated withdrawals.
    */
-  exchangeV2: flag('EXPO_PUBLIC_FEATURE_EXCHANGE_V2', true),
+  exchangeV2: parse(process.env.EXPO_PUBLIC_FEATURE_EXCHANGE_V2, true),
 
   /**
    * Serve v2 data from the in-memory fixture instead of the API.
@@ -33,5 +42,5 @@ export const features = {
    * strength of an unset environment variable is not a risk worth taking to save
    * one line of build config.
    */
-  useMockExchange: flag('EXPO_PUBLIC_USE_MOCK_EXCHANGE', __DEV__),
+  useMockExchange: parse(process.env.EXPO_PUBLIC_USE_MOCK_EXCHANGE, __DEV__),
 } as const;
