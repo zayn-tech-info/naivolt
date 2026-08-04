@@ -13,19 +13,28 @@
 import { useCallback, useState } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-import Animated, { FadeIn } from 'react-native-reanimated';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import Animated, { FadeIn, useReducedMotion } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '@/design';
 import { PinPad, Text } from '@/components/ui';
+import { LightAuthScreen } from '@/components/auth/LightAuthScreen';
 import { useAuthStore } from '@/store/authStore';
 import { setPin as savePin } from '@/services/authV2';
 
 type Stage = 'choose' | 'confirm';
 
 export default function SetPinScreen() {
+  const params = useLocalSearchParams<{ signup?: string }>();
+  const content = <SetPinScreenContent />;
+
+  return params.signup === '1' ? <LightAuthScreen>{content}</LightAuthScreen> : content;
+}
+
+function SetPinScreenContent() {
   const router = useRouter();
   const { c, space } = useTheme();
+  const reduceMotion = useReducedMotion();
   const token = useAuthStore((s) => s.token);
 
   const [stage, setStage] = useState<Stage>('choose');
@@ -79,7 +88,7 @@ export default function SetPinScreen() {
   return (
     <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: c.primaryBackground }}>
       <View style={{ flex: 1, paddingHorizontal: space.roomy, justifyContent: 'space-between' }}>
-        <Animated.View entering={FadeIn.duration(300)} style={{ marginTop: space.major }}>
+        <Animated.View entering={reduceMotion ? undefined : FadeIn.duration(300)} style={{ marginTop: space.major }}>
           <Text variant="title">
             {stage === 'choose' ? 'Set a transaction PIN' : 'Confirm your PIN'}
           </Text>

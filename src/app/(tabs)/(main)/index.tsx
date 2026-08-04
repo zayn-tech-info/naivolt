@@ -1,52 +1,29 @@
 /**
- * Home.
+ * Home — quiet ledger.
  *
- * Structure, top to bottom: who you are, what you have, what you can do, what's
- * in flight, what just happened. That order is deliberate — it descends from
- * state to action to history, so the screen answers "how much do I have" before
- * it asks anything of the user.
- *
- * **One balance, not a portfolio.** The screen shows spendable naira and nothing
- * else. There is no per-asset breakdown, because there is no longer anything a
- * user can do with a crypto balance from inside the app — listing coins would be
- * showing them a number they can't act on, and inviting the question "so how do I
- * turn this into naira?" that the UI has no answer for.
- *
- * Removed from earlier versions, and why:
- *
- *  - The asset list. See above.
- *  - The "trust strip" (Fast payouts · Secure · 24/7). Marketing copy on a
- *    screen someone opens twenty times a day. It belongs on the welcome screen,
- *    which is where a claim like that is actually read.
- *  - The gift-card banner and the network tip, as permanent fixtures. The tip
- *    now appears on the deposit screen, at the moment it's relevant — a warning
- *    about choosing the right network is useless on a screen with no address on
- *    it, and a permanent advisory is one nobody reads.
- *  - Duplicate Convert affordances. The rate card, a primary button, and an
- *    empty-state button all did the same thing.
+ * Structure, top to bottom: greeting, available naira, actions, pending deposits
+ * when present, recent activity. Restyled to match Convert / Sell / Activity.
  */
 
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
 import {
-  EmptyState,
   Screen,
   Section,
   Skeleton,
   Stagger,
-  Surface,
   Text,
+  TopLevelHeader,
 } from '@/components/ui';
-import BalanceHero from '@/components/home/BalanceHero';
-import ActionBar, { type Action } from '@/components/home/ActionBar';
-import DepositProgress from '@/components/home/DepositProgress';
-import ActivityRow from '@/components/activity/ActivityRow';
+import { BalanceCard } from '@/components/home/BalanceCard';
+import { ActionBar, type Action } from '@/components/home/ActionBar';
+import { DepositProgress } from '@/components/home/DepositProgress';
+import { ActivityRow } from '@/components/activity/ActivityRow';
 import { useActivity, usePendingDeposits, usePortfolio } from '@/hooks/useExchange';
 import { useAppStore } from '@/store/appStore';
-import { useAuthStore } from '@/store/authStore';
+
 
 function greeting(): string {
   const hour = new Date().getHours();
@@ -57,8 +34,7 @@ function greeting(): string {
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { c, space } = useTheme();
-  const { user } = useAuthStore();
+  const { c, radius, space } = useTheme();
   const balanceHidden = useAppStore((s) => s.balanceHidden);
   const toggleBalanceHidden = useAppStore((s) => s.toggleBalanceHidden);
   const [refreshing, setRefreshing] = useState(false);
@@ -79,9 +55,9 @@ export default function HomeScreen() {
   const actions: Action[] = useMemo(
     () => [
       {
-        key: 'deposit',
-        label: 'Deposit',
-        icon: 'arrow-down-outline',
+        key: 'sell',
+        label: 'Sell',
+        icon: 'swap-vertical-outline',
         onPress: () => router.push('/deposit'),
       },
       {
@@ -89,7 +65,6 @@ export default function HomeScreen() {
         label: 'Gift cards',
         icon: 'gift-outline',
         onPress: () => router.push('/gift-cards'),
-        primary: true,
       },
       {
         key: 'withdraw',
@@ -103,71 +78,63 @@ export default function HomeScreen() {
 
   const recent = (activity.data?.items ?? []).slice(0, 4);
   const pending = deposits.data ?? [];
+  const portfolioFailed = portfolio.isError && !portfolio.data;
 
   return (
     <Screen tabBarClearance refreshing={refreshing} onRefresh={onRefresh}>
-      {/* Identity — small, because it's context, not content. */}
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginTop: space.snug,
-        }}
-      >
-        <View>
-          <Text variant="caption" color="tertiaryText">
-            {greeting()}
-          </Text>
-          <Text variant="subheading" style={{ marginTop: 1 }}>
-            {user?.username ?? user?.name ?? 'there'}
-          </Text>
-        </View>
-
-        <Pressable
-          onPress={() => router.push('/(tabs)/(main)/profile')}
-          accessibilityRole="button"
-          accessibilityLabel="Settings"
-          style={{
-            width: 38,
-            height: 38,
-            borderRadius: 19,
-            backgroundColor: c.surface,
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Ionicons name="person-outline" size={17} color={c.secondaryText} />
-        </Pressable>
-      </View>
+      <TopLevelHeader
+        title={greeting()}
+        activityAction={() => router.push('/(tabs)/(main)/history')}
+      />
 
       <Stagger index={0}>
-        <BalanceHero
-          ngnBalance={portfolio.data ? Number(portfolio.data.ngnBalance) : null}
-          loading={portfolio.isLoading}
-          hidden={balanceHidden}
-          onToggleHidden={toggleBalanceHidden}
-        />
+        <View style={{ marginTop: space.section, gap: space.roomy }}>
+          <BalanceCard
+            ngnBalance={portfolio.data ? Number(portfolio.data.ngnBalance) : null}
+            loading={portfolio.isLoading && !portfolio.data}
+            hidden={balanceHidden}
+            onToggleHidden={toggleBalanceHidden}
+            error={portfolioFailed}
+            onRetry={() => portfolio.refetch()}
+          />
+          <ActionBar actions={actions} />
+        </View>
       </Stagger>
 
-      <Stagger index={1}>
-        <ActionBar actions={actions} />
-      </Stagger>
-
-      {/* In-flight deposits only appear when there are any. */}
       {pending.length > 0 ? (
-        <Stagger index={2}>
-          <Section title="In progress">
-            <View style={{ gap: space.base }}>
-              {pending.map((deposit) => (
-                <DepositProgress key={deposit.id} deposit={deposit} />
+        <Stagger index={1}>
+          <View style={{ marginTop: space.section, gap: space.base }}>
+            <Text variant="eyebrow" color="tertiaryText">
+              Pending deposits
+            </Text>
+            <View
+              style={{
+                borderRadius: radius.card,
+                borderWidth: 1,
+                borderColor: c.hairline,
+                backgroundColor: c.surface,
+                overflow: 'hidden',
+                paddingHorizontal: space.comfy,
+              }}
+            >
+              {pending.map((deposit, i) => (
+                <View
+                  key={deposit.id}
+                  style={
+                    i === pending.length - 1
+                      ? undefined
+                      : { borderBottomWidth: 1, borderBottomColor: c.hairline }
+                  }
+                >
+                  <DepositProgress deposit={deposit} />
+                </View>
               ))}
             </View>
-          </Section>
+          </View>
         </Stagger>
       ) : null}
 
-      <Stagger index={3}>
+      <Stagger index={pending.length > 0 ? 2 : 1}>
         <Section
           title="Recent activity"
           action={
@@ -176,7 +143,7 @@ export default function HomeScreen() {
                 onPress={() => router.push('/(tabs)/(main)/history')}
                 accessibilityRole="button"
               >
-                <Text variant="label" color="primaryAccent">
+                <Text variant="caption" color="primaryAccent">
                   See all
                 </Text>
               </Pressable>
@@ -184,36 +151,68 @@ export default function HomeScreen() {
           }
         >
           {activity.isLoading ? (
-            <Surface level={1} style={{ gap: space.comfy }}>
+            <View
+              style={{
+                borderRadius: radius.card,
+                borderWidth: 1,
+                borderColor: c.hairline,
+                backgroundColor: c.surface,
+                padding: space.comfy,
+                gap: space.comfy,
+              }}
+            >
               {[0, 1, 2].map((i) => (
-                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}>
-                  <Skeleton width={40} height={40} radius={20} />
-                  <View style={{ flex: 1, gap: 6 }}>
+                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: space.comfy }}>
+                  <Skeleton width={36} height={36} radius={18} />
+                  <View style={{ flex: 1, gap: space.tight }}>
                     <Skeleton width={110} height={13} />
                     <Skeleton width={70} height={11} />
                   </View>
                   <Skeleton width={70} height={15} />
                 </View>
               ))}
-            </Surface>
+            </View>
           ) : recent.length === 0 ? (
-            <EmptyState
-              icon="receipt-outline"
-              title="Nothing here yet"
-              body="Sell a gift card to get your first naira in."
-              actionLabel="Sell a gift card"
-              onAction={() => router.push('/gift-cards')}
-            />
+            <View
+              style={{
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                gap: space.snug,
+                paddingTop: space.snug,
+              }}
+            >
+              <Text variant="bodySmall" color="tertiaryText">
+                No activity yet.
+              </Text>
+              <Pressable
+                onPress={() => router.push('/gift-cards')}
+                accessibilityRole="button"
+                accessibilityLabel="Sell a gift card"
+              >
+                <Text variant="caption" color="primaryAccent">
+                  Sell a gift card
+                </Text>
+              </Pressable>
+            </View>
           ) : (
-            <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
+            <View
+              style={{
+                borderRadius: radius.card,
+                borderWidth: 1,
+                borderColor: c.hairline,
+                backgroundColor: c.surface,
+                overflow: 'hidden',
+                paddingHorizontal: space.comfy,
+              }}
+            >
               {recent.map((item, i) => (
                 <ActivityRow key={item.id} item={item} last={i === recent.length - 1} />
               ))}
-            </Surface>
+            </View>
           )}
         </Section>
       </Stagger>
     </Screen>
   );
 }
-

@@ -8,8 +8,8 @@
  */
 
 import { useCallback } from 'react';
-import { Pressable, View, type ViewProps, type ViewStyle } from 'react-native';
-import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
+import { Pressable, StyleSheet, View, type ViewProps, type ViewStyle } from 'react-native';
+import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '@/design';
 
@@ -44,6 +44,7 @@ export function Surface({
   ...rest
 }: SurfaceProps) {
   const { c, radius, space, motion, elevation } = useTheme();
+  const reduceMotion = useReducedMotion();
   const scale = useSharedValue(1);
 
   const background =
@@ -59,6 +60,9 @@ export function Surface({
     backgroundColor: background,
     borderRadius: radius[radiusToken],
     padding: padding ?? space.comfy,
+    ...((level === 1 || level === 2) && !bordered
+      ? { borderWidth: StyleSheet.hairlineWidth, borderColor: c.border }
+      : null),
     ...(bordered ? { borderWidth: 1, borderColor: c.border } : null),
     ...(accentEdge ? { borderLeftWidth: 3, borderLeftColor: accentEdge } : null),
     ...elevation(shadow),
@@ -67,8 +71,8 @@ export function Surface({
   const animated = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
   const onIn = useCallback(() => {
-    scale.value = withSpring(0.985, motion.press);
-  }, [motion, scale]);
+    scale.value = reduceMotion ? 1 : withSpring(0.985, motion.press);
+  }, [motion, reduceMotion, scale]);
 
   const onOut = useCallback(() => {
     scale.value = withSpring(1, motion.press);

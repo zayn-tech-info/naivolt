@@ -60,7 +60,7 @@ export function AssetPicker({ assets, value, onChange, balances }: AssetPickerPr
               {asset}
             </Text>
             {balance ? (
-              <Text variant="amountSmall" color="tertiaryText" style={{ fontSize: 11 }}>
+              <Text variant="caption" color="tertiaryText">
                 {balance}
               </Text>
             ) : null}

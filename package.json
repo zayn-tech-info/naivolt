@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "scripts": {
     "start": "expo start",
-    "start:dev": "expo start --dev-client",
+    "start:dev": "expo start --dev-client --scheme naivolt",
     "start:outray": "expo start --dev-client",
     "tunnel": "outray start",
     "tunnel:validate": "outray validate-config",
@@ -12,7 +12,8 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "design:audit": "node scripts/design-audit.js"
   },
   "dependencies": {
     "@expo-google-fonts/geist-mono": "^0.4.3",

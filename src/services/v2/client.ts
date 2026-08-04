@@ -6,7 +6,7 @@
  * why `features.useMockExchange` defaults on.
  */
 
-import axios from 'axios';
+import { isAxiosError } from 'axios';
 import { api } from '@/services/api';
 import { useAuthStore } from '@/store/authStore';
 import type { ExchangeService } from './index';
@@ -21,7 +21,7 @@ import type { ApiError, ApiErrorCode } from './types';
  * like "Request failed with status code 502" to a user.
  */
 export function toApiError(err: unknown): ApiError {
-  if (axios.isAxiosError(err)) {
+  if (isAxiosError(err)) {
     const body = err.response?.data as { code?: string; message?: string } | undefined;
     if (body?.code) {
       return {

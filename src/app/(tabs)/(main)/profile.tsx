@@ -1,30 +1,13 @@
 /**
  * Profile — account and settings.
  *
- * Rebuilt on the v2 adapter and the design system. The previous version was ~900
- * lines built around the deleted v1 API: it fetched `/profile`, managed bank
- * accounts inline through three full-screen modals, and offered an avatar upload
- * and a change-password flow.
- *
- * What went and why:
- *
- *  - **Change password.** v2 is passwordless (ARCHITECTURE.md §10). There is no
- *    password to change, so the row was offering a thing that cannot exist.
- *  - **Edit profile / avatar upload.** Phone signup collects no name, and the
- *    server holds no display name to edit. Rows that open a form for fields the
- *    backend doesn't store are worse than no rows.
- *  - **Inline bank-account modals.** Bank accounts have their own screen, reached
- *    from here and from withdraw, using one shared form. Managing them in two
- *    places is how the two drift apart.
- *  - **Three "Coming soon" alerts.** A menu row that apologises is a menu row
- *    that shouldn't be rendered yet.
- *
- * What's left is what the app can actually honour: identity, where money goes,
- * the security controls that exist, appearance, and sign out.
+ * Restyled to the sharp Convert / Sell / Activity / Home system. Vertical
+ * rhythm between blocks is one spacing token (space.comfy). Account and
+ * balance cards share the same padding, radius, and border treatment.
  */
 
-import { useCallback } from 'react';
-import { Alert, Switch, View } from 'react-native';
+import { useCallback, type ReactNode } from 'react';
+import { Alert, Pressable, Switch, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,27 +16,28 @@ import {
   Badge,
   Money,
   Screen,
-  Section,
+  SegmentedControl,
   Skeleton,
   Stagger,
-  Surface,
   Text,
+  TopLevelHeader,
   useToast,
 } from '@/components/ui';
 import { useBankAccounts, useLimits, usePortfolio } from '@/hooks/useExchange';
 import { signOutCompletely } from '@/services/sessionReset';
-import { useAppStore } from '@/store/appStore';
+import { useAppStore, type ThemePreference } from '@/store/appStore';
 import { useAuthStore } from '@/store/authStore';
+
 
 export default function ProfileScreen() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { c, space } = useTheme();
+  const { c, radius, space } = useTheme();
   const { show } = useToast();
 
   const user = useAuthStore((s) => s.user);
-  const mode = useAppStore((s) => s.mode);
-  const toggleMode = useAppStore((s) => s.toggleMode);
+  const themePreference = useAppStore((s) => s.themePreference);
+  const setMode = useAppStore((s) => s.setMode);
   const balanceHidden = useAppStore((s) => s.balanceHidden);
   const toggleBalanceHidden = useAppStore((s) => s.toggleBalanceHidden);
 
@@ -70,179 +54,283 @@ export default function ProfileScreen() {
         onPress: async () => {
           await signOutCompletely();
           useAuthStore.getState().logout();
-          // Clear cached balances and activity — the next person to sign in on
-          // this device must not see the previous user's money.
           queryClient.clear();
-          router.replace('/(auth)/welcome');
+          router.replace('/(auth)/register');
         },
       },
     ]);
   }, [queryClient, router]);
 
-  // Phone signup collects no name, so fall back through what we might have.
   const displayName = user?.name || user?.username || user?.phone || 'Your account';
   const tier = limits.data?.kycTier ?? user?.kycTier ?? 0;
   const bankCount = accounts.data?.length ?? 0;
 
   return (
     <Screen tabBarClearance>
-      <View style={{ marginTop: space.snug, marginBottom: space.roomy }}>
-        <Text variant="title">Profile</Text>
-      </View>
+      <TopLevelHeader title="Profile" supportingText="Account, security, and app preferences" />
 
-      {/* Identity. An avatar would be decoration — there's no photo to show and
-          no way to set one — so the initial does the job at a fraction of the
-          space. */}
-      <Stagger index={0}>
-        <Surface level={1} style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}>
-          <View
-            style={{
-              width: 52,
-              height: 52,
-              borderRadius: 26,
-              backgroundColor: c.accentDim,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <Text variant="heading" color="primaryAccent">
-              {displayName.trim().charAt(0).toUpperCase()}
-            </Text>
-          </View>
-
-          <View style={{ flex: 1, minWidth: 0 }}>
-            <Text variant="subheading" numberOfLines={1}>
-              {displayName}
-            </Text>
-            {user?.phone || user?.email ? (
-              <Text
-                variant="amountSmall"
-                color="tertiaryText"
-                numberOfLines={1}
-                style={{ marginTop: 2 }}
+      <View style={{ marginTop: space.comfy, gap: space.comfy }}>
+        {/* Account */}
+        <Stagger index={0}>
+          <Card>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: space.comfy,
+              }}
+            >
+              <View
+                style={{
+                  width: space.major,
+                  height: space.major,
+                  borderRadius: radius.card,
+                  backgroundColor: c.accentDim,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
               >
-                {user.phone ?? user.email}
+                <Text variant="subheading" color="primaryAccent">
+                  {displayName.trim().charAt(0).toUpperCase()}
+                </Text>
+              </View>
+
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text variant="subheading" numberOfLines={1}>
+                  {displayName}
+                </Text>
+                {user?.phone || user?.email ? (
+                  <Text
+                    variant="caption"
+                    color="tertiaryText"
+                    numberOfLines={1}
+                    style={{ marginTop: 2 }}
+                  >
+                    {user.phone ?? user.email}
+                  </Text>
+                ) : null}
+              </View>
+
+              <Badge
+                label={tier > 0 ? `Tier ${tier}` : 'Unverified'}
+                tone={tier > 0 ? 'positive' : 'warning'}
+              />
+            </View>
+          </Card>
+        </Stagger>
+
+        {/* Balance */}
+        <Stagger index={1}>
+          <Block title="Balance">
+            <Card>
+              <Text variant="eyebrow" color="tertiaryText">
+                Available
               </Text>
-            ) : null}
-          </View>
+              {portfolio.isLoading ? (
+                <Skeleton width={170} height={30} radius={radius.card} style={{ marginTop: space.snug }} />
+              ) : (
+                <Money
+                  value={Number(portfolio.data?.ngnBalance ?? 0)}
+                  variant="figure"
+                  style={{ marginTop: space.snug }}
+                />
+              )}
+              {limits.data ? (
+                <Text variant="caption" color="tertiaryText" style={{ marginTop: space.snug }}>
+                  ₦{Number(limits.data.dailyRemainingNgn).toLocaleString('en-NG')} of today’s
+                  withdrawal limit left
+                </Text>
+              ) : null}
+            </Card>
+          </Block>
+        </Stagger>
 
-          <Badge
-            label={tier > 0 ? `Tier ${tier}` : 'Unverified'}
-            tone={tier > 0 ? 'positive' : 'warning'}
-          />
-        </Surface>
-      </Stagger>
+        {/* Money */}
+        <Stagger index={2}>
+          <Block title="Money">
+            <ListCard>
+              <Row
+                icon="business-outline"
+                label="Bank accounts"
+                detail={
+                  accounts.isLoading
+                    ? undefined
+                    : bankCount === 0
+                      ? 'None yet'
+                      : `${bankCount} saved`
+                }
+                onPress={() => router.push('/bank-details')}
+              />
+              <Row
+                icon="receipt-outline"
+                label="Activity"
+                detail="Deposits, cards, withdrawals"
+                onPress={() => router.push('/(tabs)/(main)/history')}
+                last
+              />
+            </ListCard>
+          </Block>
+        </Stagger>
 
-      {/* Balance restated here so the profile answers "what do I have" without a
-          trip back to home. */}
-      <Stagger index={1}>
-        <Section title="Balance">
-          <Surface level={1} style={{ gap: space.tight }}>
-            <Text variant="eyebrow" color="tertiaryText">
-              Available
-            </Text>
-            {portfolio.isLoading ? (
-              <Skeleton width={170} height={30} radius={8} />
-            ) : (
-              <Money value={Number(portfolio.data?.ngnBalance ?? 0)} variant="figure" />
-            )}
-            {limits.data ? (
-              <Text variant="caption" color="tertiaryText">
-                ₦{Number(limits.data.dailyRemainingNgn).toLocaleString('en-NG')} of today’s
-                withdrawal limit left
+        {/* Security */}
+        <Stagger index={3}>
+          <Block title="Security">
+            <ListCard>
+              <Row
+                icon="keypad-outline"
+                label="Change PIN"
+                detail="Used for every withdrawal"
+                onPress={() => router.push('/(auth)/set-pin')}
+              />
+              <ToggleRow
+                icon="eye-off-outline"
+                label="Hide balance"
+                detail="Mask amounts on the home screen"
+                value={balanceHidden}
+                onValueChange={toggleBalanceHidden}
+                last
+              />
+            </ListCard>
+          </Block>
+        </Stagger>
+
+        {/* App */}
+        <Stagger index={4}>
+          <Block title="App">
+            <ListCard>
+              <View style={{ paddingVertical: space.comfy, gap: space.base }}>
+                <View style={{ gap: space.tight }}>
+                  <Text variant="subheading">Appearance</Text>
+                  <Text variant="caption" color="tertiaryText">
+                    Follow your device or keep a theme you prefer.
+                  </Text>
+                </View>
+                <SegmentedControl<ThemePreference>
+                  segments={[
+                    { value: 'system', label: 'System' },
+                    { value: 'light', label: 'Light' },
+                    { value: 'dark', label: 'Dark' },
+                  ]}
+                  value={themePreference}
+                  onChange={setMode}
+                />
+              </View>
+              <Row
+                icon="chatbubble-ellipses-outline"
+                label="Get help"
+                detail="We reply within an hour"
+                onPress={() => show('Support chat is coming soon')}
+                last
+              />
+            </ListCard>
+          </Block>
+        </Stagger>
+
+        {/* Sign out */}
+        <Stagger index={5}>
+          <Card onPress={signOut} accessibilityLabel="Sign out">
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: space.snug,
+                minHeight: space.spacious,
+              }}
+            >
+              <Ionicons name="log-out-outline" size={18} color={c.danger} />
+              <Text variant="subheading" color="danger">
+                Sign out
               </Text>
-            ) : null}
-          </Surface>
-        </Section>
-      </Stagger>
-
-      <Stagger index={2}>
-        <Section title="Money">
-          <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
-            <Row
-              icon="business-outline"
-              label="Bank accounts"
-              detail={
-                accounts.isLoading
-                  ? undefined
-                  : bankCount === 0
-                    ? 'None yet'
-                    : `${bankCount} saved`
-              }
-              onPress={() => router.push('/bank-details')}
-            />
-            <Row
-              icon="receipt-outline"
-              label="Activity"
-              detail="Deposits, cards, withdrawals"
-              onPress={() => router.push('/(tabs)/(main)/history')}
-              last
-            />
-          </Surface>
-        </Section>
-      </Stagger>
-
-      <Stagger index={3}>
-        <Section title="Security">
-          <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
-            <Row
-              icon="keypad-outline"
-              label="Change PIN"
-              detail="Used for every withdrawal"
-              onPress={() => router.push('/(auth)/set-pin')}
-            />
-            <ToggleRow
-              icon="eye-off-outline"
-              label="Hide balance"
-              detail="Mask amounts on the home screen"
-              value={balanceHidden}
-              onValueChange={toggleBalanceHidden}
-              last
-            />
-          </Surface>
-        </Section>
-      </Stagger>
-
-      <Stagger index={4}>
-        <Section title="App">
-          <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
-            <ToggleRow
-              icon={mode === 'dark' ? 'moon-outline' : 'sunny-outline'}
-              label="Dark mode"
-              value={mode === 'dark'}
-              onValueChange={toggleMode}
-            />
-            <Row
-              icon="chatbubble-ellipses-outline"
-              label="Get help"
-              detail="We reply within an hour"
-              onPress={() => show('Support chat is coming soon')}
-              last
-            />
-          </Surface>
-        </Section>
-      </Stagger>
-
-      <Stagger index={5}>
-        <Surface
-          level={1}
-          onPress={signOut}
-          style={{
-            marginTop: space.roomy,
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: space.snug,
-          }}
-          accessibilityLabel="Sign out"
-        >
-          <Ionicons name="log-out-outline" size={18} color={c.negative} />
-          <Text variant="action" color="negative">
-            Sign out
-          </Text>
-        </Surface>
-      </Stagger>
+            </View>
+          </Card>
+        </Stagger>
+      </View>
     </Screen>
+  );
+}
+
+function Block({ title, children }: { title: string; children: ReactNode }) {
+  const { space } = useTheme();
+  return (
+    <View style={{ gap: space.base }}>
+      <Text variant="eyebrow" color="tertiaryText">
+        {title}
+      </Text>
+      {children}
+    </View>
+  );
+}
+
+function Card({
+  children,
+  onPress,
+  accessibilityLabel,
+}: {
+  children: ReactNode;
+  onPress?: () => void;
+  accessibilityLabel?: string;
+}) {
+  const { c, radius, space, minTouch } = useTheme();
+  const shell = {
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: c.hairline,
+    backgroundColor: c.surface,
+    padding: space.comfy,
+  } as const;
+
+  if (onPress) {
+    return (
+      <Pressable
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        style={({ pressed }) => [shell, { opacity: pressed ? 0.85 : 1, minHeight: minTouch }]}
+      >
+        {children}
+      </Pressable>
+    );
+  }
+
+  return <View style={shell}>{children}</View>;
+}
+
+function ListCard({ children }: { children: ReactNode }) {
+  const { c, radius, space } = useTheme();
+  return (
+    <View
+      style={{
+        borderRadius: radius.card,
+        borderWidth: 1,
+        borderColor: c.hairline,
+        backgroundColor: c.surface,
+        overflow: 'hidden',
+        paddingHorizontal: space.comfy,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+function IconWell({ name }: { name: React.ComponentProps<typeof Ionicons>['name'] }) {
+  const { c, radius, iconSize } = useTheme();
+  return (
+    <View
+      style={{
+        width: 36,
+        height: 36,
+        borderRadius: radius.card,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: c.surfaceSunken,
+        borderWidth: 1,
+        borderColor: c.hairline,
+      }}
+    >
+      <Ionicons name={name} size={iconSize.medium} color={c.secondaryText} />
+    </View>
   );
 }
 
@@ -259,22 +347,24 @@ function Row({
   onPress: () => void;
   last?: boolean;
 }) {
-  const { c, space } = useTheme();
+  const { c, radius, space, minTouch } = useTheme();
 
   return (
-    <Surface
-      level={0}
-      padding={0}
+    <Pressable
       onPress={onPress}
-      style={{
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={({ pressed }) => ({
+        minHeight: minTouch + 4,
         flexDirection: 'row',
         alignItems: 'center',
-        gap: space.base,
-        paddingVertical: space.base,
+        gap: space.comfy,
+        paddingVertical: space.comfy,
+        backgroundColor: pressed ? c.surfaceSunken : 'transparent',
         ...(last ? null : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
-      }}
+      })}
     >
-      <Ionicons name={icon} size={19} color={c.secondaryText} />
+      <IconWell name={icon} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text variant="subheading">{label}</Text>
         {detail ? (
@@ -283,8 +373,8 @@ function Row({
           </Text>
         ) : null}
       </View>
-      <Ionicons name="chevron-forward" size={17} color={c.quaternaryText} />
-    </Surface>
+      <Ionicons name="chevron-forward" size={16} color={c.quaternaryText} />
+    </Pressable>
   );
 }
 
@@ -303,19 +393,20 @@ function ToggleRow({
   onValueChange: () => void;
   last?: boolean;
 }) {
-  const { c, space } = useTheme();
+  const { c, radius, space, minTouch } = useTheme();
 
   return (
     <View
       style={{
+        minHeight: minTouch + 4,
         flexDirection: 'row',
         alignItems: 'center',
-        gap: space.base,
-        paddingVertical: space.base,
+        gap: space.comfy,
+        paddingVertical: space.comfy,
         ...(last ? null : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
       }}
     >
-      <Ionicons name={icon} size={19} color={c.secondaryText} />
+      <IconWell name={icon} />
       <View style={{ flex: 1, minWidth: 0 }}>
         <Text variant="subheading">{label}</Text>
         {detail ? (

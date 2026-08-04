@@ -1,18 +1,8 @@
 /**
- * The whole of signup.
+ * The shared entry for signup and signin.
  *
- * v1 asked for full name, username, email, phone, password and confirm password
- * — six fields and a keyboard, before the user had seen a single thing the app
- * does. This asks for one tap, or one phone number.
- *
- * There is no separate login screen any more, because passwordless auth makes
- * the distinction meaningless: the same Google tap and the same phone number
- * either find an existing account or create one, and the server decides which.
- * Presenting "Sign up" and "Sign in" as different doors would just make people
- * pick the wrong one.
- *
- * Name, email and everything else either arrive free with the OIDC token or are
- * never needed. KYC comes later, at withdrawal — see ARCHITECTURE.md §10.3.
+ * Authentication stays passwordless. The visual hero establishes the product
+ * before the user chooses Google, Apple, or phone.
  */
 
 import { useCallback, useState } from 'react';
@@ -26,20 +16,32 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated, { FadeIn, FadeInDown, useReducedMotion } from 'react-native-reanimated';
 import { useTheme } from '@/design';
 import { Button, Input, Text } from '@/components/ui';
+import { CryptoLogoMarquee } from '@/components/auth/CryptoLogoMarquee';
+import { LightAuthScreen } from '@/components/auth/LightAuthScreen';
 import { useAuthStore } from '@/store/authStore';
 import { saveUser, setToken as persistToken, TOKEN_KEY } from '@/services/tokenStorage';
 import { AuthError, normalizePhone, requestOtp, signInWithIdToken } from '@/services/authV2';
 import { isProviderAvailable, signInWithApple, signInWithGoogle } from '@/services/oauthProviders';
 
 export default function AuthScreen() {
+  return (
+    <LightAuthScreen>
+      <AuthScreenContent />
+    </LightAuthScreen>
+  );
+}
+
+function AuthScreenContent() {
   const router = useRouter();
-  const { c, space } = useTheme();
+  const { c, space, minTouch, hitSlop } = useTheme();
+  const reduceMotion = useReducedMotion();
   const { setUser, setToken } = useAuthStore();
 
   const [phone, setPhone] = useState('');
+  const [phoneExpanded, setPhoneExpanded] = useState(false);
   const [busy, setBusy] = useState<'google' | 'apple' | 'phone' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,7 +55,6 @@ export default function AuthScreen() {
         const result =
           provider === 'google' ? await signInWithGoogle() : await signInWithApple();
 
-        // The user backed out of the system sheet — not an error worth shouting about.
         if (!result) return;
 
         const session = await signInWithIdToken(provider, result.idToken, result.fullName);
@@ -62,10 +63,11 @@ export default function AuthScreen() {
         setUser(session.user);
         await saveUser(session.user);
 
-        // Branch rather than a ternary: a union of hrefs doesn't satisfy
-        // expo-router's Href type, which resolves per literal.
-        if (session.isNewAccount) router.replace('/set-pin');
-        else router.replace('/(tabs)/(main)');
+        if (session.isNewAccount) {
+          router.replace({ pathname: '/set-pin', params: { signup: '1' } });
+        } else {
+          router.replace('/(tabs)/(main)');
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not sign in');
       } finally {
@@ -83,8 +85,6 @@ export default function AuthScreen() {
       router.push({ pathname: '/verify', params: { phone: normalized } });
     } catch (err) {
       if (err instanceof AuthError && err.offline && __DEV__) {
-        // The v2 API does not exist yet. In development, walk on to the OTP
-        // screen anyway so the flow can be reviewed end to end.
         const normalized = normalizePhone(phone);
         if (normalized) {
           router.push({ pathname: '/verify', params: { phone: normalized, mock: '1' } });
@@ -96,6 +96,16 @@ export default function AuthScreen() {
       setBusy(null);
     }
   }, [phone, router]);
+
+  const openPhone = useCallback(() => {
+    setError(null);
+    setPhoneExpanded(true);
+  }, []);
+
+  const closePhone = useCallback(() => {
+    setError(null);
+    setPhoneExpanded(false);
+  }, []);
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: c.primaryBackground }}>
@@ -112,106 +122,153 @@ export default function AuthScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {router.canGoBack() ? (
-            <Pressable
-              onPress={() => router.back()}
-              hitSlop={12}
-              accessibilityRole="button"
-              accessibilityLabel="Go back"
-              style={{ height: 44, justifyContent: 'center', alignSelf: 'flex-start' }}
-            >
-              <Ionicons name="arrow-back" size={24} color={c.primaryText} />
-            </Pressable>
+          {phoneExpanded ? (
+            <>
+              <Pressable
+                onPress={closePhone}
+                disabled={busy !== null}
+                hitSlop={hitSlop}
+                accessibilityRole="button"
+                accessibilityLabel="Back to authentication methods"
+                style={{ minHeight: minTouch, justifyContent: 'center', alignSelf: 'flex-start' }}
+              >
+                <Ionicons name="arrow-back" size={space.roomy} color={c.primaryText} />
+              </Pressable>
+
+              <Animated.View
+                entering={reduceMotion ? undefined : FadeInDown.duration(240)}
+                style={{ gap: space.comfy, marginTop: space.section }}
+              >
+                <Input
+                  label="Phone number"
+                  prefix="+234"
+                  placeholder="801 234 5678"
+                  value={phone}
+                  onChangeText={(text) => {
+                    setPhone(text);
+                    setError(null);
+                  }}
+                  keyboardType="phone-pad"
+                  autoComplete="tel"
+                  textContentType="telephoneNumber"
+                  returnKeyType="go"
+                  onSubmitEditing={phoneIsValid ? onPhone : undefined}
+                  maxLength={14}
+                  hint="We'll text you a 6 digit code."
+                  autoFocus
+                />
+
+                <Button
+                  title="Continue"
+                  size="lg"
+                  fullWidth
+                  iconRight="arrow-forward"
+                  loading={busy === 'phone'}
+                  disabled={!phoneIsValid || busy !== null}
+                  onPress={onPhone}
+                />
+
+                {error ? (
+                    <Animated.View entering={reduceMotion ? undefined : FadeInDown.duration(200)}>
+                    <Text variant="bodySmall" color="negative" accessibilityLiveRegion="polite">
+                      {error}
+                    </Text>
+                  </Animated.View>
+                ) : null}
+              </Animated.View>
+            </>
           ) : (
-            <View style={{ height: 44 }} />
-          )}
+            <>
+              {router.canGoBack() ? (
+                <Pressable
+                  onPress={() => router.back()}
+                  hitSlop={hitSlop}
+                  accessibilityRole="button"
+                  accessibilityLabel="Go back"
+                  style={{ minHeight: minTouch, justifyContent: 'center', alignSelf: 'flex-start' }}
+                >
+                  <Ionicons name="arrow-back" size={space.roomy} color={c.primaryText} />
+                </Pressable>
+              ) : (
+                <View style={{ minHeight: minTouch }} />
+              )}
 
-          <Animated.View entering={FadeInDown.duration(320)} style={{ marginTop: space.major }}>
-            <Text variant="title">Get started</Text>
-            <Text variant="body" color="secondaryText" style={{ marginTop: space.snug }}>
-              Sign in or create an account — it&apos;s the same tap. No password to
-              remember.
-            </Text>
-          </Animated.View>
+              <CryptoLogoMarquee />
 
-          <View style={{ gap: space.base, marginTop: space.major }}>
-            <Button
-              title="Continue with Google"
-              icon="logo-google"
-              variant="secondary"
-              size="lg"
-              fullWidth
-              loading={busy === 'google'}
-              disabled={busy !== null}
-              onPress={() => onSocial('google')}
-            />
+              <Animated.View
+                entering={reduceMotion ? undefined : FadeIn.duration(320)}
+                style={{ alignItems: 'center', marginTop: space.section }}
+              >
+                <Text variant="title" align="center">
+                  Welcome to Naivolt
+                </Text>
+                <Text
+                  variant="body"
+                  color="secondaryText"
+                  align="center"
+                  style={{ marginTop: space.snug, maxWidth: space.hero * 6 }}
+                >
+                  Sign in or create an account in seconds. No password to remember.
+                </Text>
+              </Animated.View>
 
-            {/* App Store Guideline 4.8: offering Google without a private
-                alternative gets the build rejected. Apple-only on iOS, since
-                Android has no Sign in with Apple. */}
-            {Platform.OS === 'ios' && isProviderAvailable('apple') ? (
+              <View style={{ gap: space.base, marginTop: space.section }}>
+                <Button
+                  title="Continue with Google"
+                  icon="logo-google"
+                  variant="secondary"
+                  size="lg"
+                  fullWidth
+                  style={{ borderWidth: 1, borderColor: c.border }}
+                  loading={busy === 'google'}
+                  disabled={busy !== null}
+                  onPress={() => onSocial('google')}
+                />
+
+                {Platform.OS === 'ios' && isProviderAvailable('apple') ? (
+                  <Button
+                    title="Continue with Apple"
+                    icon="logo-apple"
+                    variant="secondary"
+                    size="lg"
+                    fullWidth
+                    style={{ borderWidth: 1, borderColor: c.border }}
+                    loading={busy === 'apple'}
+                    disabled={busy !== null}
+                    onPress={() => onSocial('apple')}
+                  />
+                ) : null}
+              </View>
+
+              <Divider />
+
               <Button
-                title="Continue with Apple"
-                icon="logo-apple"
-                variant="secondary"
+                title="Continue with phone"
+                icon="call-outline"
                 size="lg"
                 fullWidth
-                loading={busy === 'apple'}
                 disabled={busy !== null}
-                onPress={() => onSocial('apple')}
+                onPress={openPhone}
               />
-            ) : null}
-          </View>
 
-          <Divider />
+              {error ? (
+                <Animated.View entering={reduceMotion ? undefined : FadeInDown.duration(200)} style={{ marginTop: space.base }}>
+                  <Text variant="bodySmall" color="negative" accessibilityLiveRegion="polite">
+                    {error}
+                  </Text>
+                </Animated.View>
+              ) : null}
 
-          <View style={{ gap: space.base }}>
-            <Input
-              label="Phone number"
-              prefix="+234"
-              placeholder="801 234 5678"
-              value={phone}
-              onChangeText={(t) => {
-                setPhone(t);
-                setError(null);
-              }}
-              keyboardType="phone-pad"
-              autoComplete="tel"
-              textContentType="telephoneNumber"
-              returnKeyType="go"
-              onSubmitEditing={phoneIsValid ? onPhone : undefined}
-              maxLength={14}
-              hint="We'll text you a 6-digit code."
-            />
-
-            <Button
-              title="Continue"
-              size="lg"
-              fullWidth
-              iconRight="arrow-forward"
-              loading={busy === 'phone'}
-              disabled={!phoneIsValid || busy !== null}
-              onPress={onPhone}
-            />
-          </View>
-
-          {error ? (
-            <Animated.View entering={FadeInDown.duration(200)} style={{ marginTop: space.base }}>
-              <Text variant="bodySmall" color="negative">
-                {error}
+              <Text
+                variant="caption"
+                color="tertiaryText"
+                align="center"
+                style={{ maxWidth: space.hero * 6, alignSelf: 'center', marginTop: space.section }}
+              >
+                By continuing you agree to our Terms of Service and Privacy Policy.
               </Text>
-            </Animated.View>
-          ) : null}
-
-          <View style={{ flex: 1, minHeight: space.major }} />
-
-          <Text
-            variant="caption"
-            color="tertiaryText"
-            style={{ textAlign: 'center', maxWidth: 320, alignSelf: 'center' }}
-          >
-            By continuing you agree to our Terms of Service and Privacy Policy.
-          </Text>
+            </>
+          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -226,7 +283,7 @@ function Divider() {
         flexDirection: 'row',
         alignItems: 'center',
         gap: space.base,
-        marginVertical: space.major,
+        marginVertical: space.comfy,
       }}
     >
       <View style={{ flex: 1, height: 1, backgroundColor: c.border }} />

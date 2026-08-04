@@ -17,8 +17,8 @@ import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
-import Surface from './Surface';
-import Text from './Text';
+import { Surface } from './Surface';
+import { Text } from './Text';
 import { useToast } from './Toast';
 
 export interface CopyFieldProps {
@@ -29,6 +29,11 @@ export interface CopyFieldProps {
   /** Collapse the middle instead of wrapping. For long hashes in tight rows. */
   truncate?: boolean;
   toastMessage?: string;
+  /**
+   * `accent` keeps the brand tint on the copy control.
+   * `neutral` is for high-stakes surfaces that reserve colour for danger only.
+   */
+  tone?: 'accent' | 'neutral';
 }
 
 function group(value: string, size: number): string {
@@ -47,8 +52,9 @@ export function CopyField({
   groupSize = 4,
   truncate = false,
   toastMessage = 'Address copied',
+  tone = 'accent',
 }: CopyFieldProps) {
-  const { c, space, radius } = useTheme();
+  const { c, space, radius, minTouch } = useTheme();
   const { show } = useToast();
   const [copied, setCopied] = useState(false);
 
@@ -61,6 +67,16 @@ export function CopyField({
   }, [value, show, toastMessage]);
 
   const display = truncate ? middleTruncate(value) : group(value, groupSize);
+  const iconBg = copied
+    ? c.positiveDim
+    : tone === 'neutral'
+      ? c.surfaceElevated
+      : c.accentDim;
+  const iconFg = copied
+    ? c.positive
+    : tone === 'neutral'
+      ? c.primaryText
+      : c.primaryAccent;
 
   return (
     <View>
@@ -76,32 +92,29 @@ export function CopyField({
         padding={space.comfy}
         radiusToken="field"
         style={{
-          backgroundColor: c.surfaceInput,
+          backgroundColor: c.surfaceSunken,
           borderWidth: 1,
-          borderColor: copied ? c.positive : c.border,
+          borderColor: copied ? c.positive : c.hairline,
           flexDirection: 'row',
           alignItems: 'center',
           gap: space.base,
+          minHeight: minTouch + space.snug,
         }}
       >
-        <Text variant="code" style={{ flex: 1 }} selectable>
+        <Text variant="code" style={{ flex: 1, letterSpacing: 0.4 }} selectable>
           {display}
         </Text>
         <View
           style={{
-            width: 32,
-            height: 32,
-            borderRadius: radius.chip,
-            backgroundColor: copied ? c.positiveDim : c.accentDim,
+            width: 36,
+            height: 36,
+            borderRadius: radius.control,
+            backgroundColor: iconBg,
             alignItems: 'center',
             justifyContent: 'center',
           }}
         >
-          <Ionicons
-            name={copied ? 'checkmark' : 'copy-outline'}
-            size={15}
-            color={copied ? c.positive : c.primaryAccent}
-          />
+          <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={16} color={iconFg} />
         </View>
       </Surface>
     </View>

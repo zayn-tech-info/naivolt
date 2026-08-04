@@ -1,14 +1,14 @@
 /**
- * Deposit — step 2: choose the network.
+ * Sell — step 2: choose the network, as a page.
  *
- * Only reached for assets that exist on more than one chain. USDT is the reason
- * this screen exists: it lives on four networks with a different address on
- * each, and sending TRC-20 funds to a BEP-20 address destroys them with no
- * recovery path.
+ * In the normal flow this choice is a sheet raised over the coin list (see
+ * components/exchange/NetworkSheet). This page is the deep-link entry point:
+ * `/deposit/USDT` arriving from a link or a restored session has no coin list
+ * behind it to raise a sheet over, so the choice needs somewhere to live.
  *
- * So nothing is pre-selected. A highlighted default is a network the user did
- * not choose, and "I just tapped continue" is exactly how that mistake gets
- * made. Every row is an explicit tap that navigates.
+ * Same rule as the sheet — nothing is pre-selected. A highlighted default is a
+ * network the user did not choose, and "I just tapped continue" is exactly how
+ * that mistake gets made. Every row is an explicit tap that navigates.
  */
 
 import { useCallback } from 'react';
@@ -16,7 +16,7 @@ import { Redirect, useLocalSearchParams, useRouter } from 'expo-router';
 import { View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Group, ListRow, Screen, Section, Surface, Text } from '@/components/ui';
-import ScreenHeader from '@/components/navigation/ScreenHeader';
+import { ScreenHeader } from '@/components/navigation/ScreenHeader';
 import { CHAINS_FOR_ASSET, parseAsset } from '@/constants/assets';
 import { useTheme } from '@/design';
 
@@ -51,7 +51,7 @@ export default function DepositNetworkScreen() {
 
   return (
     <Screen edges={['top']}>
-      <ScreenHeader title={`Deposit ${asset}`} onBack={() => router.back()} />
+      <ScreenHeader title={`Sell ${asset}`} onBack={() => router.back()} />
 
       <Surface
         level={1}

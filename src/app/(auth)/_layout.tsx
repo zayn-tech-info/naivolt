@@ -3,7 +3,6 @@ import { Stack } from 'expo-router';
 export default function AuthLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="welcome" />
       {/* One screen for both sign-in and sign-up — see register.tsx. */}
       <Stack.Screen name="register" />
       <Stack.Screen name="verify" />

@@ -1,29 +1,122 @@
-import { Tabs } from "expo-router";
-import { MainTabBar } from "@/components/navigation/MainTabBar";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Tabs } from 'expo-router';
+import { StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '@/design';
+import { Text } from '@/components/ui';
+
+function TabLabel({
+  label,
+  focused,
+  color,
+}: {
+  label: string;
+  focused: boolean;
+  color: string;
+}) {
+  return (
+    <Text
+      variant="caption"
+      style={{
+        color,
+        fontWeight: focused ? '600' : '500',
+        marginTop: 2,
+      }}
+      numberOfLines={1}
+    >
+      {label}
+    </Text>
+  );
+}
 
 export default function MainTabsLayout() {
-  const insets = useSafeAreaInsets();
-  // Extra padding so content clears the floating pill (pill ~56px + inset + 8px gap)
-  const tabBarHeight = 66 + Math.max(insets.bottom, 12) + 10;
+  const { c, iconSize, space } = useTheme();
 
   return (
     <Tabs
-      tabBar={(props) => <MainTabBar {...props} />}
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { display: "none" },
-        // `contentStyle` is a Stack option; Tabs uses `sceneStyle`. The old
-        // key was silently ignored, so screens were relying on Screen's own
-        // tabBarClearance for the gap.
-        sceneStyle: { paddingBottom: tabBarHeight },
+        sceneStyle: { backgroundColor: c.primaryBackground },
+        tabBarActiveTintColor: c.primaryAccent,
+        tabBarInactiveTintColor: c.tertiaryText,
+        tabBarHideOnKeyboard: true,
+        tabBarStyle: {
+          backgroundColor: c.surface,
+          borderTopColor: c.hairline,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          elevation: 0,
+          shadowOpacity: 0,
+          paddingTop: space.tight,
+        },
+        tabBarItemStyle: {
+          paddingVertical: space.tight,
+        },
       }}
       initialRouteName="index"
     >
-      <Tabs.Screen name="index" />
-      <Tabs.Screen name="convert" />
-      <Tabs.Screen name="history" />
-      <Tabs.Screen name="profile" />
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: 'Home',
+          tabBarLabel: ({ focused, color }) => (
+            <TabLabel label="Home" focused={focused} color={color} />
+          ),
+          tabBarIcon: ({ focused, color }) => (
+            <Ionicons
+              name={focused ? 'home' : 'home-outline'}
+              size={iconSize.large}
+              color={color}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="convert"
+        options={{
+          title: 'Rate',
+          tabBarLabel: ({ focused, color }) => (
+            <TabLabel label="Rate" focused={focused} color={color} />
+          ),
+          tabBarIcon: ({ focused, color }) => (
+            <Ionicons
+              name={focused ? 'stats-chart' : 'stats-chart-outline'}
+              size={iconSize.large}
+              color={color}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="history"
+        options={{
+          title: 'Activity',
+          tabBarLabel: ({ focused, color }) => (
+            <TabLabel label="Activity" focused={focused} color={color} />
+          ),
+          tabBarIcon: ({ focused, color }) => (
+            <Ionicons
+              name={focused ? 'receipt' : 'receipt-outline'}
+              size={iconSize.large}
+              color={color}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: 'Profile',
+          tabBarLabel: ({ focused, color }) => (
+            <TabLabel label="Profile" focused={focused} color={color} />
+          ),
+          tabBarIcon: ({ focused, color }) => (
+            <Ionicons
+              name={focused ? 'person-circle' : 'person-circle-outline'}
+              size={iconSize.large}
+              color={color}
+            />
+          ),
+        }}
+      />
     </Tabs>
   );
 }

@@ -11,9 +11,12 @@ import type { ReactNode } from 'react';
 import { RefreshControl, ScrollView, View, type ViewStyle } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '@/design';
-import Text from './Text';
+import { Text } from './Text';
 
-/** Height of the floating pill tab bar, plus breathing room. */
+/**
+ * @deprecated Floating pill tab bar clearance. The default tab navigator already
+ * reserves bar height; prefer `tabBarClearance` which only adds scroll breathing room.
+ */
 export const TAB_BAR_CLEARANCE = 96;
 
 export interface ScreenProps {
@@ -22,7 +25,10 @@ export interface ScreenProps {
   scroll?: boolean;
   refreshing?: boolean;
   onRefresh?: () => void;
-  /** Leave room for the floating tab bar. On for tab screens. */
+  /**
+   * Extra scroll breathing room on tab screens. The tab navigator already clears
+   * the bar; this is only end-of-list padding, not a second bar inset.
+   */
   tabBarClearance?: boolean;
   /** Horizontal gutter. */
   gutter?: number;
@@ -47,9 +53,9 @@ export function Screen({
   const insets = useSafeAreaInsets();
 
   const pad = gutter ?? space.roomy;
-  const bottomPad = tabBarClearance
-    ? TAB_BAR_CLEARANCE + insets.bottom
-    : space.section + insets.bottom;
+  // Tab scenes sit above the native tab bar already. Only add modest list end
+  // padding; non-tab screens still need the home-indicator inset.
+  const bottomPad = tabBarClearance ? space.section : space.section + insets.bottom;
 
   if (!scroll) {
     return (

@@ -28,7 +28,7 @@ export interface BeneficiaryRowProps {
 }
 
 export function BeneficiaryRow({ account, selected, onPress, recent }: BeneficiaryRowProps) {
-  const { c, space } = useTheme();
+  const { c, radius, space } = useTheme();
   const tint = bankTint(account.bankName);
   const title = account.nickname || account.accountName;
 
@@ -52,13 +52,13 @@ export function BeneficiaryRow({ account, selected, onPress, recent }: Beneficia
         style={{
           width: 40,
           height: 40,
-          borderRadius: 20,
+          borderRadius: radius.chip,
           backgroundColor: `${tint}22`,
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Text variant="label" color={tint} style={{ fontSize: 12 }}>
+        <Text variant="label" color={tint}>
           {bankInitials(account.bankName)}
         </Text>
       </View>
@@ -69,7 +69,7 @@ export function BeneficiaryRow({ account, selected, onPress, recent }: Beneficia
             {title}
           </Text>
           {recent ? (
-            <Text variant="eyebrow" color="tertiaryText" style={{ fontSize: 9 }}>
+            <Text variant="eyebrow" color="tertiaryText">
               Recent
             </Text>
           ) : null}
@@ -83,7 +83,7 @@ export function BeneficiaryRow({ account, selected, onPress, recent }: Beneficia
         style={{
           width: 20,
           height: 20,
-          borderRadius: 10,
+          borderRadius: radius.chip,
           borderWidth: selected ? 0 : 1.5,
           borderColor: c.borderLight,
           backgroundColor: selected ? c.primaryAccent : 'transparent',

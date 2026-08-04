@@ -1,38 +1,51 @@
 /**
- * Deposit — step 1: choose the asset.
+ * Sell — step 1: choose the coin.
  *
- * This was one screen that revealed the QR inline once an asset and network
- * were picked. Splitting it into pages is not cosmetic: on the old screen the
- * address appeared below the fold, so the user scrolled *past* the network
- * warning to reach the thing they came for, and the warning was the one piece
- * of the screen that prevents an unrecoverable mistake. A dedicated address page
- * puts the warning above the address in a viewport the user cannot skip.
- *
- * Rows with chevrons, not selection tiles. A tile that highlights when tapped
- * says "something will appear below"; a chevron says "this goes somewhere". The
- * affordance has to match what actually happens.
+ * Selling is a deposit. Tapping a multi-network coin raises NetworkSheet (the
+ * same sheet Convert uses). Single-network coins go straight to the address.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { Pressable, View } from 'react-native';
 import { useRouter } from 'expo-router';
-import { ASSET_META, AssetGlyph, Group, ListRow, Screen, Section, Text } from '@/components/ui';
-import ScreenHeader from '@/components/navigation/ScreenHeader';
+import { Ionicons } from '@expo/vector-icons';
+import {
+  ASSET_META,
+  AssetGlyph,
+  EmptyState,
+  Input,
+  Screen,
+  Text,
+} from '@/components/ui';
+import { ScreenHeader } from '@/components/navigation/ScreenHeader';
+import { NetworkSheet } from '@/components/exchange/NetworkSheet';
 import { CHAINS_FOR_ASSET, DEPOSITABLE_ASSETS } from '@/constants/assets';
 import { useTheme } from '@/design';
-import type { Asset } from '@/services/v2/types';
+import type { Asset, Chain } from '@/services/v2/types';
+
 
 export default function DepositAssetsScreen() {
   const router = useRouter();
-  const { space } = useTheme();
+  const { c, radius, space, minTouch } = useTheme();
+
+  const [query, setQuery] = useState('');
+  const [sheetAsset, setSheetAsset] = useState<Asset | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+
+  const results = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return DEPOSITABLE_ASSETS;
+
+    return DEPOSITABLE_ASSETS.filter((asset) => {
+      const name = ASSET_META[asset]?.name ?? '';
+      return asset.toLowerCase().includes(needle) || name.toLowerCase().includes(needle);
+    });
+  }, [query]);
 
   const open = useCallback(
     (asset: Asset) => {
       const chains = CHAINS_FOR_ASSET[asset] ?? [];
 
-      // One network means there is no choice to present. Skipping straight to
-      // the address is not the same as defaulting: the user is never shown a
-      // pre-selected network they didn't pick, because there was never more
-      // than one.
       if (chains.length === 1) {
         router.push({
           pathname: '/deposit/[asset]/[chain]',
@@ -41,47 +54,125 @@ export default function DepositAssetsScreen() {
         return;
       }
 
-      router.push({ pathname: '/deposit/[asset]', params: { asset } });
+      setSheetAsset(asset);
+      setSheetOpen(true);
     },
-    [router],
+    [router]
+  );
+
+  const choose = useCallback(
+    (chain: Chain) => {
+      if (!sheetAsset) return;
+      setSheetOpen(false);
+      router.push({
+        pathname: '/deposit/[asset]/[chain]',
+        params: { asset: sheetAsset, chain },
+      });
+    },
+    [router, sheetAsset]
   );
 
   return (
     <Screen edges={['top']}>
-      <ScreenHeader title="Deposit crypto" onBack={() => router.back()} />
+      <ScreenHeader title="Sell crypto" onBack={() => router.back()} />
 
-      <Section title="Choose asset" first>
-        <Group>
-          {DEPOSITABLE_ASSETS.map((asset, i) => {
-            const chains = CHAINS_FOR_ASSET[asset] ?? [];
-            const meta = ASSET_META[asset];
+      <Input
+        icon="search-outline"
+        placeholder="Search asset"
+        value={query}
+        onChangeText={setQuery}
+        autoCapitalize="none"
+        autoCorrect={false}
+        returnKeyType="search"
+        clearButtonMode="while-editing"
+        shellRadius={radius.card}
+        containerStyle={{ marginTop: space.comfy, marginBottom: 0 }}
+        accessibilityLabel="Search assets"
+      />
 
-            return (
-              <ListRow
-                key={asset}
-                leading={<AssetGlyph asset={asset} size={32} />}
-                title={asset}
-                subtitle={
-                  chains.length > 1
-                    ? `${meta?.name ?? asset} · ${chains.length} networks`
-                    : (meta?.name ?? asset)
-                }
-                onPress={() => open(asset)}
-                last={i === DEPOSITABLE_ASSETS.length - 1}
-              />
-            );
-          })}
-        </Group>
-      </Section>
+      <View style={{ marginTop: space.section, gap: space.base }}>
+        <Text variant="eyebrow" color="tertiaryText">
+          Available coins
+        </Text>
+
+        {results.length === 0 ? (
+          <EmptyState
+            icon="search-outline"
+            title="No match"
+            body={`We don't support “${query.trim()}” yet. Try another coin.`}
+          />
+        ) : (
+          <View
+            style={{
+              borderRadius: radius.card,
+              borderWidth: 1,
+              borderColor: c.hairline,
+              backgroundColor: c.surface,
+              overflow: 'hidden',
+            }}
+          >
+            {results.map((asset, i) => {
+              const chains = CHAINS_FOR_ASSET[asset] ?? [];
+              const meta = ASSET_META[asset];
+              const last = i === results.length - 1;
+
+              return (
+                <Pressable
+                  key={asset}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${asset}, ${meta?.name ?? asset}`}
+                  onPress={() => open(asset)}
+                  style={({ pressed }) => ({
+                    minHeight: minTouch + 4,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: space.comfy,
+                    paddingHorizontal: space.comfy,
+                    paddingVertical: space.base,
+                    backgroundColor: pressed ? c.surfaceSunken : 'transparent',
+                    ...(last ? null : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
+                  })}
+                >
+                  <AssetGlyph asset={asset} size={36} />
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text variant="subheading" numberOfLines={1}>
+                      {asset}
+                    </Text>
+                    <Text
+                      variant="caption"
+                      color="tertiaryText"
+                      numberOfLines={1}
+                      style={{ marginTop: 2 }}
+                    >
+                      {chains.length > 1
+                        ? `${meta?.name ?? asset} · ${chains.length} networks`
+                        : (meta?.name ?? asset)}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={c.quaternaryText} />
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
+      </View>
 
       <Text
         variant="caption"
         color="tertiaryText"
         align="center"
-        style={{ marginTop: space.comfy }}
+        style={{ marginTop: space.roomy, lineHeight: 18 }}
       >
         Your deposit addresses are permanent. Reuse them for every deposit.
       </Text>
+
+      <NetworkSheet
+        visible={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        asset={sheetAsset}
+        options={sheetAsset ? (CHAINS_FOR_ASSET[sheetAsset] ?? []) : []}
+        onSelect={choose}
+      />
     </Screen>
   );
 }

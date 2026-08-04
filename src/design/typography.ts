@@ -42,66 +42,66 @@ export const fontFamily = {
  * height and tracking — the three are one decision, not three.
  */
 export const type = {
-  /** The balance. One per screen, mono, tight. */
+  /** The balance. One per screen, clear and calm. */
   display: {
-    fontFamily: fontFamily.mono,
-    fontSize: 44,
+    fontFamily: fontFamily.sansSemibold,
+    fontSize: 40,
     lineHeight: 48,
-    letterSpacing: -2,
+    letterSpacing: -1.2,
   },
   /** Secondary large figures: quote totals, payout amounts. */
   figure: {
-    fontFamily: fontFamily.monoMedium,
+    fontFamily: fontFamily.sansSemibold,
     fontSize: 30,
-    lineHeight: 36,
-    letterSpacing: -1.2,
+    lineHeight: 38,
+    letterSpacing: -0.8,
   },
   /** Screen titles. */
   title: {
     fontFamily: fontFamily.sansBold,
-    fontSize: 26,
-    lineHeight: 32,
+    fontSize: 28,
+    lineHeight: 34,
     letterSpacing: -0.6,
   },
   /** Section headings. */
   heading: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 19,
-    lineHeight: 25,
+    fontSize: 20,
+    lineHeight: 26,
     letterSpacing: -0.3,
   },
   /** Card titles, list row primaries. */
   subheading: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 15,
-    lineHeight: 20,
+    fontSize: 16,
+    lineHeight: 22,
     letterSpacing: -0.1,
   },
   /** Running text. */
   body: {
     fontFamily: fontFamily.sans,
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 16,
+    lineHeight: 24,
     letterSpacing: -0.1,
   },
   bodySmall: {
     fontFamily: fontFamily.sans,
-    fontSize: 13,
-    lineHeight: 19,
+    fontSize: 14,
+    lineHeight: 20,
     letterSpacing: 0,
   },
   /** Button and control text. */
   action: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 15,
+    fontSize: 16,
     lineHeight: 20,
     letterSpacing: -0.1,
   },
   /** Field labels, metadata. */
   label: {
     fontFamily: fontFamily.sansMedium,
-    fontSize: 13,
-    lineHeight: 17,
+    fontSize: 14,
+    lineHeight: 20,
     letterSpacing: 0,
   },
   /**
@@ -110,9 +110,9 @@ export const type = {
    */
   eyebrow: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 11,
-    lineHeight: 14,
-    letterSpacing: 1.1,
+    fontSize: 12,
+    lineHeight: 16,
+    letterSpacing: 0.8,
     textTransform: 'uppercase' as const,
   },
   caption: {
@@ -125,16 +125,16 @@ export const type = {
   // ── Mono registers ────────────────────────────────────────────────
   /** Inline money inside rows and cards. */
   amount: {
-    fontFamily: fontFamily.monoMedium,
-    fontSize: 15,
+    fontFamily: fontFamily.sansMedium,
+    fontSize: 16,
     lineHeight: 20,
-    letterSpacing: -0.4,
+    letterSpacing: -0.2,
   },
   amountSmall: {
-    fontFamily: fontFamily.mono,
-    fontSize: 13,
-    lineHeight: 18,
-    letterSpacing: -0.3,
+    fontFamily: fontFamily.sansMedium,
+    fontSize: 14,
+    lineHeight: 20,
+    letterSpacing: -0.1,
   },
   /** Addresses, hashes, references. */
   code: {
@@ -160,6 +160,5 @@ export type TypeToken = keyof typeof type;
  * finish loading) still align.
  */
 export const tabular: TextStyle = Platform.select({
-  ios: { fontVariant: ['tabular-nums'] },
-  default: {},
+  default: { fontVariant: ['tabular-nums'] },
 }) as TextStyle;

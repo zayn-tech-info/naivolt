@@ -49,9 +49,9 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
-import ScreenHeader from '@/components/navigation/ScreenHeader';
-import BeneficiaryRow from '@/components/banking/BeneficiaryRow';
-import NewAccountForm, { type NewAccountValue } from '@/components/banking/NewAccountForm';
+import { ScreenHeader } from '@/components/navigation/ScreenHeader';
+import { BeneficiaryRow } from '@/components/banking/BeneficiaryRow';
+import { NewAccountForm, type NewAccountValue } from '@/components/banking/NewAccountForm';
 import { useBankAccounts, useCreatePayout, useLimits, usePortfolio } from '@/hooks/useExchange';
 import type { PayoutDestination } from '@/services/v2/types';
 

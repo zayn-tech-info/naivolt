@@ -31,9 +31,9 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
-import ScreenHeader from '@/components/navigation/ScreenHeader';
+import { ScreenHeader } from '@/components/navigation/ScreenHeader';
 import { bankInitials, bankTint } from '@/components/banking/BankPicker';
-import NewAccountForm, { type NewAccountValue } from '@/components/banking/NewAccountForm';
+import { NewAccountForm, type NewAccountValue } from '@/components/banking/NewAccountForm';
 import { useAddBankAccount, useBankAccounts, useRemoveBankAccount } from '@/hooks/useExchange';
 import type { BankAccount } from '@/services/v2/types';
 
@@ -200,7 +200,7 @@ export default function BankAccountsScreen() {
 }
 
 function AccountCard({ account, onRemove }: { account: BankAccount; onRemove: () => void }) {
-  const { c, space, hitSlop } = useTheme();
+  const { c, iconSize, minTouch, radius, space, hitSlop } = useTheme();
   const tint = bankTint(account.bankName);
 
   return (
@@ -213,13 +213,13 @@ function AccountCard({ account, onRemove }: { account: BankAccount; onRemove: ()
         style={{
           width: 40,
           height: 40,
-          borderRadius: 20,
+          borderRadius: radius.chip,
           backgroundColor: `${tint}22`,
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Text variant="label" color={tint} style={{ fontSize: 12 }}>
+        <Text variant="label" color={tint}>
           {bankInitials(account.bankName)}
         </Text>
       </View>
@@ -239,14 +239,14 @@ function AccountCard({ account, onRemove }: { account: BankAccount; onRemove: ()
         accessibilityRole="button"
         accessibilityLabel={`Remove ${account.bankName} account`}
         style={{
-          width: 34,
-          height: 34,
-          borderRadius: 17,
+          width: minTouch,
+          height: minTouch,
+          borderRadius: radius.chip,
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Ionicons name="trash-outline" size={17} color={c.tertiaryText} />
+        <Ionicons name="trash-outline" size={iconSize.small} color={c.tertiaryText} />
       </Pressable>
     </Surface>
   );

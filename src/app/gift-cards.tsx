@@ -1,26 +1,12 @@
 /**
  * Gift cards — sell a card for naira.
  *
- * Now runs through the v2 service adapter like every other surface. It was the
- * last screen calling the v1 Express API directly, which stopped existing when
- * that backend was removed (commit 85bafc4) — so it was also the only screen
- * that broke.
- *
- * Three steps: pick a brand, pick the country, enter the card. Country is its own
- * decision rather than a dropdown buried in the form, because the same brand
- * clears at very different rates by country — Amazon UK pays meaningfully more
- * than Amazon Canada — and that difference is the main thing a seller is choosing
- * between.
- *
- * The payout figure updates live as the face value is typed, before anything is
- * submitted. This is a manual-review flow: an admin verifies the card and only
- * then is naira credited. So the one thing a user must be able to check up front
- * is what they'll actually get, and making them submit to find out is how a flow
- * gets abandoned.
+ * Three steps: pick a brand, pick the country, enter the card. Brand grid and
+ * cards use the sharp system shared with Sell crypto / Profile / Activity.
  */
 
-import { useCallback, useMemo, useState } from 'react';
-import { KeyboardAvoidingView, Platform, View } from 'react-native';
+import { useCallback, useState } from 'react';
+import { KeyboardAvoidingView, Platform, Pressable, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Crypto from 'expo-crypto';
 import { Image } from 'expo-image';
@@ -35,27 +21,21 @@ import {
   Section,
   Skeleton,
   Stagger,
-  Surface,
   Text,
   useToast,
 } from '@/components/ui';
-import ScreenHeader from '@/components/navigation/ScreenHeader';
+import { ScreenHeader } from '@/components/navigation/ScreenHeader';
+import { BrandMark } from '@/components/giftcards/BrandMark';
 import { useGiftCardBrands, useSubmitGiftCard } from '@/hooks/useExchange';
 import type { GiftCardBrand, GiftCardRate, GiftCardSubmission } from '@/services/v2/types';
+
 
 /** Common face values, so the usual case is one tap. */
 const QUICK_VALUES = [25, 50, 100, 200];
 
-/** Deterministic tint per brand, for the logo plate and lettermark fallback. */
-function brandTint(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % 360;
-  return `hsl(${hash}, 58%, 52%)`;
-}
-
 export default function GiftCardsScreen() {
   const router = useRouter();
-  const { c, space, radius } = useTheme();
+  const { c, radius, space, minTouch } = useTheme();
   const { show } = useToast();
 
   const brands = useGiftCardBrands();
@@ -69,8 +49,6 @@ export default function GiftCardsScreen() {
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<GiftCardSubmission | null>(null);
   const [error, setError] = useState('');
-  // Minted once per card, so a retry after an ambiguous failure can't create a
-  // second submission for the same physical card.
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
 
   const value = Number(faceValue) || 0;
@@ -78,7 +56,6 @@ export default function GiftCardsScreen() {
 
   const selectBrand = useCallback((next: GiftCardBrand) => {
     setBrand(next);
-    // One country means no choice to present.
     setRate(next.rates.length === 1 ? next.rates[0] : null);
     setFaceValue('');
     setCardCode('');
@@ -144,7 +121,6 @@ export default function GiftCardsScreen() {
     }
   }, [canSubmit, brand, rate, value, cardCode, cardPin, imageUri, idempotencyKey, submitCard]);
 
-  // ── Submitted ───────────────────────────────────────────────────────
   if (submitted) {
     return (
       <Screen edges={['top']} scroll={false}>
@@ -154,7 +130,7 @@ export default function GiftCardsScreen() {
             style={{
               width: 64,
               height: 64,
-              borderRadius: 32,
+              borderRadius: radius.card,
               backgroundColor: c.warningDim,
               alignItems: 'center',
               justifyContent: 'center',
@@ -173,11 +149,20 @@ export default function GiftCardsScreen() {
             usually within an hour. You’ll get a notification either way.
           </Text>
 
-          <Surface level={1} radiusToken="field" style={{ marginTop: space.snug }}>
+          <View
+            style={{
+              marginTop: space.snug,
+              borderRadius: radius.card,
+              borderWidth: 1,
+              borderColor: c.hairline,
+              backgroundColor: c.surface,
+              padding: space.comfy,
+            }}
+          >
             <Text variant="code" color="tertiaryText">
               {submitted.reference}
             </Text>
-          </Surface>
+          </View>
 
           <Button
             title="Done"
@@ -190,17 +175,23 @@ export default function GiftCardsScreen() {
     );
   }
 
-  // ── Step 1: pick a brand ────────────────────────────────────────────
   if (!brand) {
     const list = brands.data ?? [];
     return (
-      <Screen edges={['top']} tabBarClearance>
+      <Screen edges={['top']}>
         <ScreenHeader title="Sell a gift card" onBack={goBack} />
 
         {brands.isLoading ? (
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.base }}>
+          <View
+            style={{
+              marginTop: space.comfy,
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              gap: space.base,
+            }}
+          >
             {[0, 1, 2, 3, 4, 5].map((i) => (
-              <Skeleton key={i} width="47.5%" height={120} radius={radius.tile} />
+              <Skeleton key={i} width="47.5%" height={120} radius={radius.card} />
             ))}
           </View>
         ) : brands.isError ? (
@@ -223,7 +214,11 @@ export default function GiftCardsScreen() {
           </View>
         ) : (
           <>
-            <Text variant="bodySmall" color="tertiaryText" style={{ marginBottom: space.comfy }}>
+            <Text
+              variant="bodySmall"
+              color="secondaryText"
+              style={{ marginTop: space.tight, marginBottom: space.comfy }}
+            >
               Pick your card. Rates are per unit of face value and vary by country.
             </Text>
 
@@ -240,7 +235,6 @@ export default function GiftCardsScreen() {
     );
   }
 
-  // ── Step 2: country + card details ──────────────────────────────────
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
@@ -249,9 +243,18 @@ export default function GiftCardsScreen() {
       <Screen edges={['top']}>
         <ScreenHeader title={brand.name} onBack={goBack} />
 
-        {/* Payout leads — it's what the user came to find out. */}
         <Stagger index={0}>
-          <Surface level={1} style={{ alignItems: 'center', gap: space.tight }}>
+          <View
+            style={{
+              alignItems: 'center',
+              gap: space.tight,
+              borderRadius: radius.card,
+              borderWidth: 1,
+              borderColor: c.hairline,
+              backgroundColor: c.surface,
+              padding: space.comfy,
+            }}
+          >
             <Text variant="eyebrow" color="tertiaryText">
               You get
             </Text>
@@ -267,44 +270,62 @@ export default function GiftCardsScreen() {
                 ? `₦${Number(rate.ratePerUnit).toLocaleString('en-NG')} per ${rate.currency}`
                 : 'Pick a country to see the rate'}
             </Text>
-          </Surface>
+          </View>
         </Stagger>
 
         <Stagger index={1}>
-          <Section title="Card country">
-            <View style={{ gap: space.snug }}>
-              {brand.rates.map((option) => {
+          <Section title="Country cards">
+            <View
+              style={{
+                borderRadius: radius.card,
+                borderWidth: 1,
+                borderColor: c.hairline,
+                backgroundColor: c.surface,
+                overflow: 'hidden',
+              }}
+            >
+              {brand.rates.map((option, i) => {
                 const selected = rate?.countryCode === option.countryCode;
+                const last = i === brand.rates.length - 1;
                 return (
-                  <Surface
+                  <Pressable
                     key={option.countryCode}
-                    level={selected ? 2 : 1}
-                    radiusToken="tile"
-                    padding={space.comfy}
                     onPress={() => setRate(option)}
-                    style={{
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    accessibilityLabel={`${option.countryName}, ${option.ratePerUnit} naira per ${option.currency}`}
+                    style={({ pressed }) => ({
+                      minHeight: minTouch + 4,
                       flexDirection: 'row',
                       alignItems: 'center',
-                      gap: space.base,
-                      borderWidth: 1,
-                      borderColor: selected ? c.primaryAccent : 'transparent',
-                    }}
-                    accessibilityLabel={`${option.countryName}, ${option.ratePerUnit} naira per ${option.currency}`}
+                      gap: space.comfy,
+                      paddingHorizontal: space.comfy,
+                      paddingVertical: space.base,
+                      backgroundColor: selected
+                        ? c.accentDim
+                        : pressed
+                          ? c.surfaceSunken
+                          : 'transparent',
+                      ...(last ? null : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
+                    })}
                   >
-                    <View style={{ flex: 1 }}>
-                      <Text variant="subheading">{option.countryName}</Text>
-                      <Text variant="caption" color="tertiaryText" style={{ marginTop: 2 }}>
+                    <CountryFlag code={option.countryCode} />
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text variant="subheading" numberOfLines={1}>
+                        {option.countryName}
+                      </Text>
+                      <Text variant="caption" color="tertiaryText" numberOfLines={1} style={{ marginTop: 2 }}>
                         {option.currency} · min {option.minFaceValue}
                       </Text>
                     </View>
-
                     <Money
                       value={Number(option.ratePerUnit)}
                       variant="amount"
                       whole
                       color={selected ? 'primaryText' : 'secondaryText'}
                     />
-                  </Surface>
+                    <Ionicons name="chevron-forward" size={16} color={c.quaternaryText} />
+                  </Pressable>
                 );
               })}
             </View>
@@ -319,23 +340,27 @@ export default function GiftCardsScreen() {
                   {QUICK_VALUES.map((amount) => {
                     const active = value === amount;
                     return (
-                      <Surface
+                      <Pressable
                         key={amount}
-                        level={active ? 2 : 1}
-                        radiusToken="chip"
-                        padding={space.snug + 2}
                         onPress={() => setFaceValue(String(amount))}
-                        style={{
+                        style={({ pressed }) => ({
                           flex: 1,
                           alignItems: 'center',
+                          paddingVertical: space.base,
+                          borderRadius: radius.card,
                           borderWidth: 1,
-                          borderColor: active ? c.primaryAccent : 'transparent',
-                        }}
+                          borderColor: active ? c.primaryAccent : c.hairline,
+                          backgroundColor: active
+                            ? c.accentDim
+                            : pressed
+                              ? c.surfaceSunken
+                              : c.surface,
+                        })}
                       >
                         <Text variant="amount" color={active ? 'primaryText' : 'secondaryText'}>
                           {amount}
                         </Text>
-                      </Surface>
+                      </Pressable>
                     );
                   })}
                 </View>
@@ -347,6 +372,7 @@ export default function GiftCardsScreen() {
                   keyboardType="decimal-pad"
                   mono
                   prefix={rate.currency}
+                  shellRadius={radius.card}
                   hint={`Between ${rate.minFaceValue} and ${rate.maxFaceValue} ${rate.currency}`}
                 />
               </Section>
@@ -362,6 +388,7 @@ export default function GiftCardsScreen() {
                   autoCapitalize="characters"
                   autoCorrect={false}
                   mono
+                  shellRadius={radius.card}
                 />
                 {brand.hasPin ? (
                   <Input
@@ -371,7 +398,9 @@ export default function GiftCardsScreen() {
                     placeholder="On the back of the card"
                     autoCapitalize="characters"
                     autoCorrect={false}
+                    secureTextEntry
                     mono
+                    shellRadius={radius.card}
                   />
                 ) : null}
               </Section>
@@ -381,10 +410,19 @@ export default function GiftCardsScreen() {
               <Stagger index={4}>
                 <Section title="Card photo">
                   {imageUri ? (
-                    <Surface level={1} style={{ gap: space.base }}>
+                    <View
+                      style={{
+                        gap: space.base,
+                        borderRadius: radius.card,
+                        borderWidth: 1,
+                        borderColor: c.hairline,
+                        backgroundColor: c.surface,
+                        padding: space.comfy,
+                      }}
+                    >
                       <Image
                         source={{ uri: imageUri }}
-                        style={{ width: '100%', height: 180, borderRadius: radius.tile }}
+                        style={{ width: '100%', height: 180, borderRadius: radius.card }}
                         contentFit="cover"
                       />
                       <View style={{ flexDirection: 'row', gap: space.snug }}>
@@ -396,19 +434,21 @@ export default function GiftCardsScreen() {
                           onPress={() => setImageUri(null)}
                         />
                       </View>
-                    </Surface>
+                    </View>
                   ) : (
-                    <Surface
-                      level={1}
+                    <Pressable
                       onPress={pickImage}
-                      style={{
+                      style={({ pressed }) => ({
                         alignItems: 'center',
                         gap: space.snug,
                         paddingVertical: space.section,
+                        paddingHorizontal: space.comfy,
+                        borderRadius: radius.card,
                         borderWidth: 1,
-                        borderColor: c.border,
+                        borderColor: c.hairline,
                         borderStyle: 'dashed',
-                      }}
+                        backgroundColor: pressed ? c.surfaceSunken : c.surface,
+                      })}
                     >
                       <Ionicons name="camera-outline" size={24} color={c.tertiaryText} />
                       <Text variant="subheading">Add a photo of the card</Text>
@@ -420,40 +460,56 @@ export default function GiftCardsScreen() {
                       >
                         Clear enough to read the code. This is what our team checks against.
                       </Text>
-                    </Surface>
+                    </Pressable>
                   )}
                 </Section>
               </Stagger>
             ) : null}
 
             {brand.note ? (
-              <Surface
-                level={1}
-                accentEdge={c.warning}
-                style={{ marginTop: space.comfy, flexDirection: 'row', gap: space.snug }}
+              <View
+                style={{
+                  marginTop: space.comfy,
+                  flexDirection: 'row',
+                  gap: space.snug,
+                  padding: space.comfy,
+                  borderRadius: radius.card,
+                  backgroundColor: c.warningDim,
+                  borderWidth: 1,
+                  borderColor: c.warning,
+                }}
               >
                 <Ionicons name="information-circle-outline" size={17} color={c.warning} />
                 <Text variant="bodySmall" color="secondaryText" style={{ flex: 1 }}>
                   {brand.note}
                 </Text>
-              </Surface>
+              </View>
             ) : null}
 
             {error ? (
-              <Surface
-                level={1}
-                accentEdge={c.negative}
-                style={{ marginTop: space.comfy, flexDirection: 'row', gap: space.snug }}
+              <View
+                style={{
+                  marginTop: space.comfy,
+                  flexDirection: 'row',
+                  gap: space.snug,
+                  padding: space.comfy,
+                  borderRadius: radius.card,
+                  backgroundColor: c.dangerDim,
+                  borderWidth: 1,
+                  borderColor: c.danger,
+                }}
               >
-                <Ionicons name="alert-circle" size={17} color={c.negative} />
-                <Text variant="bodySmall" color="negative" style={{ flex: 1 }}>
+                <Ionicons name="alert-circle" size={17} color={c.danger} />
+                <Text variant="bodySmall" color="danger" style={{ flex: 1 }}>
                   {error}
                 </Text>
-              </Surface>
+              </View>
             ) : null}
 
             <Button
-              title={payout > 0 ? `Sell for ₦${Math.round(payout).toLocaleString('en-NG')}` : 'Sell card'}
+              title={
+                payout > 0 ? `Sell for ₦${Math.round(payout).toLocaleString('en-NG')}` : 'Sell card'
+              }
               onPress={submit}
               disabled={!canSubmit}
               loading={submitCard.isPending}
@@ -478,57 +534,37 @@ export default function GiftCardsScreen() {
   );
 }
 
-/** One brand in the selection grid. Logo-led, since that's how people scan. */
+/** One brand in the selection grid. Logo-led, sharp card shell. */
 function BrandTile({ brand, onPress }: { brand: GiftCardBrand; onPress: () => void }) {
-  const { space, radius } = useTheme();
-  const [failed, setFailed] = useState(false);
-  const tint = brandTint(brand.name);
+  const { c, radius, space } = useTheme();
 
   const bestRate = brand.rates.length
     ? Math.max(...brand.rates.map((r) => Number(r.ratePerUnit)))
     : 0;
 
   return (
-    <Surface
-      level={1}
-      radiusToken="tile"
+    <Pressable
       onPress={onPress}
-      padding={space.comfy}
-      style={{ gap: space.snug, minHeight: 120 }}
+      accessibilityRole="button"
       accessibilityLabel={`${brand.name}, up to ${bestRate} naira per unit`}
+      style={({ pressed }) => ({
+        gap: space.snug,
+        minHeight: 120,
+        padding: space.comfy,
+        borderRadius: radius.card,
+        borderWidth: 1,
+        borderColor: c.hairline,
+        backgroundColor: pressed ? c.surfaceSunken : c.surface,
+      })}
     >
-      <View
-        style={{
-          width: 40,
-          height: 40,
-          borderRadius: radius.chip,
-          backgroundColor: failed || !brand.logoUrl ? `${tint}22` : '#FFFFFF',
-          alignItems: 'center',
-          justifyContent: 'center',
-          overflow: 'hidden',
-        }}
-      >
-        {brand.logoUrl && !failed ? (
-          <Image
-            source={{ uri: brand.logoUrl }}
-            style={{ width: 40, height: 40 }}
-            contentFit="contain"
-            transition={120}
-            onError={() => setFailed(true)}
-          />
-        ) : (
-          <Text variant="subheading" color={tint} style={{ fontSize: 17 }}>
-            {brand.name.slice(0, 1).toUpperCase()}
-          </Text>
-        )}
-      </View>
+      <BrandMark name={brand.name} slug={brand.slug} logoUrl={brand.logoUrl} size={40} />
 
       <Text variant="subheading" numberOfLines={1}>
         {brand.name}
       </Text>
 
       {bestRate > 0 ? (
-        <Text variant="amountSmall" color="tertiaryText">
+        <Text variant="caption" color="tertiaryText">
           up to ₦{bestRate.toLocaleString('en-NG')}
         </Text>
       ) : (
@@ -536,6 +572,42 @@ function BrandTile({ brand, onPress }: { brand: GiftCardBrand; onPress: () => vo
           Rate on request
         </Text>
       )}
-    </Surface>
+    </Pressable>
+  );
+}
+
+/** ISO country code → regional-indicator flag emoji. */
+function flagEmoji(countryCode: string): string {
+  const code = countryCode.trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return '🏳️';
+  const base = 0x1f1e6;
+  return String.fromCodePoint(
+    ...[...code].map((ch) => base + ch.charCodeAt(0) - 65)
+  );
+}
+
+/**
+ * Leading mark for country rows — same 36pt well size as Sell Crypto coin glyphs.
+ */
+function CountryFlag({ code }: { code: string }) {
+  const { c, radius } = useTheme();
+  return (
+    <View
+      style={{
+        width: 36,
+        height: 36,
+        borderRadius: radius.card,
+        backgroundColor: c.surfaceSunken,
+        borderWidth: 1,
+        borderColor: c.hairline,
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'hidden',
+      }}
+      accessibilityElementsHidden
+      importantForAccessibility="no"
+    >
+      <Text style={{ fontSize: 20, lineHeight: 24 }}>{flagEmoji(code)}</Text>
+    </View>
   );
 }

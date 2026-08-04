@@ -16,6 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import Animated, {
   FadeIn,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withSequence,
   withTiming,
@@ -23,6 +24,7 @@ import Animated, {
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '@/design';
 import { Button, Text } from '@/components/ui';
+import { LightAuthScreen } from '@/components/auth/LightAuthScreen';
 import { useAuthStore } from '@/store/authStore';
 import { saveUser, setToken as persistToken, TOKEN_KEY } from '@/services/tokenStorage';
 import { AuthError, requestOtp, verifyOtp } from '@/services/authV2';
@@ -31,8 +33,17 @@ const CODE_LENGTH = 6;
 const RESEND_SECONDS = 60;
 
 export default function VerifyScreen() {
+  return (
+    <LightAuthScreen>
+      <VerifyScreenContent />
+    </LightAuthScreen>
+  );
+}
+
+function VerifyScreenContent() {
   const router = useRouter();
   const { c, space, radius } = useTheme();
+  const reduceMotion = useReducedMotion();
   const { setUser, setToken } = useAuthStore();
   const params = useLocalSearchParams<{ phone: string; mock?: string }>();
   const phone = params.phone ?? '';
@@ -69,32 +80,37 @@ export default function VerifyScreen() {
         setUser(session.user);
         await saveUser(session.user);
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        if (session.isNewAccount) router.replace('/set-pin');
-        else router.replace('/(tabs)/(main)');
+        if (session.isNewAccount) {
+          router.replace({ pathname: '/set-pin', params: { signup: '1' } });
+        } else {
+          router.replace('/(tabs)/(main)');
+        }
       } catch (err) {
         if (err instanceof AuthError && err.offline && __DEV__ && isMock) {
           // No v2 API yet. The seeded dev code walks the flow onward.
           if (submitted === '000000') {
-            router.replace('/set-pin');
+            router.replace({ pathname: '/set-pin', params: { signup: '1' } });
             return;
           }
           setError('Dev mode: use 000000');
         } else {
           setError(err instanceof Error ? err.message : 'Could not verify code');
         }
-        shake.value = withSequence(
-          withTiming(-8, { duration: 50 }),
-          withTiming(8, { duration: 50 }),
-          withTiming(-6, { duration: 50 }),
-          withTiming(0, { duration: 50 }),
-        );
+        shake.value = reduceMotion
+          ? 0
+          : withSequence(
+              withTiming(-8, { duration: 50 }),
+              withTiming(8, { duration: 50 }),
+              withTiming(-6, { duration: 50 }),
+              withTiming(0, { duration: 50 }),
+            );
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
         setCode('');
       } finally {
         setBusy(false);
       }
     },
-    [phone, router, setToken, setUser, shake, isMock],
+    [phone, router, setToken, setUser, shake, isMock, reduceMotion],
   );
 
   const onChange = useCallback(
@@ -135,7 +151,7 @@ export default function VerifyScreen() {
           <Ionicons name="arrow-back" size={24} color={c.primaryText} />
         </Pressable>
 
-        <Animated.View entering={FadeIn.duration(300)} style={{ marginTop: space.major }}>
+        <Animated.View entering={reduceMotion ? undefined : FadeIn.duration(300)} style={{ marginTop: space.major }}>
           <Text variant="title">Enter your code</Text>
           <Text variant="body" color="secondaryText" style={{ marginTop: space.snug }}>
             Sent to {formatPhone(phone)}

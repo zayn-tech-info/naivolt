@@ -1,13 +1,16 @@
-import { useEffect, useRef, useState } from "react";
-import { useRouter } from "expo-router";
-import { View, Text, StyleSheet, Image } from "react-native";
-import { useAuthStore } from "@/store/authStore";
-import { useAuthHydration } from "@/hooks/useAuthHydration";
+import { useEffect, useRef, useState } from 'react';
+import { Image, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { useAuthStore } from '@/store/authStore';
+import { useAuthHydration } from '@/hooks/useAuthHydration';
+import { useTheme } from '@/design';
+import { Text } from '@/components/ui';
 
-const SPLASH_LOGO = require("../../assets/images/icon.png");
+const SPLASH_LOGO = require('../../assets/images/icon.png');
 
 export default function Index() {
   const router = useRouter();
+  const { c, space } = useTheme();
   const { isHydrated, token, user } = useAuthStore();
   const [splashMinElapsed, setSplashMinElapsed] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -23,39 +26,22 @@ export default function Index() {
 
   useEffect(() => {
     if (!isHydrated || !splashMinElapsed) return;
-
-    if (token && user) {
-      // Admin lives in the Next.js panel, not here (ARCHITECTURE.md §11).
-      router.replace("/(tabs)/(main)");
-    } else {
-      router.replace("/(auth)/welcome");
-    }
+    router.replace(token && user ? '/(tabs)/(main)' : '/(auth)/register');
   }, [isHydrated, splashMinElapsed, token, user, router]);
 
   return (
-    <View style={styles.placeholder}>
-      <Image source={SPLASH_LOGO} style={styles.logo} resizeMode="contain" />
-      <Text style={styles.appName}>Naivolt</Text>
+    <View
+      style={{
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: c.primaryBackground,
+      }}
+    >
+      <Image source={SPLASH_LOGO} style={{ width: space.hero * 3, height: space.hero * 3 }} resizeMode="contain" />
+      <Text variant="title" color="primaryAccent" style={{ marginTop: space.roomy }}>
+        Naivolt
+      </Text>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  placeholder: {
-    flex: 1,
-    backgroundColor: "#08090A",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  logo: {
-    width: 160,
-    height: 160,
-  },
-  appName: {
-    marginTop: 24,
-    fontSize: 28,
-    fontWeight: "700",
-    letterSpacing: 1,
-    color: "#AAFF00",
-  },
-});

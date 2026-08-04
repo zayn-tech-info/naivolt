@@ -19,6 +19,7 @@ import { useCallback, useEffect } from 'react';
 import { Pressable, View } from 'react-native';
 import Animated, {
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withSequence,
   withSpring,
@@ -28,7 +29,7 @@ import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
 import { motion as motionTokens } from '@/design/tokens';
-import Text from './Text';
+import { Text } from './Text';
 
 export interface PinPadProps {
   value: string;
@@ -46,12 +47,13 @@ export interface PinPadProps {
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
 function Dot({ filled, error }: { filled: boolean; error: boolean }) {
-  const { c } = useTheme();
+  const { c, radius } = useTheme();
+  const reduceMotion = useReducedMotion();
   const scale = useSharedValue(filled ? 1 : 0.7);
 
   useEffect(() => {
-    scale.value = withSpring(filled ? 1 : 0.7, motionTokens.settle);
-  }, [filled, scale]);
+    scale.value = reduceMotion ? 1 : withSpring(filled ? 1 : 0.7, motionTokens.settle);
+  }, [filled, reduceMotion, scale]);
 
   const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
@@ -61,7 +63,7 @@ function Dot({ filled, error }: { filled: boolean; error: boolean }) {
         {
           width: 13,
           height: 13,
-          borderRadius: 7,
+          borderRadius: radius.chip,
           backgroundColor: error ? c.negative : filled ? c.primaryText : 'transparent',
           borderWidth: filled && !error ? 0 : 1.5,
           borderColor: error ? c.negative : c.borderLight,
@@ -86,6 +88,7 @@ function Key({
   disabled?: boolean;
 }) {
   const { c, radius } = useTheme();
+  const reduceMotion = useReducedMotion();
   const scale = useSharedValue(1);
   const style = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
@@ -95,7 +98,7 @@ function Key({
         onPress={onPress}
         disabled={disabled}
         onPressIn={() => {
-          scale.value = withSpring(0.94, motionTokens.press);
+          scale.value = reduceMotion ? 1 : withSpring(0.94, motionTokens.press);
         }}
         onPressOut={() => {
           scale.value = withSpring(1, motionTokens.press);
@@ -112,7 +115,7 @@ function Key({
         }}
       >
         {label ? (
-          <Text variant="figure" style={{ fontSize: 24, lineHeight: 30, letterSpacing: 0 }}>
+          <Text variant="heading">
             {label}
           </Text>
         ) : (
@@ -133,23 +136,26 @@ export function PinPad({
   onBiometric,
 }: PinPadProps) {
   const { space, minTouch } = useTheme();
+  const reduceMotion = useReducedMotion();
   const shake = useSharedValue(0);
 
   useEffect(() => {
     if (!error) return;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
-    shake.value = withSequence(
-      withTiming(-9, { duration: 55 }),
-      withTiming(9, { duration: 55 }),
-      withTiming(-6, { duration: 55 }),
-      withTiming(0, { duration: 55 })
-    );
+    shake.value = reduceMotion
+      ? 0
+      : withSequence(
+          withTiming(-9, { duration: 55 }),
+          withTiming(9, { duration: 55 }),
+          withTiming(-6, { duration: 55 }),
+          withTiming(0, { duration: 55 })
+        );
     const id = setTimeout(() => {
       onChange('');
       onErrorShown?.();
     }, 260);
     return () => clearTimeout(id);
-  }, [error, shake, onChange, onErrorShown]);
+  }, [error, reduceMotion, shake, onChange, onErrorShown]);
 
   const press = useCallback(
     (digit: string) => {

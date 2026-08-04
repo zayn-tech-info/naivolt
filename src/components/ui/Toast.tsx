@@ -13,11 +13,11 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Animated, { FadeInUp, FadeOutUp } from 'react-native-reanimated';
+import Animated, { FadeIn, FadeInUp, FadeOut, FadeOutUp, useReducedMotion } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
-import Text from './Text';
+import { Text } from './Text';
 
 type ToastTone = 'neutral' | 'positive' | 'negative' | 'warning';
 
@@ -69,6 +69,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 function ToastView({ message, tone = 'neutral' }: ToastPayload) {
   const { c, radius, space, elevation } = useTheme();
+  const reduceMotion = useReducedMotion();
   const insets = useSafeAreaInsets();
 
   const icon: Record<ToastTone, React.ComponentProps<typeof Ionicons>['name']> = {
@@ -97,8 +98,8 @@ function ToastView({ message, tone = 'neutral' }: ToastPayload) {
       }}
     >
       <Animated.View
-        entering={FadeInUp.duration(240)}
-        exiting={FadeOutUp.duration(180)}
+        entering={reduceMotion ? FadeIn.duration(120) : FadeInUp.duration(240)}
+        exiting={reduceMotion ? FadeOut.duration(100) : FadeOutUp.duration(180)}
         accessibilityLiveRegion="polite"
         style={{
           flexDirection: 'row',

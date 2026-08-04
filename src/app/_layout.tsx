@@ -4,10 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StatusBar } from "expo-status-bar";
 import * as SplashScreen from "expo-splash-screen";
 import { useCallback, useEffect } from "react";
+import { Appearance } from "react-native";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastProvider } from "@/components/ui";
-import { useAppFonts } from "@/design";
-import { darkColors, lightColors } from "@/constants/colors";
+import { useAppFonts, useTheme } from "@/design";
 import { useAppStore } from "@/store/appStore";
 import { initMonitoring, Sentry } from "@/services/monitoring";
 
@@ -30,12 +30,21 @@ const queryClient = new QueryClient({
 
 function AppShell() {
   const hydrate = useAppStore((s) => s.hydrate);
+  const syncSystemMode = useAppStore((s) => s.syncSystemMode);
   const mode = useAppStore((s) => s.mode);
+  const { c } = useTheme();
   const [fontsLoaded, fontError] = useAppFonts();
 
   useEffect(() => {
     hydrate();
   }, [hydrate]);
+
+  useEffect(() => {
+    const subscription = Appearance.addChangeListener(({ colorScheme }) => {
+      syncSystemMode(colorScheme);
+    });
+    return () => subscription.remove();
+  }, [syncSystemMode]);
 
   const onReady = useCallback(() => {
     SplashScreen.hideAsync().catch(() => {});
@@ -51,15 +60,13 @@ function AppShell() {
 
   if (!ready) return null;
 
-  const palette = mode === "dark" ? darkColors : lightColors;
-
   return (
     <ToastProvider>
       <StatusBar style={mode === "dark" ? "light" : "dark"} />
       <Stack
         screenOptions={{
           headerShown: false,
-          contentStyle: { backgroundColor: palette.primaryBackground },
+          contentStyle: { backgroundColor: c.primaryBackground },
           animation: "slide_from_right",
         }}
       />

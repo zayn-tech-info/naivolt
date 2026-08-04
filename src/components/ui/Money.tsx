@@ -24,6 +24,7 @@ import { useEffect, useRef } from 'react';
 import { View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 import Animated, {
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withSequence,
   withSpring,
@@ -31,8 +32,7 @@ import Animated, {
   interpolateColor,
 } from 'react-native-reanimated';
 import { useTheme } from '@/design';
-import { type as typeScale } from '@/design/typography';
-import { tabular } from '@/design/typography';
+import { type as typeScale, tabular } from '@/design/typography';
 import type { Colors } from '@/constants/colors';
 
 type MoneyVariant = 'display' | 'figure' | 'amount' | 'amountSmall';
@@ -45,6 +45,8 @@ export interface MoneyProps {
   suffix?: string;
   variant?: MoneyVariant;
   color?: keyof Colors | string;
+  /** Symbol and fraction colour when the figure sits on a coloured surface. */
+  detailColor?: keyof Colors | string;
   /** Hide the fraction entirely. Use for whole-naira rates. */
   whole?: boolean;
   /** Crypto amounts need more precision than money does. */
@@ -89,6 +91,7 @@ export function Money({
   suffix,
   variant = 'amount',
   color = 'primaryText',
+  detailColor = 'secondaryText',
   whole = false,
   maxFractionDigits = 2,
   sign = 'auto',
@@ -98,15 +101,18 @@ export function Money({
   numberStyle,
 }: MoneyProps) {
   const { c, motion } = useTheme();
+  const reduceMotion = useReducedMotion();
   const base = typeScale[variant];
   const resolved = color in c ? c[color as keyof Colors] : (color as string);
+  const resolvedDetail =
+    detailColor in c ? c[detailColor as keyof Colors] : (detailColor as string);
 
   const shift = useSharedValue(0);
   const tint = useSharedValue(0);
   const previous = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!live || value == null) return;
+    if (!live || value == null || reduceMotion) return;
     const prev = previous.current;
     previous.current = value;
     if (prev == null || prev === value) return;
@@ -120,7 +126,7 @@ export function Money({
       withTiming(rose ? 1 : -1, { duration: motion.duration.instant }),
       withTiming(0, { duration: motion.duration.slow })
     );
-  }, [value, live, motion, shift, tint]);
+  }, [value, live, motion, reduceMotion, shift, tint]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: shift.value }],
@@ -155,23 +161,25 @@ export function Money({
 
   return (
     <View
-      style={[{ flexDirection: 'row', alignItems: 'baseline' }, style]}
+      style={[{ flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', flexShrink: 1 }, style]}
       accessible
       accessibilityLabel={label}
     >
       <Animated.Text
         style={[base, tabular, animatedColor, animatedStyle, numberStyle]}
-        allowFontScaling={false}
+        numberOfLines={2}
+        adjustsFontSizeToFit
+        minimumFontScale={0.76}
       >
         {prefix}
         {symbol ? (
-          <Animated.Text style={{ fontSize: symbolSize, color: c.secondaryText }}>
+          <Animated.Text style={{ fontSize: symbolSize, color: resolvedDetail }}>
             {symbol}
           </Animated.Text>
         ) : null}
         {int}
         {frac ? (
-          <Animated.Text style={{ fontSize: fractionSize, color: c.secondaryText }}>
+          <Animated.Text style={{ fontSize: fractionSize, color: resolvedDetail }}>
             {frac}
           </Animated.Text>
         ) : null}

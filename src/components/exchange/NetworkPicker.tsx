@@ -21,7 +21,7 @@ export interface NetworkPickerProps {
 }
 
 export function NetworkPicker({ options, value, onChange }: NetworkPickerProps) {
-  const { c, space } = useTheme();
+  const { c, radius, space } = useTheme();
 
   return (
     <View style={{ gap: space.snug }}>
@@ -55,7 +55,7 @@ export function NetworkPicker({ options, value, onChange }: NetworkPickerProps) 
               style={{
                 width: 20,
                 height: 20,
-                borderRadius: 10,
+                borderRadius: radius.chip,
                 borderWidth: selected ? 0 : 1.5,
                 borderColor: c.borderLight,
                 backgroundColor: selected ? c.primaryAccent : 'transparent',

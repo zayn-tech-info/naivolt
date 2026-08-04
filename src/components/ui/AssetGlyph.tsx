@@ -22,10 +22,10 @@
 import { View } from 'react-native';
 import { Image } from 'expo-image';
 import { useTheme } from '@/design';
-import Text from './Text';
+import { Text } from './Text';
 
 /** Static require map. See the note above about why this can't be computed. */
-const COIN_IMAGE: Record<string, ReturnType<typeof require>> = {
+export const COIN_IMAGE: Record<string, ReturnType<typeof require>> = {
   USDT: require('../../../assets/images/coins/usdt.png'),
   USDC: require('../../../assets/images/coins/usdc.png'),
   BTC: require('../../../assets/images/coins/btc.png'),
@@ -130,6 +130,7 @@ export function AssetGlyph({ asset, size = 44, network }: AssetGlyphProps) {
             position: 'absolute',
             bottom: -2,
             right: -6,
+            maxWidth: Math.max(size * 0.9, 28),
             backgroundColor: c.surfaceOverlay,
             borderRadius: 999,
             paddingHorizontal: 5,
@@ -138,7 +139,12 @@ export function AssetGlyph({ asset, size = 44, network }: AssetGlyphProps) {
             borderColor: c.primaryBackground,
           }}
         >
-          <Text variant="ticker" color="secondaryText" style={{ fontSize: 8 }}>
+          <Text
+            variant="ticker"
+            color="secondaryText"
+            numberOfLines={1}
+            style={{ fontSize: 8 }}
+          >
             {network}
           </Text>
         </View>

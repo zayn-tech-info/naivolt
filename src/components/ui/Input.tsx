@@ -28,7 +28,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
-import Text from './Text';
+import { Text } from './Text';
 
 export interface InputProps extends TextInputProps {
   label?: string;
@@ -44,6 +44,8 @@ export interface InputProps extends TextInputProps {
   /** Use the mono face — for addresses, amounts, references. */
   mono?: boolean;
   containerStyle?: ViewStyle;
+  /** Override field corner radius. Defaults to the field token. */
+  shellRadius?: number;
 }
 
 export const Input = forwardRef<TextInput, InputProps>(function Input(
@@ -56,6 +58,7 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
     trailing,
     mono = false,
     containerStyle,
+    shellRadius,
     onFocus,
     onBlur,
     editable = true,
@@ -64,7 +67,7 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
   },
   ref
 ) {
-  const { c, radius, space, type, motion, minTouch } = useTheme();
+  const { c, iconSize, radius, space, type, motion, minTouch } = useTheme();
   const [focused, setFocused] = useState(false);
   const focus = useSharedValue(0);
 
@@ -109,7 +112,7 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
             minHeight: minTouch + 4,
             backgroundColor: c.surfaceInput,
             borderWidth: 1,
-            borderRadius: radius.field,
+            borderRadius: shellRadius ?? radius.field,
             paddingHorizontal: space.comfy,
             opacity: editable ? 1 : 0.55,
           },
@@ -119,7 +122,7 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
         {icon ? (
           <Ionicons
             name={icon}
-            size={18}
+            size={iconSize.medium}
             color={focused ? c.primaryAccent : c.tertiaryText}
           />
         ) : null}
@@ -155,9 +158,9 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
 
       {error ? (
         <View
-          style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: space.tight }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.tight, marginTop: space.tight }}
         >
-          <Ionicons name="alert-circle" size={13} color={c.negative} />
+          <Ionicons name="alert-circle" size={iconSize.small} color={c.negative} />
           <Text variant="caption" color="negative">
             {error}
           </Text>
@@ -173,7 +176,7 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
 
 /** A small inline action for the trailing slot, e.g. "Max" or "Paste". */
 export function FieldAction({ label, onPress }: { label: string; onPress: () => void }) {
-  const { c, radius, hitSlop } = useTheme();
+  const { c, radius, hitSlop, space } = useTheme();
   return (
     <Pressable
       onPress={onPress}
@@ -181,11 +184,11 @@ export function FieldAction({ label, onPress }: { label: string; onPress: () => 
       style={{
         backgroundColor: c.accentDim,
         borderRadius: radius.chip,
-        paddingHorizontal: 10,
-        paddingVertical: 5,
+        paddingHorizontal: space.base,
+        paddingVertical: space.tight,
       }}
     >
-      <Text variant="eyebrow" color="primaryAccent" style={{ fontSize: 10 }}>
+      <Text variant="eyebrow" color="primaryAccent">
         {label}
       </Text>
     </Pressable>

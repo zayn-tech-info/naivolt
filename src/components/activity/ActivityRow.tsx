@@ -1,16 +1,8 @@
 /**
  * ActivityRow — one line of history.
  *
- * A single row has to answer three questions at a glance: what happened, how
- * much, and did it land. So direction is carried by the glyph, magnitude by the
- * mono figure, and outcome by the badge — three separate channels, because
- * someone scanning for "did my ₦150,000 arrive" shouldn't have to read a
- * sentence.
- *
- * Sign convention is from the user's side of the screen, not the ledger's: a
- * deposit is money coming in and reads positive, a payout is money leaving and
- * reads negative. The ledger's own signs are inverted for liabilities
- * (ARCHITECTURE.md §5), which is correct accounting and would be nonsense here.
+ * Direction on the glyph, magnitude in mono, outcome in status colour.
+ * Spacing and type match the sharp Sell / Convert list language.
  */
 
 import { View } from 'react-native';
@@ -27,10 +19,6 @@ const KIND_LABEL: Record<ActivityItem['kind'], string> = {
   reversal: 'Reversed',
 };
 
-/**
- * Direction from the user's perspective. A gift card sale credits naira, so it
- * reads as money in even though the user handed something over.
- */
 function isInbound(kind: ActivityItem['kind']): boolean {
   return kind === 'deposit' || kind === 'giftcard';
 }
@@ -49,14 +37,13 @@ function relativeTime(iso: string): string {
 
 export function ActivityRow({
   item,
-  onPress,
   last = false,
 }: {
   item: ActivityItem;
   onPress?: () => void;
   last?: boolean;
 }) {
-  const { c, space } = useTheme();
+  const { c, radius, space } = useTheme();
   const inbound = isInbound(item.kind);
   const isNaira = item.asset === 'NGN';
 
@@ -65,25 +52,24 @@ export function ActivityRow({
       style={{
         flexDirection: 'row',
         alignItems: 'center',
-        gap: space.base,
-        paddingVertical: space.base,
+        gap: space.comfy,
+        paddingVertical: space.comfy,
         ...(last ? null : { borderBottomWidth: 1, borderBottomColor: c.hairline }),
       }}
     >
       <View>
-        <AssetGlyph asset={item.asset} size={40} />
-        {/* Direction badge on the glyph — readable without parsing the label. */}
+        <AssetGlyph asset={item.asset} size={36} />
         <View
           style={{
             position: 'absolute',
             bottom: -2,
             right: -2,
-            width: 17,
-            height: 17,
-            borderRadius: 9,
-            backgroundColor: c.surfaceOverlay,
-            borderWidth: 2,
-            borderColor: c.surface,
+            width: 16,
+            height: 16,
+            borderRadius: radius.chip,
+            backgroundColor: c.surface,
+            borderWidth: 1,
+            borderColor: c.hairline,
             alignItems: 'center',
             justifyContent: 'center',
           }}
@@ -91,7 +77,7 @@ export function ActivityRow({
           <Ionicons
             name={inbound ? 'arrow-down' : 'arrow-up'}
             size={9}
-            color={inbound ? c.positive : c.secondaryText}
+            color={inbound ? c.positive : c.tertiaryText}
           />
         </View>
       </View>
@@ -107,9 +93,9 @@ export function ActivityRow({
         </Text>
       </View>
 
-      <View style={{ alignItems: 'flex-end', gap: 5 }}>
+      <View style={{ alignItems: 'flex-end', gap: space.tight }}>
         <Money
-          value={Number(isNaira ? item.amount : item.amount)}
+          value={Number(item.amount)}
           currency={isNaira ? 'NGN' : 'none'}
           suffix={isNaira ? undefined : item.asset}
           maxFractionDigits={isNaira ? 2 : 6}

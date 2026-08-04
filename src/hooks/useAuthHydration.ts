@@ -34,7 +34,7 @@ export function useAuthHydration() {
     async function hydrate() {
       try {
         // Sessions from the v1 backend can never validate — that server is gone.
-        // Clearing them here is what returns the device to onboarding.
+        // Clearing them here returns the device to authentication.
         const wasReset = await resetIfStaleSchema();
         if (wasReset) {
           setHydrated(true);
