@@ -625,6 +625,54 @@ check silently understates what we owe.
 
 ---
 
+## 14. Push notifications
+
+The app registers for push at the moment it promises one — right after a
+withdrawal or a gift card submission, not on first launch. (A prompt before the
+user has anything pending gets denied, and on iOS a denial is close to permanent.)
+
+### `POST /devices/push-token`
+
+```json
+{ "token": "ExponentPushToken[xxxxxxxx]", "deviceId": "…", "platform": "ios" }
+```
+
+Store per `deviceId`, not per user — someone with two phones should get both, and
+signing out on one must drop only that one. Re-registering the same `deviceId`
+replaces the token; they rotate on reinstall.
+
+### What to send, and what not to
+
+Push only what the user is **waiting on and cannot see**:
+
+| Event | Example |
+|---|---|
+| Deposit credited | "₦380,074 from your USDT deposit is available" |
+| Payout settled | "₦150,000 arrived at GTBank ···4821" |
+| Payout failed / reversed | "Your ₦150,000 transfer was returned" |
+| Gift card approved / rejected | "Your Amazon card cleared — ₦108,000 added" |
+
+Do **not** push a payout that was just submitted: the user was looking at the
+screen when they submitted it. A notification that tells someone what they
+already know is what trains them to swipe the next one away unread.
+
+### Payload
+
+`data` must carry the activity id so a tap opens the right receipt:
+
+```json
+{ "kind": "payout", "activityId": "p_1769712140" }
+```
+
+The client deep-links to `/activity/{activityId}` on tap, and invalidates the
+balance and activity caches on arrival — a notification means the server state
+changed, so the cached figures are stale by definition.
+
+Android uses a `transactions` channel at HIGH importance with
+`PRIVATE` lockscreen visibility, so amounts don't render on a locked screen.
+
+---
+
 ## 12. The margin model
 
 Pricing runs through **one number**: naira per dollar of value.

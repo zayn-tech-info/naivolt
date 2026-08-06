@@ -53,6 +53,7 @@ import { ScreenHeader } from '@/components/navigation/ScreenHeader';
 import { BeneficiaryRow } from '@/components/banking/BeneficiaryRow';
 import { NewAccountForm, type NewAccountValue } from '@/components/banking/NewAccountForm';
 import { useBankAccounts, useCreatePayout, useLimits, usePortfolio } from '@/hooks/useExchange';
+import { useEnsurePush } from '@/hooks/useEnsurePush';
 import type { PayoutDestination } from '@/services/v2/types';
 
 type Stage = 'compose' | 'authorise';
@@ -70,6 +71,7 @@ export default function WithdrawScreen() {
   const router = useRouter();
   const { c, space } = useTheme();
   const { show } = useToast();
+  const ensurePush = useEnsurePush();
 
   const portfolio = usePortfolio();
   const beneficiaries = useBankAccounts();
@@ -156,6 +158,9 @@ export default function WithdrawScreen() {
           pin: enteredPin,
           idempotencyKey,
         });
+        // The toast below promises a notification when it settles. Ask now,
+        // while that promise is on screen and the prompt explains itself.
+        void ensurePush();
         show(
           `₦${Number(result.amountNgn).toLocaleString('en-NG')} on its way to ${result.bankAccount.bankName}`,
           'positive'
@@ -173,7 +178,7 @@ export default function WithdrawScreen() {
         show(e.message ?? 'That transfer did not go through.', 'negative');
       }
     },
-    [destination, idempotencyKey, entered, payout, show, router]
+    [destination, idempotencyKey, entered, payout, show, router, ensurePush]
   );
 
   // ── Authorise ───────────────────────────────────────────────────────

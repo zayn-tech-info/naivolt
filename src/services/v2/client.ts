@@ -176,6 +176,8 @@ export const httpExchange: ExchangeService = {
       xhr.send(form);
     }),
 
+  registerPushToken: (input) => post('/devices/push-token', input).then(() => undefined),
+
   getActivity: (cursor) => get(`/activity${cursor ? `?cursor=${cursor}` : ''}`),
 
   getActivityDetail: (id) => get(`/activity/${id}`),

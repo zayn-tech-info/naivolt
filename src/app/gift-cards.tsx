@@ -27,6 +27,7 @@ import {
 import { ScreenHeader } from '@/components/navigation/ScreenHeader';
 import { BrandMark } from '@/components/giftcards/BrandMark';
 import { useGiftCardBrands, useSubmitGiftCard } from '@/hooks/useExchange';
+import { useEnsurePush } from '@/hooks/useEnsurePush';
 import type { GiftCardBrand, GiftCardRate, GiftCardSubmission } from '@/services/v2/types';
 
 
@@ -37,6 +38,7 @@ export default function GiftCardsScreen() {
   const router = useRouter();
   const { c, radius, space, minTouch } = useTheme();
   const { show } = useToast();
+  const ensurePush = useEnsurePush();
 
   const brands = useGiftCardBrands();
   const submitCard = useSubmitGiftCard();
@@ -115,11 +117,13 @@ export default function GiftCardsScreen() {
         imageUri: imageUri ?? undefined,
         idempotencyKey,
       });
+      // The success screen promises a notification when review completes.
+      void ensurePush();
       setSubmitted(result);
     } catch (err) {
       setError((err as { message?: string })?.message ?? 'Could not submit the card.');
     }
-  }, [canSubmit, brand, rate, value, cardCode, cardPin, imageUri, idempotencyKey, submitCard]);
+  }, [canSubmit, brand, rate, value, cardCode, cardPin, imageUri, idempotencyKey, submitCard, ensurePush]);
 
   if (submitted) {
     return (

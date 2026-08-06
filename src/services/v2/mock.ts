@@ -719,6 +719,12 @@ export const mockExchange: ExchangeService = {
     return delay(submission, 900);
   },
 
+  async registerPushToken(): Promise<void> {
+    // Nothing to store — the fixture can't send push. Resolving rather than
+    // throwing keeps the calling flow identical to production.
+    return delay(undefined, 200);
+  },
+
   async getActivity(): Promise<{ items: ActivityItem[]; nextCursor: string | null }> {
     return delay({ items: [...state.activity], nextCursor: null });
   },

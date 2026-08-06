@@ -100,6 +100,14 @@ export interface ExchangeService {
     idempotencyKey: string;
   }): Promise<GiftCardSubmission>;
 
+  /**
+   * Registers this installation for push.
+   *
+   * Keyed by deviceId so a user with two phones gets both, and signing out on
+   * one drops only that one.
+   */
+  registerPushToken(input: { token: string; deviceId: string; platform: 'ios' | 'android' }): Promise<void>;
+
   // History
   getActivity(cursor?: string): Promise<{ items: ActivityItem[]; nextCursor: string | null }>;
   /** The receipt for one item — richer than the feed row. */

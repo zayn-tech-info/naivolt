@@ -3,6 +3,7 @@ import { StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
 import { Text } from '@/components/ui';
+import { useNotificationRouting } from '@/hooks/useNotifications';
 
 function TabLabel({
   label,
@@ -30,6 +31,13 @@ function TabLabel({
 
 export default function MainTabsLayout() {
   const { c, iconSize, space } = useTheme();
+
+  // Mounted here rather than in the root layout on purpose. A cold start that
+  // began with a notification tap would otherwise push the receipt before
+  // app/index.tsx finishes its auth redirect, and the `router.replace` there
+  // would immediately clobber it. By the time these tabs mount, routing has
+  // settled and the push sticks.
+  useNotificationRouting();
 
   return (
     <Tabs
