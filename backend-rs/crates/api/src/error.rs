@@ -50,6 +50,11 @@ pub enum ApiError {
     BankUnverified,
     #[error("{asset} is paused right now")]
     AssetPaused { asset: String },
+    /// A dependency we cannot quote without is down. Distinct from Internal:
+    /// nothing is broken, the answer is just not available yet, and retrying is
+    /// the right move rather than reporting a bug.
+    #[error("{0}")]
+    ServiceUnavailable(String),
 
     // --- generic ---
     #[error("{0}")]
@@ -77,6 +82,7 @@ impl ApiError {
             ApiError::QuoteConsumed => "QUOTE_CONSUMED",
             ApiError::BankUnverified => "BANK_UNVERIFIED",
             ApiError::AssetPaused { .. } => "ASSET_PAUSED",
+            ApiError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
             ApiError::BadRequest(_) => "BAD_REQUEST",
             ApiError::NotFound => "NOT_FOUND",
             ApiError::Internal(_) => "INTERNAL",
@@ -96,7 +102,9 @@ impl ApiError {
             | ApiError::BankUnverified => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::KycRequired { .. } => StatusCode::FORBIDDEN,
             ApiError::QuoteExpired | ApiError::QuoteConsumed => StatusCode::CONFLICT,
-            ApiError::AssetPaused { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::AssetPaused { .. } | ApiError::ServiceUnavailable(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

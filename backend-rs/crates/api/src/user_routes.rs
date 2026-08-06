@@ -97,8 +97,14 @@ pub struct PortfolioResponse {
     /// Decimal strings, never JSON numbers — a double cannot hold NUMERIC(38,18)
     /// and a BTC balance would lose precision on round-trip. See API-CONTRACT §1.
     pub total_ngn: String,
+    /// The only field the app renders. Home headlines it and Withdraw calls it
+    /// "Available" — the same number by design, so the app can never show a
+    /// balance larger than what the user can actually send to their bank.
     pub ngn_balance: String,
     pub holdings: Vec<Holding>,
+    /// Not computed. Null rather than 0, so the client hides the indicator
+    /// instead of claiming a flat day (API-CONTRACT §2).
+    pub change_pct24h: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -106,6 +112,10 @@ pub struct PortfolioResponse {
 pub struct Holding {
     pub asset: String,
     pub balance: String,
+    /// Value at the current sell rate. "0" when we cannot price the asset —
+    /// never omitted, so the client never has to guess.
+    pub ngn_value: String,
+    pub rate: String,
 }
 
 async fn portfolio(
@@ -122,6 +132,7 @@ async fn portfolio(
 
     let mut ngn_balance = Decimal::ZERO;
     let mut holdings = Vec::new();
+    let mut crypto_total = Decimal::ZERO;
 
     for (kind, asset, raw) in rows {
         // Liabilities are stored negative; flip for presentation. Reading the raw
@@ -136,20 +147,28 @@ async fn portfolio(
         };
 
         if shown > Decimal::ZERO {
+            // Valued server-side so the client never applies a margin. An asset
+            // we cannot price contributes zero rather than blocking the whole
+            // portfolio read — a balance the user can see is worth more than a
+            // spinner while CoinGecko is down.
+            let rate = state.rates.ngn_rate_of(&asset).await.unwrap_or(Decimal::ZERO);
+            let value = (shown * rate).round_dp(4);
+            crypto_total += value;
+
             holdings.push(Holding {
                 asset,
                 balance: shown.normalize().to_string(),
+                ngn_value: value.normalize().to_string(),
+                rate: rate.round_dp(4).normalize().to_string(),
             });
         }
     }
 
     Ok(Json(PortfolioResponse {
-        // Crypto valuation needs the rates service; until it exists the naira
-        // balance is the whole of the total, which is also the only figure the
-        // app renders (API-CONTRACT §2).
-        total_ngn: ngn_balance.normalize().to_string(),
+        total_ngn: (ngn_balance + crypto_total).normalize().to_string(),
         ngn_balance: ngn_balance.normalize().to_string(),
         holdings,
+        change_pct24h: None,
     }))
 }
 
@@ -272,6 +291,9 @@ fn minimum_deposit(asset: Asset) -> String {
 
 // ---------------------------------------------------------------------------
 
+/// Below this a transfer costs more in provider fees than it moves.
+const MIN_WITHDRAWAL_NGN: i64 = 100;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LimitsResponse {
@@ -281,6 +303,19 @@ pub struct LimitsResponse {
     pub used_today: String,
     pub remaining_today: Option<String>,
     pub next_step: Option<String>,
+
+    // The names the withdraw screen validates against (API-CONTRACT §5). They
+    // duplicate the fields above rather than replacing them because the tier
+    // detail is what the KYC prompts read, and the client wants flat numbers it
+    // can compare an amount to without knowing about tiers.
+    //
+    // A tier that cannot withdraw reports zero rather than null: the form treats
+    // a missing cap as "no limit", and an unverified user must not see an
+    // unlimited field.
+    pub daily_limit_ngn: String,
+    pub daily_remaining_ngn: String,
+    pub per_transaction_max_ngn: String,
+    pub min_withdrawal_ngn: String,
 }
 
 async fn limits(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<LimitsResponse>> {
@@ -299,6 +334,8 @@ async fn limits(State(state): State<AppState>, user: CurrentUser) -> ApiResult<J
 
     let cap = tier.daily_payout_cap();
 
+    let remaining = cap.map(|c| (c - used).max(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
+
     Ok(Json(LimitsResponse {
         kyc_tier: tier_raw,
         can_withdraw: tier.can_withdraw(),
@@ -308,6 +345,14 @@ async fn limits(State(state): State<AppState>, user: CurrentUser) -> ApiResult<J
         // the cap, and "-₦10,000 remaining" is not something to show a user.
         remaining_today: cap.map(|c| (c - used).max(Decimal::ZERO).normalize().to_string()),
         next_step: tier.next_step().map(str::to_owned),
+
+        daily_limit_ngn: cap.unwrap_or(Decimal::ZERO).normalize().to_string(),
+        daily_remaining_ngn: remaining.normalize().to_string(),
+        // A single transfer can use the whole daily allowance; the cap that
+        // actually binds is the daily one, so this mirrors it rather than
+        // inventing a second threshold the backend does not enforce.
+        per_transaction_max_ngn: cap.unwrap_or(Decimal::ZERO).normalize().to_string(),
+        min_withdrawal_ngn: MIN_WITHDRAWAL_NGN.to_string(),
     }))
 }
 

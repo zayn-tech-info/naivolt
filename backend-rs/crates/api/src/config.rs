@@ -6,7 +6,9 @@
 //! started.
 
 use anyhow::{bail, Context, Result};
+use rust_decimal::Decimal;
 use std::env;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -36,6 +38,13 @@ pub struct Config {
     pub signer_url: Option<String>,
     /// Dev-only: the mnemonic used for in-process derivation.
     pub dev_mnemonic: Option<String>,
+
+    /// Naira per US dollar before margin. Tracks the parallel market, not the
+    /// official rate — see `pricing.rs` for why that distinction matters.
+    pub usd_ngn_mid: Decimal,
+    /// Our margin, in naira per dollar of value transacted. ~0.65% at a 1530
+    /// mid; 20 gives the 1.3% target in ARCHITECTURE.md §9.
+    pub spread_ngn_per_usd: Decimal,
 }
 
 impl Config {
@@ -71,6 +80,8 @@ impl Config {
                 .unwrap_or_else(|_| "Naivolt <no-reply@naivolt.com>".into()),
             signer_url,
             dev_mnemonic,
+            usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
+            spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
         };
 
         config.validate_for_environment()?;
@@ -104,6 +115,19 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+/// Reads a decimal from the environment, falling back to a default.
+///
+/// A malformed value is fatal rather than silently defaulted: the difference
+/// between a mid rate of 1530 and an unparsed "1,530" is every price the
+/// platform quotes, and that must not degrade quietly.
+fn decimal_env(key: &str, fallback: Decimal) -> Result<Decimal> {
+    match env::var(key) {
+        Ok(raw) if !raw.trim().is_empty() => Decimal::from_str(raw.trim())
+            .with_context(|| format!("{key} is not a valid decimal: {raw}")),
+        _ => Ok(fallback),
     }
 }
 

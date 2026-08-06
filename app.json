@@ -8,8 +8,7 @@
     "scheme": "naivolt",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "bundleIdentifier": "com.zaynguy.naivolt",
-      "icon": "./assets/myicons/naivolt_logo.png"
+      "bundleIdentifier": "com.zaynguy.naivolt"
     },
     "android": {
       "adaptiveIcon": {

@@ -11,6 +11,8 @@ mod config;
 mod error;
 mod middleware;
 mod notify;
+mod pricing;
+mod rate_routes;
 mod signer;
 mod state;
 mod user_routes;
@@ -83,11 +85,17 @@ async fn main() -> Result<()> {
         keys: Arc::new(keys),
         notifier: Arc::new(notifier),
         addresses: Arc::new(addresses),
+        rates: pricing::Rates::new(&config),
     };
 
     let app = Router::new()
         .route("/health", get(health))
-        .nest("/api/v1", auth_routes::routes().merge(user_routes::routes()))
+        .nest(
+            "/api/v1",
+            auth_routes::routes()
+                .merge(user_routes::routes())
+                .merge(rate_routes::routes()),
+        )
         .layer(TraceLayer::new_for_http())
         // A slow client must not hold a database connection open indefinitely.
         .layer(TimeoutLayer::with_status_code(

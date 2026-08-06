@@ -12,7 +12,10 @@ import axios, { isAxiosError } from 'axios';
 import { config } from '@/constants/config';
 import type { User } from '@/store/authStore';
 
-const API = `${config.apiUrl}/v2`;
+// Must match the server's mount point: main.rs nests auth and user routes under
+// `/api/v1`. This previously read `/v2` — the name of the architecture, not the
+// path — which 404'd every OTP request. `services/api.ts` had it right.
+const API = `${config.apiUrl}/api/v1`;
 const TIMEOUT_MS = 15000;
 
 export interface AuthSession {
