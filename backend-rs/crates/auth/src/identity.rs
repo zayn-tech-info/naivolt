@@ -1,6 +1,6 @@
 //! Identity linking.
 //!
-//! One user can prove who they are via Google, Apple, or their phone number.
+//! One user can prove who they are by phone number or by email.
 //! Deciding whether an incoming sign-in is a returning user, a new sign-in method
 //! for an existing user, or a genuinely new person is the single most
 //! consequential branch in the auth system:
@@ -12,24 +12,29 @@
 //! The resolution rules live here as a pure function so they can be tested
 //! exhaustively without a database.
 
+use crate::identifier::Identifier;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+/// How a user proves who they are.
+///
+/// Both are OTP channels — there is no OAuth. Dropping Google/Apple removed the
+/// per-platform client-id configuration and, because Apple's Sign in with Apple
+/// requirement (App Store Guideline 4.8) only binds apps offering a *third-party*
+/// social login, the obligation to implement it as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    Google,
-    Apple,
     Phone,
+    Email,
 }
 
 impl Provider {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Provider::Google => "google",
-            Provider::Apple => "apple",
             Provider::Phone => "phone",
+            Provider::Email => "email",
         }
     }
 }
@@ -40,21 +45,45 @@ impl fmt::Display for Provider {
     }
 }
 
-/// A sign-in attempt that has **already been cryptographically verified** —
-/// OIDC signature checked, or OTP confirmed.
+/// A sign-in attempt whose OTP has **already been verified**.
 ///
-/// Constructing one of these is an assertion that the proof was valid. Nothing in
-/// this module re-checks it, so it must not be built from raw request input.
+/// Constructing one of these is an assertion that the code was correct. Nothing
+/// in this module re-checks it, so it must never be built from raw request input
+/// — use [`IdentityClaim::from_verified_otp`] at the point the OTP is consumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityClaim {
     pub provider: Provider,
-    /// Stable provider-specific id: Google/Apple `sub`, or E.164 for phone.
+    /// The identifier itself: E.164 for phone, normalised address for email.
     pub subject: String,
-    /// Only `Some` when the provider *attests* the address is verified.
-    /// A Google token with `email_verified: false` must arrive here as `None`.
+    /// Set only when ownership of the address was proven by a completed OTP.
     pub verified_email: Option<String>,
-    /// Only `Some` when ownership was proven (i.e. an OTP was completed).
+    /// Set only when ownership of the number was proven by a completed OTP.
     pub verified_phone: Option<String>,
+}
+
+impl IdentityClaim {
+    /// Build a claim from an identifier whose OTP has just been consumed.
+    ///
+    /// Completing an OTP proves control of that exact channel and *only* that
+    /// channel, so exactly one of the verified fields is ever populated. Filling
+    /// both from a single code would let a phone sign-in claim an email account.
+    pub fn from_verified_otp(identifier: &Identifier) -> Self {
+        let subject = identifier.subject().to_owned();
+        match identifier {
+            Identifier::Phone(phone) => Self {
+                provider: Provider::Phone,
+                subject,
+                verified_email: None,
+                verified_phone: Some(phone.clone()),
+            },
+            Identifier::Email(email) => Self {
+                provider: Provider::Email,
+                subject,
+                verified_email: Some(email.clone()),
+                verified_phone: None,
+            },
+        }
+    }
 }
 
 /// What the database found for an incoming claim. Populated by the repository
@@ -113,46 +142,11 @@ pub fn resolve(claim: &IdentityClaim, found: &ExistingMatches) -> Resolution {
     }
 }
 
-/// Normalise a Nigerian phone number to E.164.
-///
-/// The same person types `08012345678`, `+2348012345678`, and `234 801 234 5678`.
-/// Storing those as three identities would give one human three accounts and
-/// three sets of wallets.
-pub fn normalize_ng_phone(input: &str) -> Option<String> {
-    let digits: String = input.chars().filter(|c| c.is_ascii_digit()).collect();
-
-    let national = match digits.as_str() {
-        // 08012345678 → 8012345678
-        d if d.len() == 11 && d.starts_with('0') => &d[1..],
-        // 2348012345678 → 8012345678
-        d if d.len() == 13 && d.starts_with("234") => &d[3..],
-        // 8012345678, already national
-        d if d.len() == 10 => d,
-        _ => return None,
-    };
-
-    // NG mobile prefixes are 70/80/81/90/91 after the leading zero is stripped.
-    let valid_prefix = matches!(&national[..1], "7" | "8" | "9");
-    if !valid_prefix || national.len() != 10 {
-        return None;
-    }
-
-    Some(format!("+234{national}"))
-}
-
-/// Normalise an email for comparison. Case-insensitive, whitespace-trimmed.
-///
-/// Note: gmail dot/plus aliasing is deliberately **not** collapsed. Treating
-/// `a.b@gmail.com` and `ab@gmail.com` as one identity would be correct for Gmail
-/// and wrong for most other providers, and getting it wrong in the linking
-/// direction hands one user another's account.
-pub fn normalize_email(input: &str) -> Option<String> {
-    let trimmed = input.trim().to_ascii_lowercase();
-    if trimmed.is_empty() || !trimmed.contains('@') || trimmed.starts_with('@') {
-        return None;
-    }
-    Some(trimmed)
-}
+// Normalisation lives in `identifier`, which is the only place that decides what
+// a phone number or an email *is*. Re-exported rather than reimplemented: two
+// copies of these rules would eventually disagree, and a disagreement here means
+// the same human is stored as two users with two sets of wallets.
+pub use crate::identifier::{normalize_email, normalize_ng_phone};
 
 #[cfg(test)]
 mod tests {
@@ -162,22 +156,24 @@ mod tests {
         Uuid::new_v4()
     }
 
-    fn google_claim(email: Option<&str>) -> IdentityClaim {
+    /// An email sign-in whose OTP was completed.
+    fn email_claim(email: &str) -> IdentityClaim {
+        IdentityClaim::from_verified_otp(&Identifier::Email(email.into()))
+    }
+
+    /// An email sign-in whose OTP was *not* completed — the shape an attacker
+    /// controls before proving anything.
+    fn unverified_email_claim(email: &str) -> IdentityClaim {
         IdentityClaim {
-            provider: Provider::Google,
-            subject: "google-sub-123".into(),
-            verified_email: email.map(str::to_string),
+            provider: Provider::Email,
+            subject: email.into(),
+            verified_email: None,
             verified_phone: None,
         }
     }
 
     fn phone_claim(phone: &str) -> IdentityClaim {
-        IdentityClaim {
-            provider: Provider::Phone,
-            subject: phone.into(),
-            verified_email: None,
-            verified_phone: Some(phone.into()),
-        }
+        IdentityClaim::from_verified_otp(&Identifier::Phone(phone.into()))
     }
 
     #[test]
@@ -188,7 +184,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve(&google_claim(Some("a@x.com")), &found),
+            resolve(&email_claim("a@x.com"), &found),
             Resolution::Existing(u)
         );
     }
@@ -203,7 +199,7 @@ mod tests {
             by_verified_phone: Some(user()),
         };
         assert_eq!(
-            resolve(&google_claim(Some("a@x.com")), &found),
+            resolve(&email_claim("a@x.com"), &found),
             Resolution::Existing(known)
         );
     }
@@ -211,28 +207,28 @@ mod tests {
     #[test]
     fn brand_new_user_is_created() {
         assert_eq!(
-            resolve(&google_claim(Some("new@x.com")), &ExistingMatches::default()),
+            resolve(&email_claim("new@x.com"), &ExistingMatches::default()),
             Resolution::CreateNew
         );
     }
 
     #[test]
-    fn google_links_to_account_created_by_phone() {
+    fn email_links_to_account_created_by_phone() {
         // The headline case: signed up by phone in January, taps "Continue with
-        // Google" in March. Must be one account, not two.
+        // email in March. Must be one account, not two.
         let u = user();
         let found = ExistingMatches {
             by_verified_email: Some(u),
             ..Default::default()
         };
         assert_eq!(
-            resolve(&google_claim(Some("same@x.com")), &found),
+            resolve(&email_claim("same@x.com"), &found),
             Resolution::LinkTo(u)
         );
     }
 
     #[test]
-    fn phone_links_to_account_created_by_google() {
+    fn phone_links_to_account_created_by_email() {
         let u = user();
         let found = ExistingMatches {
             by_verified_phone: Some(u),
@@ -253,7 +249,7 @@ mod tests {
             ..Default::default()
         };
         // `None` here represents `email_verified: false` from the provider.
-        let attacker = google_claim(None);
+        let attacker = unverified_email_claim("victim@x.com");
         assert_eq!(
             resolve(&attacker, &found),
             Resolution::CreateNew,
@@ -266,7 +262,7 @@ mod tests {
         let email_user = user();
         let phone_user = user();
         let claim = IdentityClaim {
-            provider: Provider::Google,
+            provider: Provider::Email,
             subject: "sub-new".into(),
             verified_email: Some("a@x.com".into()),
             verified_phone: Some("+2348012345678".into()),
@@ -289,7 +285,7 @@ mod tests {
     fn same_user_on_both_channels_links_cleanly() {
         let u = user();
         let claim = IdentityClaim {
-            provider: Provider::Apple,
+            provider: Provider::Phone,
             subject: "apple-sub".into(),
             verified_email: Some("a@x.com".into()),
             verified_phone: Some("+2348012345678".into()),

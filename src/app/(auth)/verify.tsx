@@ -6,6 +6,9 @@
  * and Android can fill the code straight from the SMS. Six separate inputs, the
  * usual approach, break that autofill entirely and force the user to type a code
  * their phone already knows.
+ *
+ * The code arrives by SMS or by email depending on what the user typed on the
+ * previous screen; only the "sent to" line differs between them.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -27,7 +30,7 @@ import { Button, Text } from '@/components/ui';
 import { LightAuthScreen } from '@/components/auth/LightAuthScreen';
 import { useAuthStore } from '@/store/authStore';
 import { saveUser, setToken as persistToken, TOKEN_KEY } from '@/services/tokenStorage';
-import { AuthError, requestOtp, verifyOtp } from '@/services/authV2';
+import { AuthError, maskIdentifier, requestOtp, verifyOtp } from '@/services/authV2';
 
 const CODE_LENGTH = 6;
 const RESEND_SECONDS = 60;
@@ -45,8 +48,15 @@ function VerifyScreenContent() {
   const { c, space, radius } = useTheme();
   const reduceMotion = useReducedMotion();
   const { setUser, setToken } = useAuthStore();
-  const params = useLocalSearchParams<{ phone: string; mock?: string }>();
-  const phone = params.phone ?? '';
+  const params = useLocalSearchParams<{
+    identifier: string;
+    kind?: 'phone' | 'email';
+    mock?: string;
+  }>();
+  const identifier = params.identifier ?? '';
+  // Trust the param, but fall back to the same rule the rest of the app uses
+  // rather than assuming phone — an email shown as "+234 …" is nonsense.
+  const kind = params.kind ?? (identifier.includes('@') ? 'email' : 'phone');
   const isMock = params.mock === '1';
 
   const inputRef = useRef<TextInput>(null);
@@ -74,7 +84,7 @@ function VerifyScreenContent() {
       setBusy(true);
       setError(null);
       try {
-        const session = await verifyOtp(phone, submitted);
+        const session = await verifyOtp(identifier, submitted);
         await persistToken(TOKEN_KEY, session.token);
         setToken(session.token);
         setUser(session.user);
@@ -110,7 +120,7 @@ function VerifyScreenContent() {
         setBusy(false);
       }
     },
-    [phone, router, setToken, setUser, shake, isMock, reduceMotion],
+    [identifier, router, setToken, setUser, shake, isMock, reduceMotion],
   );
 
   const onChange = useCallback(
@@ -125,7 +135,7 @@ function VerifyScreenContent() {
 
   const resend = useCallback(async () => {
     try {
-      await requestOtp(phone);
+      await requestOtp(identifier);
       setSecondsLeft(RESEND_SECONDS);
       setCode('');
       void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -136,7 +146,7 @@ function VerifyScreenContent() {
       }
       setError(err instanceof Error ? err.message : 'Could not resend');
     }
-  }, [phone]);
+  }, [identifier]);
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={{ flex: 1, backgroundColor: c.primaryBackground }}>
@@ -154,7 +164,7 @@ function VerifyScreenContent() {
         <Animated.View entering={reduceMotion ? undefined : FadeIn.duration(300)} style={{ marginTop: space.major }}>
           <Text variant="title">Enter your code</Text>
           <Text variant="body" color="secondaryText" style={{ marginTop: space.snug }}>
-            Sent to {formatPhone(phone)}
+            Sent to {maskIdentifier({ kind, value: identifier })}
           </Text>
         </Animated.View>
 
@@ -203,7 +213,15 @@ function VerifyScreenContent() {
           onChangeText={onChange}
           keyboardType="number-pad"
           textContentType="oneTimeCode"
-          autoComplete={Platform.OS === 'android' ? 'sms-otp' : 'one-time-code'}
+          // Android's sms-otp binds to the SMS retriever API, so it only makes
+          // sense for a code that actually arrives by SMS.
+          autoComplete={
+            Platform.OS === 'android'
+              ? kind === 'phone'
+                ? 'sms-otp'
+                : 'one-time-code'
+              : 'one-time-code'
+          }
           maxLength={CODE_LENGTH}
           editable={!busy}
           caretHidden
@@ -241,8 +259,3 @@ function VerifyScreenContent() {
   );
 }
 
-/** +2348012345678 → +234 801 234 5678 */
-function formatPhone(e164: string): string {
-  const m = /^\+234(\d{3})(\d{3})(\d{4})$/.exec(e164);
-  return m ? `+234 ${m[1]} ${m[2]} ${m[3]}` : e164;
-}

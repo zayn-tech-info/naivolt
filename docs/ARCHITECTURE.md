@@ -307,43 +307,47 @@ Signup is one screen and no forms. **KYC is not part of it** — see §10.3.
 
 ```
 ┌──────────────────────────────┐
-│   [  Continue with Google  ] │  ← one tap, no OTP, no typing
-│   [  Continue with Apple   ] │
-│   ──────── or ────────       │
-│   [ Phone number          ]  │  → 6-digit SMS OTP
+│  Phone number or email       │
+│  [ 0801 234 5678          ]  │  → 6-digit code, by SMS or mail
+│  [ Continue →             ]  │
 └──────────────────────────────┘
-        ↓  ~2 seconds
+        ↓
    set 6-digit PIN + enable biometrics
         ↓
    wallets derived, app usable, ₦0 balance
 ```
 
-**Google** is the fast path: an OIDC ID token already carries a verified email,
-name and picture, so there is nothing to send and nothing to wait for. The client
-gets a token via `expo-auth-session`; the server verifies signature against
-Google's JWKS, and checks `iss`, `aud` (our client id), `exp`, and — critically —
-`email_verified`. An unverified Google email is not proof of anything.
+**One field, two channels.** The user types a phone number or an email and the
+system decides which it got. The discriminator is `@`, checked before anything
+else: a string containing one is never a phone number, and treating
+`0801…@gmail.com` as a phone would send an SMS into the void. Parsing lives in
+`crates/auth/src/identifier.rs` and is mirrored in `src/services/authV2.ts` — the
+client picks the keyboard, the server picks the transport, and a disagreement
+between them is a code delivered nowhere.
 
-**Apple** is not optional. App Store Review Guideline 4.8 requires an equivalent
-private login option wherever a third-party social login is offered, so shipping
-Google-only on iOS gets the build rejected. Apple returns email only on the
-*first* authorization, so it must be persisted then — it is not recoverable later.
+The code itself is identical either way: 6 digits, Argon2-hashed at rest,
+10-minute TTL, 5 attempts, 60-second resend, rate-limited per destination *and*
+per IP. SMS goes via Termii (best NG deliverability), email via Resend. The
+channel is stored on the challenge rather than re-derived, so a resend cannot
+pick a different transport from the original send.
 
-**Phone** is the path for users without Google, and it is the more important one
-in this market: 6-digit OTP over SMS via Termii, Argon2-hashed at rest, 10-minute
-TTL, 5 attempts, 60-second resend, rate-limited per phone *and* per IP.
+> **There is no OAuth.** An earlier revision offered Google and Apple sign-in.
+> Removing it deleted the per-platform client-id configuration, the JWKS
+> fetching and nonce handling, and — because App Store Guideline 4.8 only binds
+> apps offering a *third-party* social login — the obligation to implement Sign
+> in with Apple as well. The OIDC verifier is recoverable from git history if
+> that decision is ever revisited.
 
 ### 10.1 Identity linking
 
-One user, many ways to prove who they are. This is the part that quietly breaks
-custodial systems: if a user signs up with Google in January and with their phone
-in March, a naive implementation gives them **two accounts and two sets of
-wallets**, and the deposit they make against the second one is invisible from the
-first.
+One user, two ways to prove who they are. This is the part that quietly breaks
+custodial systems: if a user signs up by phone in January and by email in March,
+a naive implementation gives them **two accounts and two sets of wallets**, and
+the deposit they make against the second one is invisible from the first.
 
 ```sql
 identities(id, user_id, provider, subject, verified_at, UNIQUE(provider, subject))
-  provider ∈ { google, apple, phone }
+  provider ∈ { phone, email }
 ```
 
 A `users` row can own several `identities`. On every sign-in:
@@ -450,7 +454,7 @@ request.
 | Phase | Deliverable |
 |---|---|
 | 1 | Workspace, migrations, ledger core + invariant tests, `signer` + derivation (all 4 chains) with BIP-39 test vectors |
-| 2 | Auth: Google/Apple OIDC + phone OTP, identity linking, PIN, JWT sessions, user + wallet provisioning, balance reads |
+| 2 | Auth: phone + email OTP, identity linking, PIN, JWT sessions with rotating refresh, user + wallet provisioning, balance reads |
 | 3 | Watchers: TRON + EVM (covers ~90% of NG volume), deposit crediting, reorg handling |
 | 4 | Rates + quotes + sell flow |
 | 5 | KYC tiers + provider integration, then payouts + Paystack + webhooks + reconciliation |

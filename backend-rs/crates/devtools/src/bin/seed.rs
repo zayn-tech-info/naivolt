@@ -13,7 +13,8 @@
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
-use naivolt_auth::identity::{normalize_ng_phone, ExistingMatches, IdentityClaim, Provider, Resolution};
+use naivolt_auth::identifier::{parse_identifier, Identifier};
+use naivolt_auth::identity::{ExistingMatches, IdentityClaim, Provider, Resolution};
 use naivolt_auth::{hash_pin, otp::OtpChallenge, tier::KycTier};
 use naivolt_core::{Asset, Chain};
 use naivolt_ledger::account::AccountKind;
@@ -67,13 +68,13 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // A verified user with naira ready to withdraw.
+    // A verified user with naira ready to withdraw, signing in by email.
     let tier1 = seed_user(
         &pool,
         &seed,
         UserSpec {
-            label: "Tier 1 — Google signup, BVN verified",
-            provider: Provider::Google,
+            label: "Tier 1 — email signup, BVN verified",
+            provider: Provider::Email,
             phone: None,
             email: Some("ada@example.com"),
             tier: KycTier::Tier1,
@@ -150,17 +151,23 @@ async fn seed_user(pool: &PgPool, seed: &MasterSeed, spec: UserSpec) -> Result<S
     // Normalise exactly as the API would, so the seeded identity is byte-identical
     // to what a real sign-in produces. A mismatch here would mean the seeded user
     // could never actually log in.
-    let phone = spec.phone.and_then(normalize_ng_phone);
-    let email = spec.email.map(|e| e.to_ascii_lowercase());
+    // Parse through the same path the API uses, so the seeded identity is
+    // byte-identical to what a real sign-in produces. A mismatch here would mean
+    // the seeded user could never actually log in.
+    let raw = match spec.provider {
+        Provider::Phone => spec.phone.context("phone provider needs a phone")?,
+        Provider::Email => spec.email.context("email provider needs an email")?,
+    };
+    let identifier = parse_identifier(raw)?;
+    let claim = IdentityClaim::from_verified_otp(&identifier);
 
-    let claim = IdentityClaim {
-        provider: spec.provider,
-        subject: match spec.provider {
-            Provider::Phone => phone.clone().context("phone provider needs a phone")?,
-            _ => format!("dev-{}-sub", spec.provider),
-        },
-        verified_email: email.clone(),
-        verified_phone: phone.clone(),
+    let phone = match &identifier {
+        Identifier::Phone(p) => Some(p.clone()),
+        Identifier::Email(_) => None,
+    };
+    let email = match &identifier {
+        Identifier::Email(e) => Some(e.clone()),
+        Identifier::Phone(_) => None,
     };
 
     // Run the real resolver against what's already in the database.
@@ -232,15 +239,20 @@ async fn seed_user(pool: &PgPool, seed: &MasterSeed, spec: UserSpec) -> Result<S
         credit_ngn(&mut tx, user_id, amount).await?;
     }
 
-    // A live OTP challenge so the login screen works immediately.
-    if let Some(ref p) = phone {
-        let challenge = OtpChallenge::new(p.clone(), DEV_OTP, Utc::now())?;
+    // A live OTP challenge so the sign-in screen works immediately, on whichever
+    // channel this account uses.
+    {
+        let challenge = OtpChallenge::new(&identifier, DEV_OTP, Utc::now())?;
         sqlx::query(
-            "INSERT INTO otp_challenges (destination, code_hash, expires_at)
-             VALUES ($1, $2, $3)
+            "INSERT INTO otp_challenges (destination, channel, code_hash, expires_at)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT (destination) WHERE consumed_at IS NULL DO NOTHING",
         )
         .bind(&challenge.destination)
+        .bind(match challenge.channel {
+            naivolt_auth::Channel::Sms => "sms",
+            naivolt_auth::Channel::Email => "email",
+        })
         .bind(&challenge.code_hash)
         // Long expiry: a dev challenge that times out mid-session is just annoying.
         .bind(Utc::now() + chrono::Duration::days(365))

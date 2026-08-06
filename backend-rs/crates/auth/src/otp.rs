@@ -5,6 +5,7 @@
 //! limits — rather than from the code itself. Every one of those is enforced
 //! here rather than left to the caller.
 
+use crate::identifier::{Channel, Identifier};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use chrono::{DateTime, Duration, Utc};
@@ -21,9 +22,13 @@ pub const RESEND_COOLDOWN_SECONDS: i64 = 60;
 /// A pending OTP challenge as persisted.
 #[derive(Debug, Clone)]
 pub struct OtpChallenge {
+    /// E.164 number or normalised email — whichever the user typed.
     pub destination: String,
-    /// Argon2 hash. The plaintext code exists only in the SMS and the user's head:
-    /// a database leak must not hand over live codes.
+    /// Which way the code was sent. Stored rather than re-derived so a resend
+    /// cannot pick a different channel from the original send.
+    pub channel: Channel,
+    /// Argon2 hash. The plaintext code exists only in the message and the user's
+    /// head: a database leak must not hand over live codes.
     pub code_hash: String,
     pub expires_at: DateTime<Utc>,
     pub attempts: i32,
@@ -48,9 +53,12 @@ pub fn hash_code(code: &str) -> Result<String, OtpError> {
 }
 
 impl OtpChallenge {
-    pub fn new(destination: impl Into<String>, code: &str, now: DateTime<Utc>) -> Result<Self, OtpError> {
+    /// Issue a challenge for a parsed identifier. The channel follows from the
+    /// identifier kind, so a phone number can never be handed to the mailer.
+    pub fn new(identifier: &Identifier, code: &str, now: DateTime<Utc>) -> Result<Self, OtpError> {
         Ok(Self {
-            destination: destination.into(),
+            destination: identifier.subject().to_owned(),
+            channel: identifier.channel(),
             code_hash: hash_code(code)?,
             expires_at: now + Duration::minutes(OTP_TTL_MINUTES),
             attempts: 0,
@@ -115,6 +123,14 @@ pub enum OtpError {
 mod tests {
     use super::*;
 
+    fn phone() -> Identifier {
+        Identifier::Phone("+2348012345678".into())
+    }
+
+    fn email() -> Identifier {
+        Identifier::Email("ada@example.com".into())
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
             .unwrap()
@@ -143,8 +159,22 @@ mod tests {
     }
 
     #[test]
+    fn channel_is_taken_from_the_identifier_not_the_caller() {
+        // The send path dispatches on this. If it could disagree with the
+        // identifier, a phone number would be handed to the mailer and the user
+        // would never receive a code.
+        let sms = OtpChallenge::new(&phone(), "123456", now()).unwrap();
+        assert_eq!(sms.channel, Channel::Sms);
+        assert_eq!(sms.destination, "+2348012345678");
+
+        let mail = OtpChallenge::new(&email(), "123456", now()).unwrap();
+        assert_eq!(mail.channel, Channel::Email);
+        assert_eq!(mail.destination, "ada@example.com");
+    }
+
+    #[test]
     fn correct_code_verifies_once() {
-        let mut c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let mut c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         assert!(c.verify("123456", now()).is_ok());
         // Replay must fail — otherwise an intercepted SMS stays valid forever.
         assert_eq!(c.verify("123456", now()), Err(OtpError::AlreadyUsed));
@@ -152,7 +182,7 @@ mod tests {
 
     #[test]
     fn wrong_code_counts_down_then_locks_out() {
-        let mut c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let mut c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         for expected_remaining in (0..MAX_ATTEMPTS).rev() {
             assert_eq!(
                 c.verify("000000", now()),
@@ -167,21 +197,21 @@ mod tests {
 
     #[test]
     fn expired_code_is_refused() {
-        let mut c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let mut c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         let late = now() + Duration::minutes(OTP_TTL_MINUTES + 1);
         assert_eq!(c.verify("123456", late), Err(OtpError::Expired));
     }
 
     #[test]
     fn code_is_still_valid_just_before_expiry() {
-        let mut c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let mut c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         let just_in_time = now() + Duration::minutes(OTP_TTL_MINUTES) - Duration::seconds(1);
         assert!(c.verify("123456", just_in_time).is_ok());
     }
 
     #[test]
     fn expiry_is_checked_before_attempts_are_spent() {
-        let mut c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let mut c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         let late = now() + Duration::hours(1);
         let _ = c.verify("000000", late);
         assert_eq!(c.attempts, 0, "an expired challenge consumed an attempt");
@@ -189,7 +219,7 @@ mod tests {
 
     #[test]
     fn plaintext_code_is_never_stored() {
-        let c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         assert!(!c.code_hash.contains("123456"));
         assert!(c.code_hash.starts_with("$argon2"));
     }
@@ -198,14 +228,14 @@ mod tests {
     fn identical_codes_hash_differently() {
         // Distinct salts: two users with the same code must not share a hash,
         // or a leaked table becomes a lookup problem.
-        let a = OtpChallenge::new("+2348011111111", "123456", now()).unwrap();
-        let b = OtpChallenge::new("+2348022222222", "123456", now()).unwrap();
+        let a = OtpChallenge::new(&Identifier::Phone("+2348011111111".into()), "123456", now()).unwrap();
+        let b = OtpChallenge::new(&Identifier::Phone("+2348022222222".into()), "123456", now()).unwrap();
         assert_ne!(a.code_hash, b.code_hash);
     }
 
     #[test]
     fn resend_is_rate_limited() {
-        let c = OtpChallenge::new("+2348012345678", "123456", now()).unwrap();
+        let c = OtpChallenge::new(&phone(), "123456", now()).unwrap();
         assert!(!c.can_resend(now()));
         assert!(!c.can_resend(now() + Duration::seconds(RESEND_COOLDOWN_SECONDS - 1)));
         assert!(c.can_resend(now() + Duration::seconds(RESEND_COOLDOWN_SECONDS)));

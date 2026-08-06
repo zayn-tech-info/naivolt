@@ -55,7 +55,19 @@ function toSession(raw: RawSession): AuthSession {
 
 const client = axios.create({ baseURL: API, timeout: TIMEOUT_MS });
 
-/** Normalise a Nigerian number to E.164. Mirrors `normalize_ng_phone` in Rust. */
+/**
+ * A validated sign-in identifier.
+ *
+ * Mirrors `Identifier` in `crates/auth/src/identifier.rs`. Both sides must agree
+ * on what counts as a phone versus an email: the client picks the keyboard and
+ * the hint, the server picks SMS or mail. A disagreement is a code sent to the
+ * wrong place and a user who cannot get in.
+ */
+export type Identifier =
+  | { kind: 'phone'; value: string }
+  | { kind: 'email'; value: string };
+
+/** Normalise a Nigerian number to E.164. Mirrors `normalize_ng_phone`. */
 export function normalizePhone(input: string): string | null {
   const digits = input.replace(/\D/g, '');
   let national: string;
@@ -68,39 +80,80 @@ export function normalizePhone(input: string): string | null {
   return `+234${national}`;
 }
 
-/** Ask for an SMS code. Returns the number it was sent to, already normalised. */
-export async function requestOtp(phoneInput: string): Promise<string> {
-  const phone = normalizePhone(phoneInput);
-  if (!phone) throw new AuthError('Enter a valid Nigerian phone number');
+/** Normalise an email. Mirrors `normalize_email` — no gmail alias collapsing. */
+export function normalizeEmail(input: string): string | null {
+  const value = input.trim().toLowerCase();
+  const at = value.indexOf('@');
+  if (at <= 0) return null;
+
+  const local = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  if (!local || !domain) return null;
+  if (domain.includes('@') || !domain.includes('.')) return null;
+  if (domain.split('.').some((label) => label === '')) return null;
+  if (/\s/.test(value)) return null;
+
+  return value;
+}
+
+/**
+ * Decide whether the user typed a phone number or an email.
+ *
+ * The `@` is checked first and deliberately: a string containing one is never a
+ * phone number. Treating `0801...@gmail.com` as a phone because it starts with
+ * digits would send an SMS into the void.
+ */
+export function parseIdentifier(input: string): Identifier | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.includes('@')) {
+    const email = normalizeEmail(trimmed);
+    return email ? { kind: 'email', value: email } : null;
+  }
+
+  const phone = normalizePhone(trimmed);
+  return phone ? { kind: 'phone', value: phone } : null;
+}
+
+/** Partially mask an identifier for "we sent a code to …". */
+export function maskIdentifier(id: Identifier): string {
+  if (id.kind === 'phone') {
+    return id.value.length === 14
+      ? `${id.value.slice(0, 4)} ${id.value.slice(4, 7)} ••• ${id.value.slice(10)}`
+      : id.value;
+  }
+  const at = id.value.indexOf('@');
+  const local = id.value.slice(0, at);
+  if (local.length <= 2) return id.value;
+  return `${local.slice(0, 2)}${'•'.repeat(local.length - 2)}${id.value.slice(at)}`;
+}
+
+/**
+ * Ask for a code. Returns the identifier it was sent to, already normalised.
+ *
+ * One endpoint for both channels — the server derives SMS or email from the
+ * identifier, so the client never has to know which was chosen.
+ */
+export async function requestOtp(input: string): Promise<Identifier> {
+  const identifier = parseIdentifier(input);
+  if (!identifier) {
+    throw new AuthError('Enter a valid phone number or email address');
+  }
 
   try {
-    await client.post('/auth/otp/request', { phone });
-    return phone;
+    await client.post('/auth/otp/request', { identifier: identifier.value });
+    return identifier;
   } catch (err) {
     throw toAuthError(err);
   }
 }
 
-export async function verifyOtp(phone: string, code: string): Promise<AuthSession> {
+export async function verifyOtp(identifier: string, code: string): Promise<AuthSession> {
   try {
-    const { data } = await client.post<RawSession>('/auth/otp/verify', { phone, code });
-    return toSession(data);
-  } catch (err) {
-    throw toAuthError(err);
-  }
-}
-
-/** Exchange a Google or Apple ID token for a session. */
-export async function signInWithIdToken(
-  provider: 'google' | 'apple',
-  idToken: string,
-  // Apple returns the name only on first authorization; forward it when present.
-  fullName?: string,
-): Promise<AuthSession> {
-  try {
-    const { data } = await client.post<RawSession>(`/auth/oidc/${provider}`, {
-      idToken,
-      fullName,
+    const { data } = await client.post<RawSession>('/auth/otp/verify', {
+      identifier,
+      code,
     });
     return toSession(data);
   } catch (err) {
