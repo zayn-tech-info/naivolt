@@ -12,6 +12,7 @@ mod error;
 mod middleware;
 mod activity_routes;
 mod bank_routes;
+mod giftcard_routes;
 mod notify;
 mod payout_provider;
 mod payout_routes;
@@ -110,7 +111,9 @@ async fn main() -> Result<()> {
                 .merge(rate_routes::routes())
                 .merge(bank_routes::routes())
                 .merge(payout_routes::routes())
-                .merge(activity_routes::routes()),
+                .merge(activity_routes::routes())
+                .merge(giftcard_routes::routes())
+                .merge(giftcard_routes::push_routes()),
         )
         .layer(TraceLayer::new_for_http())
         // A slow client must not hold a database connection open indefinitely.
