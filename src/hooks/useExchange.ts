@@ -55,6 +55,28 @@ export function useActivity() {
   });
 }
 
+/**
+ * The receipt for one transaction.
+ *
+ * Polls while the item is still in flight — someone sitting on a pending
+ * transfer expects the screen to update itself rather than needing a pull. Stops
+ * once it reaches a terminal state, so a settled receipt costs nothing.
+ */
+export function useActivityDetail(id: string | undefined) {
+  return useQuery({
+    queryKey: ['v2', 'activity', id] as const,
+    queryFn: () => exchange.getActivityDetail(id!),
+    enabled: !!id,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (!status) return false;
+      const settled = ['settled', 'credited', 'completed', 'approved'].includes(status);
+      const failed = ['failed', 'rejected', 'reversed', 'expired', 'cancelled'].includes(status);
+      return settled || failed ? false : 10_000;
+    },
+  });
+}
+
 export function usePendingDeposits() {
   return useQuery({
     queryKey: exchangeKeys.deposits,

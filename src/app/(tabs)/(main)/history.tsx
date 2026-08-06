@@ -165,7 +165,12 @@ export default function ActivityScreen() {
                 }}
               >
                 {group.items.map((item, i) => (
-                  <ActivityRow key={item.id} item={item} last={i === group.items.length - 1} />
+                  <ActivityRow
+                    key={item.id}
+                    item={item}
+                    onPress={() => router.push(`/activity/${item.id}`)}
+                    last={i === group.items.length - 1}
+                  />
                 ))}
               </View>
             </View>

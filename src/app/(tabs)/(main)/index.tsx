@@ -207,7 +207,12 @@ export default function HomeScreen() {
               }}
             >
               {recent.map((item, i) => (
-                <ActivityRow key={item.id} item={item} last={i === recent.length - 1} />
+                <ActivityRow
+                  key={item.id}
+                  item={item}
+                  onPress={() => router.push(`/activity/${item.id}`)}
+                  last={i === recent.length - 1}
+                />
               ))}
             </View>
           )}

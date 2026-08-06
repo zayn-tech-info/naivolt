@@ -20,6 +20,7 @@ import { getLiveRates, getSellRates } from './rates';
 import { MOCK_GIFT_CARD_BRANDS } from './giftcards.mock';
 import { netNgnPerUsd, ngnRateForUsdPrice } from '@/constants/pricing';
 import type {
+  ActivityDetail,
   ActivityItem,
   ApiError,
   Asset,
@@ -205,6 +206,108 @@ async function currentRates(): Promise<Partial<Record<Asset, number>>> {
 }
 
 const QUOTE_WINDOW_SECONDS = 60;
+
+/** Terminal states, for deciding whether a timeline's last step is reached. */
+const SETTLED = new Set(['settled', 'credited', 'completed', 'approved']);
+const FAILED = new Set(['failed', 'rejected', 'reversed', 'expired', 'cancelled']);
+
+/**
+ * Expands a feed row into a receipt.
+ *
+ * The timeline is the part worth getting right: a user opening a transaction
+ * that hasn't landed wants to know *where* it is, not just that it's "pending".
+ * Each kind has its own real sequence, so they're built separately rather than
+ * forced through one generic three-step shape.
+ */
+function buildDetail(item: ActivityItem): ActivityDetail {
+  const created = item.createdAt;
+  const settled = SETTLED.has(item.status);
+  const failed = FAILED.has(item.status);
+
+  const base: ActivityDetail = {
+    ...item,
+    reference: `NV-${item.id.toUpperCase()}`,
+  };
+
+  if (item.kind === 'deposit') {
+    const confirmations = settled ? 20 : 7;
+    return {
+      ...base,
+      network: item.detail?.split(' · ')[0] ?? 'TRC-20',
+      txHash: '9f2c1a7b3e8d4f5a6c0b2d1e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a',
+      explorerUrl:
+        'https://tronscan.org/#/transaction/9f2c1a7b3e8d4f5a6c0b2d1e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a',
+      confirmations,
+      minConfirmations: 20,
+      timeline: [
+        { label: 'Seen on-chain', at: created, state: 'done' },
+        {
+          label: `Confirming (${confirmations}/20)`,
+          at: created,
+          state: settled ? 'done' : 'current',
+        },
+        {
+          label: 'Credited to your balance',
+          at: settled ? created : null,
+          state: settled ? 'done' : 'pending',
+        },
+      ],
+    };
+  }
+
+  if (item.kind === 'payout') {
+    return {
+      ...base,
+      bankName: item.detail?.split(' ···')[0] ?? 'Bank',
+      accountNumber: `••••••${item.detail?.split('···')[1] ?? '0000'}`,
+      accountName: 'ADEYEMI DIVINE',
+      fee: '0.0000',
+      timeline: [
+        { label: 'Requested', at: created, state: 'done' },
+        {
+          label: failed ? 'Failed at the bank' : 'Sent to your bank',
+          at: created,
+          state: failed ? 'failed' : 'done',
+        },
+        {
+          label: 'Settled',
+          at: settled ? created : null,
+          state: failed ? 'pending' : settled ? 'done' : 'current',
+        },
+      ],
+      ...(failed ? { failureReason: 'Your bank rejected the transfer. Funds were returned.' } : null),
+    };
+  }
+
+  if (item.kind === 'giftcard') {
+    const [brand, country] = (item.detail ?? '').split(' · ');
+    return {
+      ...base,
+      brandName: brand?.split(' ')[0] ?? 'Gift card',
+      faceValue: brand?.match(/[\d.]+/)?.[0],
+      currency: brand?.includes('$') ? 'USD' : undefined,
+      ...(country ? { network: country } : null),
+      timeline: [
+        { label: 'Card submitted', at: created, state: 'done' },
+        {
+          label: failed ? 'Rejected' : 'Checked by our team',
+          at: created,
+          state: failed ? 'failed' : settled ? 'done' : 'current',
+        },
+        {
+          label: 'Naira credited',
+          at: settled ? created : null,
+          state: failed ? 'pending' : settled ? 'done' : 'pending',
+        },
+      ],
+      ...(failed
+        ? { failureReason: 'The card balance could not be verified. Nothing was charged.' }
+        : null),
+    };
+  }
+
+  return base;
+}
 
 export const mockExchange: ExchangeService = {
   async getPortfolio(): Promise<Portfolio> {
@@ -618,5 +721,13 @@ export const mockExchange: ExchangeService = {
 
   async getActivity(): Promise<{ items: ActivityItem[]; nextCursor: string | null }> {
     return delay({ items: [...state.activity], nextCursor: null });
+  },
+
+  async getActivityDetail(id: string): Promise<ActivityDetail> {
+    const item = state.activity.find((a) => a.id === id);
+    if (!item) {
+      return fail({ code: 'UNKNOWN', message: 'We can’t find that transaction.' });
+    }
+    return delay(buildDetail(item), 350);
   },
 };

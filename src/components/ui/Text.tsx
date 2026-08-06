@@ -20,7 +20,15 @@ export interface TextProps extends RNTextProps {
   sizeDelta?: number;
 }
 
-const MONO_VARIANTS = new Set<TypeToken>([
+/**
+ * Variants that get tabular figures.
+ *
+ * Not the same thing as the mono variants — most of these are set in the sans
+ * face. What they have in common is that they carry digits which either tick
+ * (a live rate) or stack into a column (a list of amounts), and both cases need
+ * every digit to occupy the same width.
+ */
+const TABULAR_VARIANTS = new Set<TypeToken>([
   'display',
   'figure',
   'amount',
@@ -46,7 +54,7 @@ export function Text({
       {...rest}
       style={[
         base,
-        MONO_VARIANTS.has(variant) && tabular,
+        TABULAR_VARIANTS.has(variant) && tabular,
         { color: resolved },
         align ? { textAlign: align } : null,
         sizeDelta

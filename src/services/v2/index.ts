@@ -11,6 +11,7 @@
 
 import { features } from '@/constants/features';
 import type {
+  ActivityDetail,
   ActivityItem,
   Asset,
   Bank,
@@ -101,6 +102,8 @@ export interface ExchangeService {
 
   // History
   getActivity(cursor?: string): Promise<{ items: ActivityItem[]; nextCursor: string | null }>;
+  /** The receipt for one item — richer than the feed row. */
+  getActivityDetail(id: string): Promise<ActivityDetail>;
 }
 
 /**

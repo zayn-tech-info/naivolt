@@ -177,4 +177,6 @@ export const httpExchange: ExchangeService = {
     }),
 
   getActivity: (cursor) => get(`/activity${cursor ? `?cursor=${cursor}` : ''}`),
+
+  getActivityDetail: (id) => get(`/activity/${id}`),
 };

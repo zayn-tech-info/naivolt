@@ -1,22 +1,23 @@
 /**
  * Naivolt type system.
  *
- * Two faces, with a hard rule about which does what:
+ * Two faces, with a rule about which does what:
  *
- *   Instrument Sans — everything a person reads. A grotesque with slightly
- *   narrow proportions and real character in the lowercase, so headings have a
- *   voice without needing weight 800 to get there.
+ *   Instrument Sans — everything a person reads, **including money**. A
+ *   grotesque with slightly narrow proportions and real character in the
+ *   lowercase, so headings have a voice without needing weight 800 to get there.
+ *   Balances and amounts sit in it too: a naira figure is something you read,
+ *   not something you audit character by character, and the sans keeps the
+ *   balance feeling like part of the interface rather than like a terminal.
  *
- *   Geist Mono — every number that represents money, and every string that
- *   must be verified character by character: balances, rates, amounts, wallet
- *   addresses, tx hashes, confirmation counts, OTP and PIN digits.
+ *   Geist Mono — reserved for strings that must be verified glyph by glyph, and
+ *   nothing else: wallet addresses, tx hashes, references, countdowns and
+ *   confirmation counters. Monospace here is a signal that says "check this
+ *   exactly", which only works while it stays rare.
  *
- * The mono rule is the deliberate choice in this design. The backend is a
- * double-entry ledger where exact digits are the entire product, and a
- * monospaced numeral says "this figure is exact" in a way a proportional face
- * cannot. It also fixes a real problem for free: digits stop shifting
- * horizontally as values tick, and it gives Android the tabular alignment that
- * `fontVariant: ['tabular-nums']` only delivers on iOS.
+ * Figures still align. `tabular` (below) is applied to the numeric variants
+ * regardless of face, so digits don't shift horizontally as a value ticks and
+ * columns of amounts line up.
  *
  * Weights are named, never inlined. If a style isn't in this file it doesn't
  * exist — that constraint is what stops the ad-hoc 10/11/12/13/14/15/16/18px

@@ -449,6 +449,42 @@ separate deposit and payout histories, since "where is my money" is one question
   from `kind` and renders it from the *user's* perspective — a deposit reads as
   money in. Do not send the ledger's own signs (liabilities negative per
   ARCHITECTURE.md §5); that's correct accounting and would render backwards.
+### `GET /activity/{id}`
+
+The receipt. Everything the feed row carries, plus the evidence a user needs when
+something is delayed or disputed.
+
+```json
+{
+  "id": "a2", "kind": "payout", "asset": "NGN",
+  "amount": "150000.0000", "ngnValue": "150000.0000",
+  "status": "settled", "createdAt": "2026-08-02T09:12:00Z",
+  "reference": "NV-A2",
+  "bankName": "GTBank", "accountNumber": "••••••4821", "accountName": "ADEYEMI DIVINE",
+  "fee": "0.0000",
+  "timeline": [
+    { "label": "Requested",        "at": "2026-08-02T09:12:00Z", "state": "done" },
+    { "label": "Sent to your bank","at": "2026-08-02T09:12:04Z", "state": "done" },
+    { "label": "Settled",          "at": "2026-08-02T09:13:31Z", "state": "done" }
+  ]
+}
+```
+
+All fields beyond `ActivityItem` are optional and kind-specific — a payout has no
+`txHash`, a deposit has no `bankName`. The screen renders what's present.
+
+**`timeline` is the important one.** `state` ∈ `done | current | pending |
+failed`, `at` is null for a step not yet reached. "Pending" is not an answer to
+"where is my money" — a user wants the step it's sitting on, so please send the
+real sequence per kind (a deposit confirms on chain, a gift card is reviewed by a
+person, a payout settles at a bank) rather than a generic three-step shape.
+
+`reference` should be what support can look up. The client shows it prominently
+and includes it in the shared receipt.
+
+The client polls this every 10s while the item is in flight and stops on a
+terminal status, so it doesn't need a websocket.
+
 - `detail` is a short, already-formatted human string for the row's subtitle
   (`"GTBank ···4821"`, `"TRC-20 · 20 confirmations"`). Server-side because it
   varies by kind and the client shouldn't hold a formatting switch per kind.

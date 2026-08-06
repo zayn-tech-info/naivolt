@@ -298,6 +298,60 @@ export interface GiftCardSubmission {
   rejectionReason?: string;
 }
 
+// ── Activity detail ─────────────────────────────────────────────────
+
+/** One step in a transaction's progress. */
+export interface TimelineStep {
+  label: string;
+  /** ISO timestamp, or null for a step not yet reached. */
+  at: string | null;
+  state: 'done' | 'current' | 'pending' | 'failed';
+}
+
+/**
+ * The receipt.
+ *
+ * Everything the feed row carries, plus the evidence a user needs when
+ * something is disputed or delayed: a reference to quote at support, the chain
+ * transaction, the destination account, and where in the process it currently
+ * sits.
+ *
+ * Fields are optional and kind-specific — a payout has no tx hash, a deposit has
+ * no bank account. The screen renders whatever is present rather than reserving
+ * space for every kind.
+ */
+export interface ActivityDetail extends ActivityItem {
+  /** Quotable at support. Present for anything that moved money. */
+  reference?: string;
+  /** Ordered progress. Rendered as the receipt's spine. */
+  timeline?: TimelineStep[];
+
+  // Deposits
+  txHash?: string;
+  /** Full URL to a block explorer for `txHash`. */
+  explorerUrl?: string;
+  network?: string;
+  confirmations?: number;
+  minConfirmations?: number;
+
+  // Payouts
+  bankName?: string;
+  accountNumber?: string;
+  accountName?: string;
+
+  // Gift cards
+  brandName?: string;
+  faceValue?: Decimal;
+  /** Face-value currency, e.g. "USD". */
+  currency?: string;
+
+  /** Rate applied, where one was. */
+  rate?: Decimal;
+  fee?: Decimal;
+  /** Present when the thing failed or was rejected. */
+  failureReason?: string;
+}
+
 // ── Limits ──────────────────────────────────────────────────────────
 
 export interface Limits {
