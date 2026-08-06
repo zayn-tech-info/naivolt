@@ -1,6 +1,7 @@
 //! Shared application state.
 
 use crate::notify::AnyNotifier;
+use crate::payout_provider::AnyPayoutProvider;
 use crate::pricing::Rates;
 use crate::signer::AnyAddressProvider;
 use naivolt_auth::session::SessionKeys;
@@ -14,4 +15,5 @@ pub struct AppState {
     pub notifier: Arc<AnyNotifier>,
     pub addresses: Arc<AnyAddressProvider>,
     pub rates: Rates,
+    pub payouts: Arc<AnyPayoutProvider>,
 }

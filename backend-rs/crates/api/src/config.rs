@@ -39,6 +39,8 @@ pub struct Config {
     /// Dev-only: the mnemonic used for in-process derivation.
     pub dev_mnemonic: Option<String>,
 
+    /// None outside production, where account resolution falls back to a stub.
+    pub paystack_secret_key: Option<String>,
     /// Naira per US dollar before margin. Tracks the parallel market, not the
     /// official rate — see `pricing.rs` for why that distinction matters.
     pub usd_ngn_mid: Decimal,
@@ -80,6 +82,7 @@ impl Config {
                 .unwrap_or_else(|_| "Naivolt <no-reply@naivolt.com>".into()),
             signer_url,
             dev_mnemonic,
+            paystack_secret_key: env::var("PAYSTACK_SECRET_KEY").ok().filter(|s| !s.is_empty()),
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
         };
@@ -112,6 +115,14 @@ impl Config {
         }
         if self.resend_api_key.is_none() {
             bail!("RESEND_API_KEY is required in production to deliver email codes");
+        }
+
+        // Without this, account resolution falls back to a stub that invents
+        // plausible names for any number. In production that would confirm every
+        // account a user typed, including the mistyped ones — which is precisely
+        // the failure name enquiry exists to prevent.
+        if self.paystack_secret_key.is_none() {
+            bail!("PAYSTACK_SECRET_KEY is required in production — account names must be verified, not invented");
         }
 
         Ok(())

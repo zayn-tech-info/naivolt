@@ -10,7 +10,10 @@ mod auth_routes;
 mod config;
 mod error;
 mod middleware;
+mod bank_routes;
 mod notify;
+mod payout_provider;
+mod payout_routes;
 mod pricing;
 mod rate_routes;
 mod signer;
@@ -86,6 +89,15 @@ async fn main() -> Result<()> {
         notifier: Arc::new(notifier),
         addresses: Arc::new(addresses),
         rates: pricing::Rates::new(&config),
+        payouts: Arc::new(match &config.paystack_secret_key {
+            Some(key) => payout_provider::AnyPayoutProvider::Paystack(
+                payout_provider::PaystackProvider::new(key.clone()),
+            ),
+            None => {
+                tracing::warn!("no payout provider configured — account names will be stubbed");
+                payout_provider::AnyPayoutProvider::Stub(payout_provider::StubProvider)
+            }
+        }),
     };
 
     let app = Router::new()
@@ -94,7 +106,9 @@ async fn main() -> Result<()> {
             "/api/v1",
             auth_routes::routes()
                 .merge(user_routes::routes())
-                .merge(rate_routes::routes()),
+                .merge(rate_routes::routes())
+                .merge(bank_routes::routes())
+                .merge(payout_routes::routes()),
         )
         .layer(TraceLayer::new_for_http())
         // A slow client must not hold a database connection open indefinitely.
