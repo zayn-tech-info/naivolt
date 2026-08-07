@@ -16,4 +16,7 @@ pub struct AppState {
     pub addresses: Arc<AnyAddressProvider>,
     pub rates: Rates,
     pub payouts: Arc<AnyPayoutProvider>,
+    /// Development only: when set, every OTP challenge uses this code instead of
+    /// a random one. Guaranteed None in production by Config validation.
+    pub dev_otp_code: Option<String>,
 }

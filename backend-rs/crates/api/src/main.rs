@@ -74,6 +74,15 @@ async fn main() -> Result<()> {
         notify::AnyNotifier::Log(notify::LogNotifier)
     };
 
+    if let Some(code) = &config.dev_otp_code {
+        // Loud on purpose. Anyone reading this log should immediately understand
+        // that sign-in is currently bypassable.
+        tracing::warn!(
+            code = %code,
+            "DEV ONLY — every OTP is this fixed code; sign-in is not protected"
+        );
+    }
+
     let addresses = match (&config.signer_url, &config.dev_mnemonic) {
         (Some(url), _) => signer::AnyAddressProvider::Remote(signer::RemoteSigner::new(url.clone())),
         (None, Some(mnemonic)) => {
@@ -91,6 +100,7 @@ async fn main() -> Result<()> {
         notifier: Arc::new(notifier),
         addresses: Arc::new(addresses),
         rates: pricing::Rates::new(&config),
+        dev_otp_code: config.dev_otp_code.clone(),
         payouts: Arc::new(match &config.paystack_secret_key {
             Some(key) => payout_provider::AnyPayoutProvider::Paystack(
                 payout_provider::PaystackProvider::new(key.clone()),

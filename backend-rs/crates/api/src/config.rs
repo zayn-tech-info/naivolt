@@ -5,6 +5,9 @@
 //! and only fails when the first user signs in is worse than one that never
 //! started.
 
+/// The fixed code used in development when DEV_OTP_CODE is unset.
+const DEFAULT_DEV_OTP_CODE: &str = "021236";
+
 use anyhow::{bail, Context, Result};
 use rust_decimal::Decimal;
 use std::env;
@@ -38,6 +41,10 @@ pub struct Config {
     pub signer_url: Option<String>,
     /// Dev-only: the mnemonic used for in-process derivation.
     pub dev_mnemonic: Option<String>,
+    /// Dev-only: a fixed OTP code, so signing in locally does not require
+    /// digging the real code out of the server log. Never Some in production —
+    /// see `validate_for_environment`.
+    pub dev_otp_code: Option<String>,
 
     /// None outside production, where account resolution falls back to a stub.
     pub paystack_secret_key: Option<String>,
@@ -67,6 +74,27 @@ impl Config {
             );
         }
 
+        // Defaults on in development. A fixed code is a total bypass of the
+        // one factor protecting an account, so it is opt-*out* only where no
+        // real account can exist, and refused outright in production below.
+        let dev_otp_code = match env::var("DEV_OTP_CODE") {
+            Ok(raw) if raw.trim().is_empty() => None,
+            Ok(raw) => Some(raw.trim().to_owned()),
+            Err(_) if matches!(environment, Environment::Development) => {
+                Some(DEFAULT_DEV_OTP_CODE.to_owned())
+            }
+            Err(_) => None,
+        };
+
+        if let Some(code) = &dev_otp_code {
+            // A code that is not six digits could never be entered, so the
+            // fallback would silently be a random one and the setting would look
+            // broken rather than ignored.
+            if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+                bail!("DEV_OTP_CODE must be exactly 6 digits, got {code:?}");
+            }
+        }
+
         let signer_url = env::var("SIGNER_URL").ok().filter(|s| !s.is_empty());
         let dev_mnemonic = env::var("DEV_MNEMONIC").ok().filter(|s| !s.is_empty());
 
@@ -82,6 +110,7 @@ impl Config {
                 .unwrap_or_else(|_| "Naivolt <no-reply@naivolt.com>".into()),
             signer_url,
             dev_mnemonic,
+            dev_otp_code,
             paystack_secret_key: env::var("PAYSTACK_SECRET_KEY").ok().filter(|s| !s.is_empty()),
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
@@ -106,6 +135,11 @@ impl Config {
         }
         if self.dev_mnemonic.is_some() {
             bail!("DEV_MNEMONIC must not be set in production");
+        }
+        // The single most dangerous setting in this file. A fixed code means
+        // anyone who knows it owns every account on the platform.
+        if self.dev_otp_code.is_some() {
+            bail!("DEV_OTP_CODE must not be set in production — it bypasses sign-in entirely");
         }
 
         // Without these, a user can request a code that is never delivered and
@@ -152,4 +186,63 @@ fn require(key: &str) -> Result<String> {
                 Ok(v)
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A production config with everything required present, so each test can
+    /// flip exactly one field and assert on that.
+    fn production_config() -> Config {
+        Config {
+            environment: Environment::Production,
+            bind_addr: "0.0.0.0:8000".into(),
+            database_url: "postgres://localhost/naivolt".into(),
+            jwt_secret: "x".repeat(48),
+            termii_api_key: Some("k".into()),
+            termii_sender_id: "Naivolt".into(),
+            resend_api_key: Some("k".into()),
+            email_from: "Naivolt <no-reply@naivolt.com>".into(),
+            signer_url: Some("https://signer.internal".into()),
+            dev_mnemonic: None,
+            dev_otp_code: None,
+            paystack_secret_key: Some("sk_live".into()),
+            usd_ngn_mid: Decimal::from(1530),
+            spread_ngn_per_usd: Decimal::from(10),
+        }
+    }
+
+    #[test]
+    fn a_valid_production_config_passes() {
+        assert!(production_config().validate_for_environment().is_ok());
+    }
+
+    /// The most important assertion in this file. A fixed OTP means anyone who
+    /// knows six digits owns every account, so production must refuse to start
+    /// rather than run with it.
+    #[test]
+    fn production_refuses_to_boot_with_a_fixed_otp_code() {
+        let mut config = production_config();
+        config.dev_otp_code = Some("021236".into());
+
+        let err = config.validate_for_environment().unwrap_err().to_string();
+        assert!(err.contains("DEV_OTP_CODE"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn production_refuses_in_process_key_derivation() {
+        let mut config = production_config();
+        config.dev_mnemonic = Some("test test test".into());
+        assert!(config.validate_for_environment().is_err());
+    }
+
+    #[test]
+    fn production_refuses_a_stubbed_payout_provider() {
+        // Without a real provider, account names are invented rather than
+        // verified — which would confirm every mistyped number a user entered.
+        let mut config = production_config();
+        config.paystack_secret_key = None;
+        assert!(config.validate_for_environment().is_err());
+    }
 }

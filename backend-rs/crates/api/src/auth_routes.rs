@@ -83,7 +83,13 @@ async fn request_otp(
         }
     }
 
-    let code = naivolt_auth::otp::generate_code();
+    // A fixed code in development saves reading it out of the server log on
+    // every sign-in. `state.dev_otp_code` is None in production — Config refuses
+    // to boot otherwise — so this branch cannot exist where real accounts do.
+    let code = match &state.dev_otp_code {
+        Some(fixed) => fixed.clone(),
+        None => naivolt_auth::otp::generate_code(),
+    };
     let challenge = OtpChallenge::new(&identifier, &code, now)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
 
