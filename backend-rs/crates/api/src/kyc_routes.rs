@@ -159,9 +159,12 @@ async fn status(
 pub struct SubmitKycBody {
     /// Full BVN or NIN. Never stored — only the last four digits are kept.
     pub id_number: String,
-    pub full_name: String,
-    /// ISO date, YYYY-MM-DD.
-    pub date_of_birth: String,
+    /// Optional. Falls back to the name on the profile, which is where the app
+    /// collects it — re-asking at every tier is how a two-tier journey turns
+    /// into the same form three times.
+    pub full_name: Option<String>,
+    /// Optional, ISO date. Falls back to the profile.
+    pub date_of_birth: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -205,6 +208,13 @@ async fn submit(
         ));
     }
 
+    // Whatever the caller did not send comes from the profile.
+    let (stored_name, stored_dob): (Option<String>, Option<chrono::NaiveDate>) =
+        sqlx::query_as("SELECT display_name, date_of_birth FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_one(&state.db)
+            .await?;
+
     let digits: String = body.id_number.chars().filter(char::is_ascii_digit).collect();
     // BVN and NIN are both 11 digits in Nigeria.
     if digits.len() != 11 {
@@ -214,15 +224,30 @@ async fn submit(
         )));
     }
 
-    let full_name = body.full_name.trim();
+    let full_name = body
+        .full_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .or(stored_name)
+        .ok_or_else(|| {
+            ApiError::BadRequest("Add your full name in your profile first.".into())
+        })?;
+
     if full_name.split_whitespace().count() < 2 {
         return Err(ApiError::BadRequest(
             "Enter your full name as it appears on your ID.".into(),
         ));
     }
 
-    let dob = chrono::NaiveDate::parse_from_str(body.date_of_birth.trim(), "%Y-%m-%d")
-        .map_err(|_| ApiError::BadRequest("Enter your date of birth as YYYY-MM-DD.".into()))?;
+    let dob = match body.date_of_birth.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        Some(raw) => chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .map_err(|_| ApiError::BadRequest("Enter your date of birth as YYYY-MM-DD.".into()))?,
+        None => stored_dob.ok_or_else(|| {
+            ApiError::BadRequest("Add your date of birth in your profile first.".into())
+        })?,
+    };
 
     // 18 is the floor for holding a bank account in Nigeria, so anyone below it
     // could never receive a payout regardless of what we verify.
@@ -261,9 +286,24 @@ async fn submit(
     .bind(status)
     .bind(bvn_last4)
     .bind(nin_last4)
-    .bind(full_name)
+    .bind(&full_name)
     .bind(dob)
     .bind(auto_approve.then(chrono::Utc::now))
+    .execute(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    // Anything supplied here also lands on the profile: verifying once should
+    // leave the account more complete, not just the submission.
+    sqlx::query(
+        "UPDATE users
+            SET display_name  = COALESCE(display_name, $1),
+                date_of_birth = COALESCE(date_of_birth, $2)
+          WHERE id = $3",
+    )
+    .bind(&full_name)
+    .bind(dob)
+    .bind(user.id)
     .execute(&mut *tx)
     .await
     .map_err(anyhow::Error::from)?;

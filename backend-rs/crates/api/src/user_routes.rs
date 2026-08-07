@@ -40,6 +40,10 @@ pub struct MeResponse {
     pub display_name: Option<String>,
     /// Seed for the generated avatar. Stable per user unless they shuffle it.
     pub avatar_seed: Option<String>,
+    /// ISO date. Held here so verification never re-asks for it.
+    pub date_of_birth: Option<String>,
+    /// Everything verification needs, minus the ID number itself.
+    pub profile_complete: bool,
     pub kyc_tier: i16,
     pub has_pin: bool,
     pub can_withdraw: bool,
@@ -54,8 +58,9 @@ async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<chrono::NaiveDate>,
     ) = sqlx::query_as(
-        "SELECT phone, email, kyc_tier, pin_hash, display_name, avatar_seed
+        "SELECT phone, email, kyc_tier, pin_hash, display_name, avatar_seed, date_of_birth
            FROM users WHERE id = $1",
     )
     .bind(user.id)
@@ -68,8 +73,14 @@ async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<
         id: user.id,
         phone: row.0,
         email: row.1,
-        display_name: row.4,
+        display_name: row.4.clone(),
         avatar_seed: row.5,
+        date_of_birth: row.6.map(|d| d.to_string()),
+        // The client uses this to decide whether verification can be a single
+        // field or has to collect the rest first.
+        profile_complete: row.4.as_deref().map(|n| n.split_whitespace().count() >= 2)
+            == Some(true)
+            && row.6.is_some(),
         kyc_tier: row.2,
         has_pin: row.3.is_some(),
         can_withdraw: tier.can_withdraw(),
@@ -82,6 +93,12 @@ async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<
 pub struct UpdateMeBody {
     pub display_name: Option<String>,
     pub avatar_seed: Option<String>,
+    /// Added by phone-signup users, who have no email until they choose to give
+    /// one. Verification and receipts both want it.
+    pub email: Option<String>,
+    /// ISO date, YYYY-MM-DD. Held on the user so verification does not have to
+    /// ask for it again at every tier.
+    pub date_of_birth: Option<String>,
 }
 
 /// Updates the profile fields a user owns.
@@ -107,17 +124,67 @@ async fn update_me(
         }
     }
 
-    sqlx::query(
+    // Deliberately permissive. Anything past "one @ with something either side"
+    // rejects addresses that actually work, and the only proof that an address
+    // is real is sending to it — which the OTP flow already does.
+    if let Some(email) = &body.email {
+        let trimmed = email.trim();
+        let valid = trimmed.len() >= 3
+            && trimmed.matches('@').count() == 1
+            && !trimmed.starts_with('@')
+            && !trimmed.ends_with('@')
+            && !trimmed.contains(' ');
+        if !valid {
+            return Err(ApiError::BadRequest("That email doesn't look right.".into()));
+        }
+    }
+
+    let dob = match &body.date_of_birth {
+        Some(raw) => {
+            let parsed = chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+                .map_err(|_| ApiError::BadRequest("Enter your date of birth as YYYY-MM-DD.".into()))?;
+            // 18 is the floor for holding a Nigerian bank account, so anyone
+            // below it could never receive a payout however well we verify them.
+            let age = (chrono::Utc::now().date_naive() - parsed).num_days() / 365;
+            if age < 18 {
+                return Err(ApiError::BadRequest("You must be 18 or older.".into()));
+            }
+            if age > 120 {
+                return Err(ApiError::BadRequest("Check that date of birth.".into()));
+            }
+            Some(parsed)
+        }
+        None => None,
+    };
+
+    let result = sqlx::query(
         "UPDATE users
-            SET display_name = COALESCE($1, display_name),
-                avatar_seed  = COALESCE($2, avatar_seed)
-          WHERE id = $3",
+            SET display_name  = COALESCE($1, display_name),
+                avatar_seed   = COALESCE($2, avatar_seed),
+                email         = COALESCE($3, email),
+                date_of_birth = COALESCE($4, date_of_birth)
+          WHERE id = $5",
     )
     .bind(body.display_name.as_deref().map(str::trim))
     .bind(body.avatar_seed.as_deref().map(str::trim))
+    .bind(body.email.as_deref().map(|e| e.trim().to_lowercase()))
+    .bind(dob)
     .bind(user.id)
     .execute(&state.db)
-    .await?;
+    .await;
+
+    if let Err(err) = result {
+        // users.email is UNIQUE. Another account holding this address is a
+        // conflict the user can act on, not an internal error.
+        if let Some(db_err) = err.as_database_error() {
+            if db_err.is_unique_violation() {
+                return Err(ApiError::BadRequest(
+                    "That email is already on another account.".into(),
+                ));
+            }
+        }
+        return Err(ApiError::Internal(err.into()));
+    }
 
     me(State(state), user).await
 }

@@ -84,16 +84,22 @@ export interface ExchangeService {
 
   // Profile
   getMe(): Promise<Me>;
-  updateMe(input: { displayName?: string; avatarSeed?: string }): Promise<Me>;
+  updateMe(input: {
+    displayName?: string;
+    avatarSeed?: string;
+    email?: string;
+    /** ISO date, YYYY-MM-DD. */
+    dateOfBirth?: string;
+  }): Promise<Me>;
 
   // KYC
   getKycStatus(): Promise<KycStatus>;
   /** Submits the document the next tier needs. */
   submitKyc(input: {
     idNumber: string;
-    fullName: string;
-    /** ISO date, YYYY-MM-DD. */
-    dateOfBirth: string;
+    /** Optional — falls back to the name and date of birth on the profile. */
+    fullName?: string;
+    dateOfBirth?: string;
   }): Promise<KycSubmission>;
 
   // Gift cards

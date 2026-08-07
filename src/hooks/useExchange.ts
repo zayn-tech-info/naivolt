@@ -175,7 +175,7 @@ export function useUpdateMe() {
   return useMutation<
     Awaited<ReturnType<typeof exchange.updateMe>>,
     ApiError,
-    { displayName?: string; avatarSeed?: string }
+    { displayName?: string; avatarSeed?: string; email?: string; dateOfBirth?: string }
   >({
     mutationFn: (input) => exchange.updateMe(input),
     retry: false,
@@ -202,7 +202,7 @@ export function useSubmitKyc() {
   return useMutation<
     Awaited<ReturnType<typeof exchange.submitKyc>>,
     ApiError,
-    { idNumber: string; fullName: string; dateOfBirth: string }
+    { idNumber: string; fullName?: string; dateOfBirth?: string }
   >({
     mutationFn: (input) => exchange.submitKyc(input),
     retry: false,
@@ -211,6 +211,8 @@ export function useSubmitKyc() {
       // stale the moment this succeeds.
       qc.invalidateQueries({ queryKey: exchangeKeys.kyc });
       qc.invalidateQueries({ queryKey: exchangeKeys.limits });
+      // Verifying backfills name and date of birth onto the profile.
+      qc.invalidateQueries({ queryKey: exchangeKeys.me });
     },
   });
 }

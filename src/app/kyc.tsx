@@ -14,6 +14,11 @@
  *
  * The screen never asks for more than the next tier needs. A single document,
  * one step, rather than a wall of fields for tiers the user may not want.
+ *
+ * Name and date of birth are not asked for here at all — they live on the
+ * profile, which is the one place they are edited. Two places to set a name is
+ * how they drift apart, and the copy that matters at payout time is the one the
+ * bank account has to match.
  */
 
 import { useCallback, useMemo, useState } from 'react';
@@ -34,7 +39,7 @@ import {
   useToast,
 } from '@/components/ui';
 import ScreenHeader from '@/components/navigation/ScreenHeader';
-import { useKycStatus, useSubmitKyc } from '@/hooks/useExchange';
+import { useKycStatus, useMe, useSubmitKyc } from '@/hooks/useExchange';
 import type { TierInfo } from '@/services/v2/types';
 
 /** What each document is called, and what it looks like. */
@@ -57,46 +62,36 @@ export default function KycScreen() {
   const { show } = useToast();
 
   const status = useKycStatus();
+  const me = useMe();
   const submit = useSubmitKyc();
 
   const [idNumber, setIdNumber] = useState('');
-  const [fullName, setFullName] = useState('');
-  const [dob, setDob] = useState('');
   const [error, setError] = useState('');
+
+  // Name and date of birth live on the profile. Collecting them again at the
+  // moment someone is already handing over a BVN turns verification into an
+  // interrogation, so this screen asks for the one thing the profile cannot
+  // hold: the identity number itself.
+  const profileComplete = me.data?.profileComplete ?? false;
 
   const requirement = status.data?.nextRequirement ?? null;
   const document = requirement ? DOCUMENT[requirement] : undefined;
 
   const canSubmit =
-    !!document &&
-    idNumber.replace(/\D/g, '').length === 11 &&
-    fullName.trim().split(/\s+/).length >= 2 &&
-    /^\d{4}-\d{2}-\d{2}$/.test(dob.trim());
+    !!document && profileComplete && idNumber.replace(/\D/g, '').length === 11;
 
   const send = useCallback(async () => {
     setError('');
     try {
-      const result = await submit.mutateAsync({
-        idNumber: idNumber.replace(/\D/g, ''),
-        fullName: fullName.trim(),
-        dateOfBirth: dob.trim(),
-      });
+      // Name and date of birth are omitted deliberately — the server reads them
+      // from the profile, which is the single place they are edited.
+      const result = await submit.mutateAsync({ idNumber: idNumber.replace(/\D/g, '') });
       show(result.message, result.status === 'approved' ? 'positive' : 'neutral');
       setIdNumber('');
-      setFullName('');
-      setDob('');
     } catch (err) {
       setError((err as { message?: string })?.message ?? 'Could not verify those details.');
     }
-  }, [submit, idNumber, fullName, dob, show]);
-
-  // Date entry as a plain field, auto-punctuated. A picker is more taps for a
-  // value people know by heart and type faster than they scroll to.
-  const onDobChange = useCallback((raw: string) => {
-    const digits = raw.replace(/\D/g, '').slice(0, 8);
-    const parts = [digits.slice(0, 4), digits.slice(4, 6), digits.slice(6, 8)].filter(Boolean);
-    setDob(parts.join('-'));
-  }, []);
+  }, [submit, idNumber, show]);
 
   const ladder = useMemo(() => status.data?.tiers ?? [], [status.data]);
   const currentTier = status.data?.tier ?? 0;
@@ -202,35 +197,43 @@ export default function KycScreen() {
             ) : document ? (
               <Stagger index={2}>
                 <Section title={`Add your ${requirement?.toUpperCase()}`}>
-                  <Input
-                    label={document.label}
-                    value={idNumber}
-                    onChangeText={(t) => setIdNumber(t.replace(/\D/g, '').slice(0, 11))}
-                    placeholder="12345678901"
-                    keyboardType={document.keyboard}
-                    maxLength={11}
-                    mono
-                    hint={document.hint}
-                  />
-
-                  <Input
-                    label="Full name"
-                    value={fullName}
-                    onChangeText={setFullName}
-                    placeholder="As it appears on your ID"
-                    autoCapitalize="words"
-                    autoCorrect={false}
-                  />
-
-                  <Input
-                    label="Date of birth"
-                    value={dob}
-                    onChangeText={onDobChange}
-                    placeholder="YYYY-MM-DD"
-                    keyboardType="number-pad"
-                    maxLength={10}
-                    mono
-                  />
+                  {profileComplete ? (
+                    <Input
+                      label={document.label}
+                      value={idNumber}
+                      onChangeText={(t) => setIdNumber(t.replace(/\D/g, '').slice(0, 11))}
+                      placeholder="12345678901"
+                      keyboardType={document.keyboard}
+                      maxLength={11}
+                      mono
+                      hint={document.hint}
+                    />
+                  ) : (
+                    // Blocked rather than duplicating the fields here. Two places
+                    // to set a name is how they drift apart, and the one that
+                    // matters at payout is the profile.
+                    <Surface
+                      level={1}
+                      accentEdge={c.warning}
+                      style={{ flexDirection: 'row', gap: space.base, marginBottom: space.comfy }}
+                    >
+                      <Ionicons name="person-outline" size={19} color={c.warning} />
+                      <View style={{ flex: 1, gap: space.snug }}>
+                        <Text variant="subheading">Complete your profile first</Text>
+                        <Text variant="bodySmall" color="secondaryText">
+                          We need your full name and date of birth before we can verify you. Add
+                          them once and this becomes a single field.
+                        </Text>
+                        <Button
+                          title="Go to profile"
+                          variant="secondary"
+                          size="sm"
+                          onPress={() => router.push('/(tabs)/(main)/profile')}
+                          style={{ alignSelf: 'flex-start' }}
+                        />
+                      </View>
+                    </Surface>
+                  )}
 
                   {error ? (
                     <Surface
@@ -243,6 +246,16 @@ export default function KycScreen() {
                         {error}
                       </Text>
                     </Surface>
+                  ) : null}
+
+                  {profileComplete ? (
+                    <Text
+                      variant="caption"
+                      color="tertiaryText"
+                      style={{ marginBottom: space.comfy }}
+                    >
+                      Verifying as {me.data?.displayName} · {me.data?.dateOfBirth}
+                    </Text>
                   ) : null}
 
                   <Button

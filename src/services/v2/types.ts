@@ -360,6 +360,10 @@ export interface Me {
   email: string | null;
   displayName: string | null;
   avatarSeed: string | null;
+  /** ISO date. Held on the user so verification never re-asks. */
+  dateOfBirth: string | null;
+  /** Everything verification needs except the ID number itself. */
+  profileComplete: boolean;
   kycTier: number;
   hasPin: boolean;
   canWithdraw: boolean;
