@@ -159,23 +159,79 @@ export function Money({
       accessible
       accessibilityLabel={label}
     >
+      {/* Siblings, not nested Texts.
+
+          Nesting a smaller Text inside a larger one is the obvious way to build
+          "₦1,240,500.00" with three weights, and it renders correctly right up
+          until the parent also has to shrink to fit — at which point iOS lays
+          the child out against the parent's original size and the symbol
+          collides with the first digit. Laying them out as siblings on a shared
+          baseline gives the same result with no interaction between the two. */}
+      {prefix ? (
+        <Animated.Text
+          style={[base, tabular, animatedColor, animatedStyle, numberStyle]}
+          allowFontScaling={false}
+        >
+          {prefix}
+        </Animated.Text>
+      ) : null}
+
+      {symbol ? (
+        <Animated.Text
+          style={[
+            base,
+            tabular,
+            animatedStyle,
+            {
+              fontSize: symbolSize,
+              lineHeight: base.lineHeight,
+              color: c.secondaryText,
+              // The display sizes carry negative tracking, which is right for a
+              // run of digits and wrong on a lone symbol: applied after the
+              // glyph it drags the next element back over it, which is what put
+              // the ₦ through the middle of the 0. Neutralised, with an explicit
+              // gap so the spacing is a decision rather than a leftover.
+              letterSpacing: 0,
+              marginRight: Math.max(2, Math.round(base.fontSize * 0.06)),
+            },
+          ]}
+          allowFontScaling={false}
+        >
+          {symbol}
+        </Animated.Text>
+      ) : null}
+
       <Animated.Text
         style={[base, tabular, animatedColor, animatedStyle, numberStyle]}
         allowFontScaling={false}
+        numberOfLines={1}
+        // Deliberately not `adjustsFontSizeToFit`. Inside a baseline-aligned row
+        // it shrinks the glyph without telling the row, so neighbours lay out
+        // against the original width and end up overlapping. A long balance
+        // truncating is a worse-looking edge case than every balance being
+        // wrong, so the row wraps instead — see the container's flexWrap.
       >
-        {prefix}
-        {symbol ? (
-          <Animated.Text style={{ fontSize: symbolSize, color: c.secondaryText }}>
-            {symbol}
-          </Animated.Text>
-        ) : null}
         {int}
-        {frac ? (
-          <Animated.Text style={{ fontSize: fractionSize, color: c.secondaryText }}>
-            {frac}
-          </Animated.Text>
-        ) : null}
       </Animated.Text>
+
+      {frac ? (
+        <Animated.Text
+          style={[
+            base,
+            tabular,
+            animatedStyle,
+            {
+              fontSize: fractionSize,
+              lineHeight: base.lineHeight,
+              color: c.secondaryText,
+              letterSpacing: 0,
+            },
+          ]}
+          allowFontScaling={false}
+        >
+          {frac}
+        </Animated.Text>
+      ) : null}
       {suffix ? (
         <Animated.Text
           style={{

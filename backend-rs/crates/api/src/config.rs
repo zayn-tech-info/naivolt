@@ -41,6 +41,9 @@ pub struct Config {
     pub signer_url: Option<String>,
     /// Dev-only: the mnemonic used for in-process derivation.
     pub dev_mnemonic: Option<String>,
+    /// Dev-only: approve KYC submissions on the spot, so a local build can
+    /// reach a tier that permits withdrawal. Never true in production.
+    pub auto_approve_kyc: bool,
     /// Dev-only: a fixed OTP code, so signing in locally does not require
     /// digging the real code out of the server log. Never Some in production —
     /// see `validate_for_environment`.
@@ -95,6 +98,13 @@ impl Config {
             }
         }
 
+        // On in development for the same reason as the fixed OTP: without it the
+        // whole payout path is untestable locally, because tier 0 cannot withdraw.
+        let auto_approve_kyc = match env::var("DEV_AUTO_APPROVE_KYC") {
+            Ok(raw) => raw == "true" || raw == "1",
+            Err(_) => matches!(environment, Environment::Development),
+        };
+
         let signer_url = env::var("SIGNER_URL").ok().filter(|s| !s.is_empty());
         let dev_mnemonic = env::var("DEV_MNEMONIC").ok().filter(|s| !s.is_empty());
 
@@ -111,6 +121,7 @@ impl Config {
             signer_url,
             dev_mnemonic,
             dev_otp_code,
+            auto_approve_kyc,
             paystack_secret_key: env::var("PAYSTACK_SECRET_KEY").ok().filter(|s| !s.is_empty()),
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
@@ -140,6 +151,11 @@ impl Config {
         // anyone who knows it owns every account on the platform.
         if self.dev_otp_code.is_some() {
             bail!("DEV_OTP_CODE must not be set in production — it bypasses sign-in entirely");
+        }
+        // Auto-approval would hand every account a withdrawal limit without any
+        // identity check, which is the AML control this tier system exists for.
+        if self.auto_approve_kyc {
+            bail!("DEV_AUTO_APPROVE_KYC must not be set in production — it skips identity checks");
         }
 
         // Without these, a user can request a code that is never delivered and
@@ -207,6 +223,7 @@ mod tests {
             signer_url: Some("https://signer.internal".into()),
             dev_mnemonic: None,
             dev_otp_code: None,
+            auto_approve_kyc: false,
             paystack_secret_key: Some("sk_live".into()),
             usd_ngn_mid: Decimal::from(1530),
             spread_ngn_per_usd: Decimal::from(10),

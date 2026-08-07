@@ -29,7 +29,12 @@ import { useTheme } from '@/design';
 import { Button, Text } from '@/components/ui';
 import { LightAuthScreen } from '@/components/auth/LightAuthScreen';
 import { useAuthStore } from '@/store/authStore';
-import { saveUser, setToken as persistToken, TOKEN_KEY } from '@/services/tokenStorage';
+import {
+  REFRESH_KEY,
+  saveUser,
+  setToken as persistToken,
+  TOKEN_KEY,
+} from '@/services/tokenStorage';
 import { AuthError, maskIdentifier, requestOtp, verifyOtp } from '@/services/authV2';
 
 const CODE_LENGTH = 6;
@@ -86,6 +91,8 @@ function VerifyScreenContent() {
       try {
         const session = await verifyOtp(identifier, submitted);
         await persistToken(TOKEN_KEY, session.token);
+        // Kept so the next cold start can offer a PIN instead of another SMS.
+        await persistToken(REFRESH_KEY, session.refreshToken);
         setToken(session.token);
         setUser(session.user);
         await saveUser(session.user);

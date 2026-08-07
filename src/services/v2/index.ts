@@ -19,6 +19,9 @@ import type {
   Deposit,
   DepositAddress,
   GiftCardBrand,
+  KycStatus,
+  Me,
+  KycSubmission,
   GiftCardSubmission,
   Limits,
   Payout,
@@ -78,6 +81,20 @@ export interface ExchangeService {
     /** Client-generated UUID — the idempotency key. */
     idempotencyKey: string;
   }): Promise<Payout>;
+
+  // Profile
+  getMe(): Promise<Me>;
+  updateMe(input: { displayName?: string; avatarSeed?: string }): Promise<Me>;
+
+  // KYC
+  getKycStatus(): Promise<KycStatus>;
+  /** Submits the document the next tier needs. */
+  submitKyc(input: {
+    idNumber: string;
+    fullName: string;
+    /** ISO date, YYYY-MM-DD. */
+    dateOfBirth: string;
+  }): Promise<KycSubmission>;
 
   // Gift cards
   /** Brands we buy, with per-country rates. */

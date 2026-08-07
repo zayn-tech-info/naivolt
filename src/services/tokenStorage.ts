@@ -7,6 +7,15 @@
 const PREFIX = 'naivolt_secure_';
 
 export const TOKEN_KEY = 'naivolt_token';
+/**
+ * The long-lived refresh token.
+ *
+ * Previously discarded, which is why closing the app meant signing in by SMS
+ * again: the access token lasts 15 minutes and nothing outlived it. Kept in the
+ * same secure store as the access token — it is the credential that lets a
+ * returning user unlock with a PIN instead of another code.
+ */
+export const REFRESH_KEY = 'naivolt_refresh';
 export const USER_KEY = 'naivolt_user';
 
 const memoryStore: Record<string, string> = {};
@@ -139,5 +148,6 @@ export async function getSavedUser(): Promise<object | null> {
 
 export async function clearSession(): Promise<void> {
   await removeToken(TOKEN_KEY);
+  await removeToken(REFRESH_KEY);
   await removeToken(USER_KEY);
 }

@@ -13,6 +13,7 @@ mod middleware;
 mod activity_routes;
 mod bank_routes;
 mod giftcard_routes;
+mod kyc_routes;
 mod notify;
 mod payout_provider;
 mod payout_routes;
@@ -101,6 +102,7 @@ async fn main() -> Result<()> {
         addresses: Arc::new(addresses),
         rates: pricing::Rates::new(&config),
         dev_otp_code: config.dev_otp_code.clone(),
+        auto_approve_kyc: config.auto_approve_kyc,
         payouts: Arc::new(match &config.paystack_secret_key {
             Some(key) => payout_provider::AnyPayoutProvider::Paystack(
                 payout_provider::PaystackProvider::new(key.clone()),
@@ -123,7 +125,8 @@ async fn main() -> Result<()> {
                 .merge(payout_routes::routes())
                 .merge(activity_routes::routes())
                 .merge(giftcard_routes::routes())
-                .merge(giftcard_routes::push_routes()),
+                .merge(giftcard_routes::push_routes())
+                .merge(kyc_routes::routes()),
         )
         .layer(TraceLayer::new_for_http())
         // A slow client must not hold a database connection open indefinitely.

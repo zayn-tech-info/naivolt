@@ -19,4 +19,6 @@ pub struct AppState {
     /// Development only: when set, every OTP challenge uses this code instead of
     /// a random one. Guaranteed None in production by Config validation.
     pub dev_otp_code: Option<String>,
+    /// Development only: approve KYC on submission. False in production.
+    pub auto_approve_kyc: bool,
 }

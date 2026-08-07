@@ -21,6 +21,7 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/otp/request", post(request_otp))
         .route("/auth/otp/verify", post(verify_otp))
         .route("/auth/refresh", post(refresh))
+        .route("/auth/unlock", post(unlock))
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +274,75 @@ pub struct RefreshBody {
 pub struct RefreshResponse {
     pub token: String,
     pub refresh_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockBody {
+    pub refresh_token: String,
+    pub pin: String,
+}
+
+/// Unlock a returning device with a PIN.
+///
+/// Someone who has signed in before and still holds a valid refresh token should
+/// not be sent back through SMS. They have already proved they own the number;
+/// making them do it again on every cold start is friction that buys nothing,
+/// and it costs a real SMS every time.
+///
+/// So this is the returning-user path: the refresh token proves *this device*
+/// was signed in, and the PIN proves *this person* is holding it. Both are
+/// required — a stolen phone with a live token still cannot get in, and a known
+/// PIN is useless without the device.
+///
+/// The PIN is checked server-side against the stored Argon2 hash. It is never
+/// written to the device in any form, so a phone dump yields nothing to test
+/// offline.
+async fn unlock(
+    State(state): State<AppState>,
+    Json(body): Json<UnlockBody>,
+) -> ApiResult<Json<RefreshResponse>> {
+    let presented = hash_refresh(&body.refresh_token);
+
+    // Resolve the session first so the PIN is checked against the right user,
+    // and so an invalid token fails before any PIN work is done.
+    let row: Option<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT s.user_id, u.pin_hash
+           FROM sessions s
+           JOIN users u ON u.id = s.user_id
+          WHERE s.refresh_token_hash = $1 AND s.revoked_at IS NULL",
+    )
+    .bind(&presented)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some((_user_id, pin_hash)) = row else {
+        return Err(ApiError::Unauthorized);
+    };
+
+    // No PIN set means this device cannot use the unlock path — the caller falls
+    // back to a full sign-in, which is also where a PIN gets set.
+    let Some(pin_hash) = pin_hash else {
+        return Err(ApiError::Unauthorized);
+    };
+
+    if !naivolt_auth::verify_pin(&body.pin, &pin_hash)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?
+    {
+        return Err(ApiError::PinInvalid {
+            attempts_remaining: 0,
+        });
+    }
+
+    // PIN is good; rotate the session exactly as a refresh would. Sharing the
+    // path means reuse detection and family revocation apply here too.
+    refresh(
+        State(state),
+        Json(RefreshBody {
+            refresh_token: body.refresh_token,
+        }),
+    )
+    .await
 }
 
 async fn refresh(

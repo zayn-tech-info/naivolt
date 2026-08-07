@@ -103,6 +103,21 @@ export const httpExchange: ExchangeService = {
       { 'Idempotency-Key': idempotencyKey }
     ),
 
+  getMe: () => get('/me'),
+
+  updateMe: async (input) => {
+    try {
+      const res = await api.patch('/me', input);
+      return res.data;
+    } catch (err) {
+      throw toApiError(err);
+    }
+  },
+
+  getKycStatus: () => get('/kyc'),
+
+  submitKyc: (input) => post('/kyc', input),
+
   getGiftCardBrands: () => get('/gift-cards/brands'),
 
   /**

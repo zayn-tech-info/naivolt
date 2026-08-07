@@ -164,6 +164,26 @@ export async function verifyOtp(identifier: string, code: string): Promise<AuthS
   }
 }
 
+/**
+ * Unlock a returning device with a PIN.
+ *
+ * The refresh token proves this device was signed in; the PIN proves the person
+ * holding it is the owner. Both are required, and the PIN is checked
+ * server-side — nothing derived from it is stored on the device, so a phone
+ * dump gives an attacker nothing to test offline.
+ */
+export async function unlockWithPin(
+  refreshToken: string,
+  pin: string,
+): Promise<{ token: string; refreshToken: string }> {
+  try {
+    const res = await client.post('/auth/unlock', { refreshToken, pin });
+    return { token: res.data.token, refreshToken: res.data.refreshToken };
+  } catch (err) {
+    throw toAuthError(err);
+  }
+}
+
 export async function setPin(token: string, pin: string): Promise<void> {
   try {
     await client.post(

@@ -11,6 +11,10 @@ export interface User {
   username?: string;
   email: string;
   phone?: string;
+  /** What the user chose to be called. Not the KYC legal name. */
+  displayName?: string | null;
+  /** Seed for the generated avatar. */
+  avatarSeed?: string | null;
   /** 0 = signed up but unverified. Gates withdrawal, nothing else. */
   kycTier?: number;
   role?: 'user' | 'admin';

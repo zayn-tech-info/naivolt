@@ -18,6 +18,8 @@ export const exchangeKeys = {
   banks: ['v2', 'bank-accounts'] as const,
   banks_list: ['v2', 'banks'] as const,
   giftCardBrands: ['v2', 'gift-card-brands'] as const,
+  kyc: ['v2', 'kyc'] as const,
+  me: ['v2', 'me'] as const,
   deposits: ['v2', 'deposits', 'pending'] as const,
   depositAddress: (asset: Asset, chain: Chain) =>
     ['v2', 'deposit-address', asset, chain] as const,
@@ -157,6 +159,59 @@ export function useRemoveBankAccount() {
     mutationFn: (id) => exchange.removeBankAccount(id),
     retry: false,
     onSuccess: () => qc.invalidateQueries({ queryKey: exchangeKeys.banks }),
+  });
+}
+
+export function useMe() {
+  return useQuery({
+    queryKey: exchangeKeys.me,
+    queryFn: () => exchange.getMe(),
+    staleTime: 60_000,
+  });
+}
+
+export function useUpdateMe() {
+  const qc = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof exchange.updateMe>>,
+    ApiError,
+    { displayName?: string; avatarSeed?: string }
+  >({
+    mutationFn: (input) => exchange.updateMe(input),
+    retry: false,
+    onSuccess: (me) => {
+      // Write straight into the cache as well as invalidating: the name is on
+      // screen while this resolves, and a flash back to the old value before the
+      // refetch lands reads as the save having failed.
+      qc.setQueryData(exchangeKeys.me, me);
+      qc.invalidateQueries({ queryKey: exchangeKeys.me });
+    },
+  });
+}
+
+export function useKycStatus() {
+  return useQuery({
+    queryKey: exchangeKeys.kyc,
+    queryFn: () => exchange.getKycStatus(),
+    staleTime: 30_000,
+  });
+}
+
+export function useSubmitKyc() {
+  const qc = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof exchange.submitKyc>>,
+    ApiError,
+    { idNumber: string; fullName: string; dateOfBirth: string }
+  >({
+    mutationFn: (input) => exchange.submitKyc(input),
+    retry: false,
+    onSuccess: () => {
+      // A tier change moves withdrawal limits, so anything that reads them is
+      // stale the moment this succeeds.
+      qc.invalidateQueries({ queryKey: exchangeKeys.kyc });
+      qc.invalidateQueries({ queryKey: exchangeKeys.limits });
+    },
   });
 }
 

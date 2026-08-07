@@ -352,6 +352,62 @@ export interface ActivityDetail extends ActivityItem {
   failureReason?: string;
 }
 
+// ── Profile ─────────────────────────────────────────────────────────
+
+export interface Me {
+  id: string;
+  phone: string | null;
+  email: string | null;
+  displayName: string | null;
+  avatarSeed: string | null;
+  kycTier: number;
+  hasPin: boolean;
+  canWithdraw: boolean;
+  nextKycStep: string | null;
+}
+
+// ── KYC ─────────────────────────────────────────────────────────────
+
+/** One rung of the verification ladder. */
+export interface TierInfo {
+  tier: number;
+  name: string;
+  requirement: string;
+  /** "0" means withdrawal is not permitted at that tier. */
+  dailyLimitNgn: Decimal;
+}
+
+export interface PendingVerification {
+  targetTier: number;
+  status: string;
+  submittedAt: string;
+  rejectionReason: string | null;
+}
+
+export interface KycStatus {
+  tier: number;
+  canWithdraw: boolean;
+  /** Prose for the prompt. */
+  nextStep: string | null;
+  /**
+   * Which document the next tier needs: bvn | nin | address.
+   *
+   * The client branches on this rather than on `nextStep`, because matching on
+   * an English sentence breaks the moment the copy is reworded.
+   */
+  nextRequirement: 'bvn' | 'nin' | 'address' | null;
+  /** Set while a submission is being reviewed. */
+  pending: PendingVerification | null;
+  dailyLimitNgn: Decimal;
+  tiers: TierInfo[];
+}
+
+export interface KycSubmission {
+  status: string;
+  tier: number;
+  message: string;
+}
+
 // ── Limits ──────────────────────────────────────────────────────────
 
 export interface Limits {

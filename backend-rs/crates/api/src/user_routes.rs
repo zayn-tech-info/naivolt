@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/me", get(me))
+        .route("/me", get(me).patch(update_me))
         .route("/auth/pin", post(set_pin))
         .route("/portfolio", get(portfolio))
         .route("/wallets", get(wallets))
@@ -36,6 +36,10 @@ pub struct MeResponse {
     pub id: Uuid,
     pub phone: Option<String>,
     pub email: Option<String>,
+    /// What the user chose to be called. Never the KYC legal name.
+    pub display_name: Option<String>,
+    /// Seed for the generated avatar. Stable per user unless they shuffle it.
+    pub avatar_seed: Option<String>,
     pub kyc_tier: i16,
     pub has_pin: bool,
     pub can_withdraw: bool,
@@ -43,8 +47,16 @@ pub struct MeResponse {
 }
 
 async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<MeResponse>> {
-    let row: (Option<String>, Option<String>, i16, Option<String>) = sqlx::query_as(
-        "SELECT phone, email, kyc_tier, pin_hash FROM users WHERE id = $1",
+    let row: (
+        Option<String>,
+        Option<String>,
+        i16,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT phone, email, kyc_tier, pin_hash, display_name, avatar_seed
+           FROM users WHERE id = $1",
     )
     .bind(user.id)
     .fetch_one(&state.db)
@@ -56,11 +68,58 @@ async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<
         id: user.id,
         phone: row.0,
         email: row.1,
+        display_name: row.4,
+        avatar_seed: row.5,
         kyc_tier: row.2,
         has_pin: row.3.is_some(),
         can_withdraw: tier.can_withdraw(),
         next_kyc_step: tier.next_step().map(str::to_owned),
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMeBody {
+    pub display_name: Option<String>,
+    pub avatar_seed: Option<String>,
+}
+
+/// Updates the profile fields a user owns.
+///
+/// Deliberately narrow. Phone, email, tier and address index are all either
+/// identity or derived state, and none of them may be changed by a PATCH from
+/// the device — a writable `kyc_tier` here would hand every account an unlimited
+/// withdrawal cap.
+async fn update_me(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<UpdateMeBody>,
+) -> ApiResult<Json<MeResponse>> {
+    if let Some(name) = &body.display_name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::BadRequest("Enter a name.".into()));
+        }
+        // Long enough for a real Nigerian full name, short enough that it cannot
+        // be used to smuggle a paragraph into every screen that greets them.
+        if trimmed.chars().count() > 60 {
+            return Err(ApiError::BadRequest("That name is too long.".into()));
+        }
+    }
+
+    sqlx::query(
+        "UPDATE users
+            SET display_name = COALESCE($1, display_name),
+                avatar_seed  = COALESCE($2, avatar_seed)
+          WHERE id = $3",
+    )
+    .bind(body.display_name.as_deref().map(str::trim))
+    .bind(body.avatar_seed.as_deref().map(str::trim))
+    .bind(user.id)
+    .execute(&state.db)
+    .await?;
+
+    me(State(state), user).await
 }
 
 // ---------------------------------------------------------------------------

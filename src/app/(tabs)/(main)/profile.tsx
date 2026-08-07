@@ -23,14 +23,17 @@
  * the security controls that exist, appearance, and sign out.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { Alert, Switch, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
 import {
+  Avatar,
   Badge,
+  Button,
+  Input,
   Money,
   Screen,
   Section,
@@ -40,7 +43,14 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
-import { useBankAccounts, useLimits, usePortfolio } from '@/hooks/useExchange';
+import {
+  useBankAccounts,
+  useKycStatus,
+  useLimits,
+  useMe,
+  usePortfolio,
+  useUpdateMe,
+} from '@/hooks/useExchange';
 import { signOutCompletely } from '@/services/sessionReset';
 import { useAppStore } from '@/store/appStore';
 import { useAuthStore } from '@/store/authStore';
@@ -60,6 +70,12 @@ export default function ProfileScreen() {
   const portfolio = usePortfolio();
   const accounts = useBankAccounts();
   const limits = useLimits();
+  const kyc = useKycStatus();
+  const me = useMe();
+  const updateMe = useUpdateMe();
+
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
 
   const signOut = useCallback(() => {
     Alert.alert('Sign out?', 'You’ll need to verify your phone again to get back in.', [
@@ -80,9 +96,18 @@ export default function ProfileScreen() {
     ]);
   }, [queryClient, router]);
 
-  // Phone signup collects no name, so fall back through what we might have.
-  const displayName = user?.name || user?.username || user?.phone || 'Your account';
-  const tier = limits.data?.kycTier ?? user?.kycTier ?? 0;
+  const saveName = useCallback(async () => {
+    try {
+      await updateMe.mutateAsync({ displayName: nameDraft.trim() });
+      setEditingName(false);
+      show('Name saved', 'positive');
+    } catch (err) {
+      show((err as { message?: string }).message ?? 'Could not save that name.', 'negative');
+    }
+  }, [updateMe, nameDraft, show]);
+  // Live, not the tier baked into the access token — that can be up to 15
+  // minutes stale and this row is how someone checks whether verifying worked.
+  const tier = kyc.data?.tier ?? limits.data?.kycTier ?? user?.kycTier ?? 0;
   const bankCount = accounts.data?.length ?? 0;
 
   return (
@@ -91,38 +116,41 @@ export default function ProfileScreen() {
         <Text variant="title">Profile</Text>
       </View>
 
-      {/* Identity. An avatar would be decoration — there's no photo to show and
-          no way to set one — so the initial does the job at a fraction of the
-          space. */}
+      {/* Identity. Tapping it edits the name — the profile header is where
+          someone looks to change what they're called, so making it the control
+          avoids a settings row that does the same thing one level deeper. */}
       <Stagger index={0}>
-        <Surface level={1} style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}>
-          <View
-            style={{
-              width: 52,
-              height: 52,
-              borderRadius: 26,
-              backgroundColor: c.accentDim,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <Text variant="heading" color="primaryAccent">
-              {displayName.trim().charAt(0).toUpperCase()}
-            </Text>
-          </View>
+        <Surface
+          level={1}
+          onPress={() => {
+            setNameDraft(me.data?.displayName ?? '');
+            setEditingName(true);
+          }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.base }}
+          accessibilityLabel="Edit your name"
+        >
+          <Avatar name={me.data?.displayName} seed={me.data?.avatarSeed} size={52} />
 
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Text variant="subheading" numberOfLines={1}>
-              {displayName}
-            </Text>
-            {user?.phone || user?.email ? (
+            {me.data?.displayName ? (
+              <Text variant="subheading" numberOfLines={1}>
+                {me.data.displayName}
+              </Text>
+            ) : (
+              // Not a placeholder name. An unnamed account should say so and
+              // offer the fix, rather than showing "there" as if it were a name.
+              <Text variant="subheading" color="primaryAccent" numberOfLines={1}>
+                Add your name
+              </Text>
+            )}
+            {me.data?.phone || me.data?.email ? (
               <Text
                 variant="amountSmall"
                 color="tertiaryText"
                 numberOfLines={1}
                 style={{ marginTop: 2 }}
               >
-                {user.phone ?? user.email}
+                {me.data.phone ?? me.data.email}
               </Text>
             ) : null}
           </View>
@@ -133,6 +161,39 @@ export default function ProfileScreen() {
           />
         </Surface>
       </Stagger>
+
+      {/* Inline rather than a separate screen: one field, and pushing a route
+          for it would lose the context of what is being renamed. */}
+      {editingName ? (
+        <Surface level={1} style={{ marginTop: space.base, gap: space.snug }}>
+          <Input
+            label="Your name"
+            value={nameDraft}
+            onChangeText={setNameDraft}
+            placeholder="Adeyemi Divine"
+            autoCapitalize="words"
+            autoCorrect={false}
+            autoFocus
+            hint="Used to greet you. Verification uses the name on your ID."
+            containerStyle={{ marginBottom: 0 }}
+          />
+          <View style={{ flexDirection: 'row', gap: space.snug }}>
+            <Button
+              title="Cancel"
+              variant="ghost"
+              onPress={() => setEditingName(false)}
+              style={{ flex: 1 }}
+            />
+            <Button
+              title="Save"
+              onPress={saveName}
+              disabled={!nameDraft.trim()}
+              loading={updateMe.isPending}
+              style={{ flex: 1 }}
+            />
+          </View>
+        </Surface>
+      ) : null}
 
       {/* Balance restated here so the profile answers "what do I have" without a
           trip back to home. */}
@@ -158,6 +219,26 @@ export default function ProfileScreen() {
       </Stagger>
 
       <Stagger index={2}>
+        <Section title="Account">
+          <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
+            <Row
+              icon="shield-checkmark-outline"
+              label="Verification"
+              detail={
+                kyc.data
+                  ? kyc.data.canWithdraw
+                    ? `Tier ${tier} · ₦${Number(kyc.data.dailyLimitNgn).toLocaleString('en-NG')} a day`
+                    : 'Required before you can withdraw'
+                  : undefined
+              }
+              onPress={() => router.push('/kyc')}
+              last
+            />
+          </Surface>
+        </Section>
+      </Stagger>
+
+      <Stagger index={3}>
         <Section title="Money">
           <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
             <Row
@@ -183,7 +264,7 @@ export default function ProfileScreen() {
         </Section>
       </Stagger>
 
-      <Stagger index={3}>
+      <Stagger index={4}>
         <Section title="Security">
           <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
             <Row
@@ -204,7 +285,7 @@ export default function ProfileScreen() {
         </Section>
       </Stagger>
 
-      <Stagger index={4}>
+      <Stagger index={5}>
         <Section title="App">
           <Surface level={1} padding={0} style={{ paddingHorizontal: space.comfy }}>
             <ToggleRow
@@ -224,7 +305,7 @@ export default function ProfileScreen() {
         </Section>
       </Stagger>
 
-      <Stagger index={5}>
+      <Stagger index={6}>
         <Surface
           level={1}
           onPress={signOut}

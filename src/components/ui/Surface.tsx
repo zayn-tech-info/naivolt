@@ -8,7 +8,7 @@
  */
 
 import { useCallback } from 'react';
-import { Pressable, View, type ViewProps, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, View, type ViewProps, type ViewStyle } from 'react-native';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '@/design';
@@ -87,15 +87,67 @@ export function Surface({
     );
   }
 
+  // A pressable Surface is wrapped for the press animation, and that wrapper is
+  // what the parent lays out — so anything describing how this sits *among its
+  // siblings* has to move onto it. Leaving `flex` on the inner Pressable made a
+  // row of tiles size to their own text instead of sharing the width evenly,
+  // which is subtle enough to look like a padding bug rather than a structural
+  // one.
+  const flat = (StyleSheet.flatten(style) ?? {}) as ViewStyle;
+  const {
+    flex,
+    flexGrow,
+    flexShrink,
+    flexBasis,
+    alignSelf,
+    width,
+    minWidth,
+    maxWidth,
+    height,
+    minHeight,
+    maxHeight,
+    margin,
+    marginTop,
+    marginBottom,
+    marginLeft,
+    marginRight,
+    marginHorizontal,
+    marginVertical,
+    ...inner
+  } = flat;
+
+  const outer: ViewStyle = {
+    flex,
+    flexGrow,
+    flexShrink,
+    flexBasis,
+    alignSelf,
+    width,
+    minWidth,
+    maxWidth,
+    height,
+    minHeight,
+    maxHeight,
+    margin,
+    marginTop,
+    marginBottom,
+    marginLeft,
+    marginRight,
+    marginHorizontal,
+    marginVertical,
+  };
+
   return (
-    <Animated.View style={animated}>
+    <Animated.View style={[outer, animated]}>
       <Pressable
         {...rest}
         onPress={handlePress}
         onPressIn={onIn}
         onPressOut={onOut}
         accessibilityRole="button"
-        style={[base, style]}
+        // Fills the wrapper, so the press target covers the whole tile rather
+        // than only the area its content happens to occupy.
+        style={[base, inner, { flexGrow: 1 }]}
       >
         {children}
       </Pressable>

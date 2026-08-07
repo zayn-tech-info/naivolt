@@ -9,6 +9,7 @@ export { default as Button, type ButtonProps, type ButtonVariant } from './Butto
 export { default as Surface, type SurfaceProps } from './Surface';
 export { default as Screen, Section, TAB_BAR_CLEARANCE } from './Screen';
 export { default as Input, FieldAction, type InputProps } from './Input';
+export { default as Avatar, type AvatarProps } from './Avatar';
 export { default as Badge, StatusBadge, STATUS_TONE, type StatusTone } from './Badge';
 export { default as Skeleton } from './Skeleton';
 export { default as ListRow, Group, type ListRowProps } from './ListRow';

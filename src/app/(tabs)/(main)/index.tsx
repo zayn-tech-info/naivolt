@@ -44,7 +44,13 @@ import BalanceHero from '@/components/home/BalanceHero';
 import ActionBar, { type Action } from '@/components/home/ActionBar';
 import DepositProgress from '@/components/home/DepositProgress';
 import ActivityRow from '@/components/activity/ActivityRow';
-import { useActivity, usePendingDeposits, usePortfolio } from '@/hooks/useExchange';
+import {
+  useActivity,
+  useKycStatus,
+  useLimits,
+  usePendingDeposits,
+  usePortfolio,
+} from '@/hooks/useExchange';
 import { useAppStore } from '@/store/appStore';
 import { useAuthStore } from '@/store/authStore';
 
@@ -66,6 +72,8 @@ export default function HomeScreen() {
   const portfolio = usePortfolio();
   const activity = useActivity();
   const deposits = usePendingDeposits();
+  const kyc = useKycStatus();
+  const limits = useLimits();
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -147,11 +155,22 @@ export default function HomeScreen() {
           loading={portfolio.isLoading}
           hidden={balanceHidden}
           onToggleHidden={toggleBalanceHidden}
+          canWithdraw={kyc.data?.canWithdraw ?? true}
+          dailyRemaining={
+            kyc.data?.canWithdraw && limits.data
+              ? Number(limits.data.dailyRemainingNgn)
+              : null
+          }
+          onVerify={() => router.push('/kyc')}
         />
       </Stagger>
 
       <Stagger index={1}>
-        <ActionBar actions={actions} />
+        {/* The actions are a separate decision from the balance, not a footer to
+            it. Sitting flush against the card made them read as part of it. */}
+        <View style={{ marginTop: space.section }}>
+          <ActionBar actions={actions} />
+        </View>
       </Stagger>
 
       {/* In-flight deposits only appear when there are any. */}
