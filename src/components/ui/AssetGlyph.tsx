@@ -19,13 +19,13 @@
  * a token logo.
  */
 
-import { View } from 'react-native';
+import { View, type ImageSourcePropType } from 'react-native';
 import { Image } from 'expo-image';
 import { useTheme } from '@/design';
 import Text from './Text';
 
 /** Static require map. See the note above about why this can't be computed. */
-const COIN_IMAGE: Record<string, ReturnType<typeof require>> = {
+export const COIN_IMAGE: Record<string, ImageSourcePropType> = {
   USDT: require('../../../assets/images/coins/usdt.png'),
   USDC: require('../../../assets/images/coins/usdc.png'),
   BTC: require('../../../assets/images/coins/btc.png'),

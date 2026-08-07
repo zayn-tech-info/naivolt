@@ -12,7 +12,7 @@ export { default as Input, FieldAction, type InputProps } from './Input';
 export { default as Badge, StatusBadge, STATUS_TONE, type StatusTone } from './Badge';
 export { default as Skeleton } from './Skeleton';
 export { default as ListRow, Group, type ListRowProps } from './ListRow';
-export { default as AssetGlyph, ASSET_META } from './AssetGlyph';
+export { default as AssetGlyph, ASSET_META, COIN_IMAGE } from './AssetGlyph';
 export { default as CopyField } from './CopyField';
 export { default as SegmentedControl, type Segment } from './SegmentedControl';
 export { default as PinPad } from './PinPad';
