@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StatusBar } from "expo-status-bar";
 import * as SplashScreen from "expo-splash-screen";
 import { useCallback, useEffect } from "react";
-import { Appearance } from "react-native";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastProvider } from "@/components/ui";
 import { useAppFonts, useTheme } from "@/design";
@@ -30,21 +29,15 @@ const queryClient = new QueryClient({
 
 function AppShell() {
   const hydrate = useAppStore((s) => s.hydrate);
-  const syncSystemMode = useAppStore((s) => s.syncSystemMode);
   const mode = useAppStore((s) => s.mode);
+  // Through the theme rather than the raw palette, so the shell picks up any
+  // override the same way every screen does.
   const { c } = useTheme();
   const [fontsLoaded, fontError] = useAppFonts();
 
   useEffect(() => {
     hydrate();
   }, [hydrate]);
-
-  useEffect(() => {
-    const subscription = Appearance.addChangeListener(({ colorScheme }) => {
-      syncSystemMode(colorScheme);
-    });
-    return () => subscription.remove();
-  }, [syncSystemMode]);
 
   const onReady = useCallback(() => {
     SplashScreen.hideAsync().catch(() => {});

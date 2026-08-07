@@ -12,9 +12,9 @@
 import { View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
-import { Surface } from './Surface';
-import { Text } from './Text';
-import { Button } from './Button';
+import Surface from './Surface';
+import Text from './Text';
+import Button from './Button';
 
 export interface EmptyStateProps {
   icon?: React.ComponentProps<typeof Ionicons>['name'];
@@ -34,7 +34,7 @@ export function EmptyState({
   onAction,
   inset = false,
 }: EmptyStateProps) {
-  const { c, iconSize, radius, space } = useTheme();
+  const { c, space } = useTheme();
 
   return (
     <Surface
@@ -46,13 +46,13 @@ export function EmptyState({
         style={{
           width: 56,
           height: 56,
-          borderRadius: radius.chip,
+          borderRadius: 28,
           backgroundColor: c.surfaceElevated,
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Ionicons name={icon} size={iconSize.large} color={c.tertiaryText} />
+        <Ionicons name={icon} size={24} color={c.tertiaryText} />
       </View>
 
       <Text variant="subheading" align="center" style={{ marginTop: space.comfy }}>

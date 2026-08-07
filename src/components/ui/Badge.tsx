@@ -9,7 +9,7 @@
 
 import { View } from 'react-native';
 import { useTheme } from '@/design';
-import { Text } from './Text';
+import Text from './Text';
 
 export type StatusTone = 'positive' | 'warning' | 'negative' | 'info' | 'neutral';
 
@@ -64,53 +64,26 @@ export function Badge({ label, tone = 'neutral', dot = true }: BadgeProps) {
       style={{
         flexDirection: 'row',
         alignItems: 'center',
-        gap: space.tight,
+        gap: 5,
+        alignSelf: 'flex-start',
         backgroundColor: bg,
         borderRadius: radius.chip,
-        paddingVertical: space.snug,
-        paddingHorizontal: space.base,
+        paddingVertical: 4,
+        paddingHorizontal: dot ? space.snug : 10,
       }}
     >
-      {dot ? (
-        <View
-          style={{
-            width: space.tight,
-            height: space.tight,
-            borderRadius: radius.chip,
-            backgroundColor: fg,
-          }}
-        />
-      ) : null}
-      <Text variant="eyebrow" color={fg}>
+      {dot ? <View style={{ width: 5, height: 5, borderRadius: 3, backgroundColor: fg }} /> : null}
+      <Text variant="eyebrow" color={fg} style={{ letterSpacing: 0.6, fontSize: 10 }}>
         {label}
       </Text>
     </View>
   );
 }
 
-/**
- * Activity status is quiet metadata, not an action or promotional badge.
- * It keeps the semantic tone while avoiding a filled pill that competes with
- * the transaction amount.
- */
+/** Convenience wrapper that resolves a domain status string to its tone. */
 export function StatusBadge({ status }: { status: string }) {
-  const { c } = useTheme();
   const key = String(status ?? '').toLowerCase();
-  const tone = STATUS_TONE[key] ?? 'neutral';
-  /** Success states use the shared positive token (same success ink as deposit flows). */
-  const color: Record<StatusTone, string> = {
-    positive: c.positive,
-    warning: c.warning,
-    negative: c.danger,
-    info: c.info,
-    neutral: c.tertiaryText,
-  };
-
-  return (
-    <Text variant="caption" color={color[tone]}>
-      {key || 'unknown'}
-    </Text>
-  );
+  return <Badge label={key || 'unknown'} tone={STATUS_TONE[key] ?? 'neutral'} />;
 }
 
 export default Badge;

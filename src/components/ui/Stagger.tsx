@@ -15,7 +15,7 @@
  */
 
 import type { ReactNode } from 'react';
-import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated, { FadeInDown } from 'react-native-reanimated';
 import { motion } from '@/design/tokens';
 import type { ViewStyle } from 'react-native';
 
@@ -27,10 +27,9 @@ export interface StaggerProps {
 }
 
 export function Stagger({ children, index = 0, style }: StaggerProps) {
-  const reduceMotion = useReducedMotion();
   return (
     <Animated.View
-      entering={reduceMotion ? undefined : FadeInDown.delay(index * motion.stagger).duration(motion.duration.base)}
+      entering={FadeInDown.delay(index * motion.stagger).duration(motion.duration.base)}
       style={style}
     >
       {children}

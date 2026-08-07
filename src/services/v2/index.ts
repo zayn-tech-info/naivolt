@@ -1,15 +1,14 @@
 /**
  * The v2 service boundary.
  *
- * Screens depend on this interface, not on axios. That's what lets the new
- * surfaces be built and reviewed now, against `mockExchange`, and switched to
- * the Rust API by flipping one flag once those endpoints exist — with no screen
- * changes, because the shapes were agreed up front in ./types.ts.
+ * Screens depend on this interface rather than on axios, so a change to how a
+ * call is made never reaches a screen. The fixture that used to sit behind it is
+ * gone: the Rust API serves every method below, and pricing in particular now
+ * lives server-side where the margin can actually be enforced.
  *
  * See docs/API-CONTRACT.md for the wire format each method expects.
  */
 
-import { features } from '@/constants/features';
 import type {
   ActivityDetail,
   ActivityItem,
@@ -29,7 +28,6 @@ import type {
   RateBoard,
   ResolvedAccount,
 } from './types';
-import { mockExchange } from './mock';
 import { httpExchange } from './client';
 
 export interface ExchangeService {
@@ -115,11 +113,11 @@ export interface ExchangeService {
 }
 
 /**
- * `useMockExchange` keeps the v2 screens renderable before the backend lands.
- * It must be off in any build that touches real money.
+ * The one implementation. There is deliberately no fixture behind a flag any
+ * more: the Rust API serves every method above, and a build that can silently
+ * fall back to fabricated balances is a build that can show someone money they
+ * do not have.
  */
-export const exchange: ExchangeService = features.useMockExchange
-  ? mockExchange
-  : httpExchange;
+export const exchange: ExchangeService = httpExchange;
 
 export * from './types';

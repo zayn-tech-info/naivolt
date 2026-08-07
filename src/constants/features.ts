@@ -31,16 +31,4 @@ export const features = {
    * locked-quote sell, PIN-gated withdrawals.
    */
   exchangeV2: parse(process.env.EXPO_PUBLIC_FEATURE_EXCHANGE_V2, true),
-
-  /**
-   * Serve v2 data from the in-memory fixture instead of the API.
-   *
-   * Defaults to on **in development only**, so the new screens are reviewable
-   * today without a backend. A release build has to opt in explicitly, because
-   * the failure mode of getting this wrong is an app that shows someone a
-   * fabricated balance — and defaulting a money path to fixture data on the
-   * strength of an unset environment variable is not a risk worth taking to save
-   * one line of build config.
-   */
-  useMockExchange: parse(process.env.EXPO_PUBLIC_USE_MOCK_EXCHANGE, __DEV__),
 } as const;

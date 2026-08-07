@@ -12,12 +12,12 @@
  */
 
 import { useCallback } from 'react';
-import { Pressable, ActivityIndicator, type ViewStyle, type TextStyle } from 'react-native';
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from 'react-native-reanimated';
+import { Pressable, ActivityIndicator, View, type ViewStyle, type TextStyle } from 'react-native';
+import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
-import { Text } from './Text';
+import Text from './Text';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'destructive';
 export type ButtonSize = 'sm' | 'md' | 'lg';
@@ -66,7 +66,6 @@ export function Button({
   accessibilityHint,
 }: ButtonProps) {
   const { c, radius, motion, disabledOpacity } = useTheme();
-  const reduceMotion = useReducedMotion();
   const scale = useSharedValue(1);
   const inactive = disabled || loading;
 
@@ -90,8 +89,8 @@ export function Button({
 
   const handlePressIn = useCallback(() => {
     if (inactive) return;
-    scale.value = reduceMotion ? 1 : withSpring(motion.pressScale, motion.press);
-  }, [inactive, motion, reduceMotion, scale]);
+    scale.value = withSpring(motion.pressScale, motion.press);
+  }, [inactive, motion, scale]);
 
   const handlePressOut = useCallback(() => {
     scale.value = withSpring(1, motion.press);
@@ -146,7 +145,7 @@ export function Button({
             <Text
               variant="action"
               color={label[variant]}
-              style={textStyle}
+              style={[size === 'lg' && { fontSize: 16 }, textStyle]}
               numberOfLines={1}
             >
               {title}

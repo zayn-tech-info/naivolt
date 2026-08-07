@@ -1,23 +1,22 @@
 /**
  * Naivolt type system.
  *
- * Two faces, with a rule about which does what:
+ * Two faces, with a hard rule about which does what:
  *
- *   Instrument Sans — everything a person reads, **including money**. A
- *   grotesque with slightly narrow proportions and real character in the
- *   lowercase, so headings have a voice without needing weight 800 to get there.
- *   Balances and amounts sit in it too: a naira figure is something you read,
- *   not something you audit character by character, and the sans keeps the
- *   balance feeling like part of the interface rather than like a terminal.
+ *   Instrument Sans — everything a person reads. A grotesque with slightly
+ *   narrow proportions and real character in the lowercase, so headings have a
+ *   voice without needing weight 800 to get there.
  *
- *   Geist Mono — reserved for strings that must be verified glyph by glyph, and
- *   nothing else: wallet addresses, tx hashes, references, countdowns and
- *   confirmation counters. Monospace here is a signal that says "check this
- *   exactly", which only works while it stays rare.
+ *   Geist Mono — every number that represents money, and every string that
+ *   must be verified character by character: balances, rates, amounts, wallet
+ *   addresses, tx hashes, confirmation counts, OTP and PIN digits.
  *
- * Figures still align. `tabular` (below) is applied to the numeric variants
- * regardless of face, so digits don't shift horizontally as a value ticks and
- * columns of amounts line up.
+ * The mono rule is the deliberate choice in this design. The backend is a
+ * double-entry ledger where exact digits are the entire product, and a
+ * monospaced numeral says "this figure is exact" in a way a proportional face
+ * cannot. It also fixes a real problem for free: digits stop shifting
+ * horizontally as values tick, and it gives Android the tabular alignment that
+ * `fontVariant: ['tabular-nums']` only delivers on iOS.
  *
  * Weights are named, never inlined. If a style isn't in this file it doesn't
  * exist — that constraint is what stops the ad-hoc 10/11/12/13/14/15/16/18px
@@ -43,66 +42,66 @@ export const fontFamily = {
  * height and tracking — the three are one decision, not three.
  */
 export const type = {
-  /** The balance. One per screen, clear and calm. */
+  /** The balance. One per screen, mono, tight. */
   display: {
-    fontFamily: fontFamily.sansSemibold,
-    fontSize: 40,
+    fontFamily: fontFamily.mono,
+    fontSize: 44,
     lineHeight: 48,
-    letterSpacing: -1.2,
+    letterSpacing: -2,
   },
   /** Secondary large figures: quote totals, payout amounts. */
   figure: {
-    fontFamily: fontFamily.sansSemibold,
+    fontFamily: fontFamily.monoMedium,
     fontSize: 30,
-    lineHeight: 38,
-    letterSpacing: -0.8,
+    lineHeight: 36,
+    letterSpacing: -1.2,
   },
   /** Screen titles. */
   title: {
     fontFamily: fontFamily.sansBold,
-    fontSize: 28,
-    lineHeight: 34,
+    fontSize: 26,
+    lineHeight: 32,
     letterSpacing: -0.6,
   },
   /** Section headings. */
   heading: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 20,
-    lineHeight: 26,
+    fontSize: 19,
+    lineHeight: 25,
     letterSpacing: -0.3,
   },
   /** Card titles, list row primaries. */
   subheading: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 16,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 20,
     letterSpacing: -0.1,
   },
   /** Running text. */
   body: {
     fontFamily: fontFamily.sans,
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: 15,
+    lineHeight: 22,
     letterSpacing: -0.1,
   },
   bodySmall: {
     fontFamily: fontFamily.sans,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 13,
+    lineHeight: 19,
     letterSpacing: 0,
   },
   /** Button and control text. */
   action: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 16,
+    fontSize: 15,
     lineHeight: 20,
     letterSpacing: -0.1,
   },
   /** Field labels, metadata. */
   label: {
     fontFamily: fontFamily.sansMedium,
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 13,
+    lineHeight: 17,
     letterSpacing: 0,
   },
   /**
@@ -111,9 +110,9 @@ export const type = {
    */
   eyebrow: {
     fontFamily: fontFamily.sansSemibold,
-    fontSize: 12,
-    lineHeight: 16,
-    letterSpacing: 0.8,
+    fontSize: 11,
+    lineHeight: 14,
+    letterSpacing: 1.1,
     textTransform: 'uppercase' as const,
   },
   caption: {
@@ -126,16 +125,16 @@ export const type = {
   // ── Mono registers ────────────────────────────────────────────────
   /** Inline money inside rows and cards. */
   amount: {
-    fontFamily: fontFamily.sansMedium,
-    fontSize: 16,
+    fontFamily: fontFamily.monoMedium,
+    fontSize: 15,
     lineHeight: 20,
-    letterSpacing: -0.2,
+    letterSpacing: -0.4,
   },
   amountSmall: {
-    fontFamily: fontFamily.sansMedium,
-    fontSize: 14,
-    lineHeight: 20,
-    letterSpacing: -0.1,
+    fontFamily: fontFamily.mono,
+    fontSize: 13,
+    lineHeight: 18,
+    letterSpacing: -0.3,
   },
   /** Addresses, hashes, references. */
   code: {
@@ -161,5 +160,6 @@ export type TypeToken = keyof typeof type;
  * finish loading) still align.
  */
 export const tabular: TextStyle = Platform.select({
-  default: { fontVariant: ['tabular-nums'] },
+  ios: { fontVariant: ['tabular-nums'] },
+  default: {},
 }) as TextStyle;

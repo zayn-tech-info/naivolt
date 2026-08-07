@@ -25,7 +25,7 @@ import { Pressable, Switch, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/design';
 import { Input, Surface, Text } from '@/components/ui';
-import { BankPicker, bankInitials, bankTint } from './BankPicker';
+import BankPicker, { bankInitials, bankTint } from './BankPicker';
 import { useResolveAccount } from '@/hooks/useExchange';
 import type { Bank } from '@/services/v2/types';
 
@@ -100,13 +100,13 @@ export function NewAccountForm({ onChange }: NewAccountFormProps) {
             style={{
               width: 30,
               height: 30,
-              borderRadius: radius.chip,
+              borderRadius: 15,
               backgroundColor: `${bankTint(bank.name)}22`,
               alignItems: 'center',
               justifyContent: 'center',
             }}
           >
-            <Text variant="label" color={bankTint(bank.name)}>
+            <Text variant="label" color={bankTint(bank.name)} style={{ fontSize: 11 }}>
               {bankInitials(bank.name)}
             </Text>
           </View>

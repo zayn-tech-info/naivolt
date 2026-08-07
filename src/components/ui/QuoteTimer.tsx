@@ -26,9 +26,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, View } from 'react-native';
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming, Easing } from 'react-native-reanimated';
+import Animated, { useAnimatedStyle, useSharedValue, withTiming, Easing } from 'react-native-reanimated';
 import { useTheme } from '@/design';
-import { Text } from './Text';
+import Text from './Text';
 
 export interface QuoteTimerProps {
   /** ISO timestamp or epoch ms when the quote expires. */
@@ -51,7 +51,6 @@ export function QuoteTimer({
   label = 'Rate locked',
 }: QuoteTimerProps) {
   const { c, space, radius } = useTheme();
-  const reduceMotion = useReducedMotion();
   const [left, setLeft] = useState(() => remainingMs(expiresAt));
   const fill = useSharedValue(1);
   const fired = useRef(false);
@@ -62,14 +61,14 @@ export function QuoteTimer({
     const ratio = Math.max(0, Math.min(1, ms / (windowSeconds * 1000)));
     // Animate to the true remaining fraction; linear, because a quote drains
     // at a constant rate and easing it would misrepresent the time left.
-    fill.value = reduceMotion ? ratio : withTiming(ratio, { duration: 250, easing: Easing.linear });
+    fill.value = withTiming(ratio, { duration: 250, easing: Easing.linear });
 
     if (ms <= 0 && !fired.current) {
       fired.current = true;
       onExpire?.();
     }
     return ms;
-  }, [expiresAt, windowSeconds, fill, onExpire, reduceMotion]);
+  }, [expiresAt, windowSeconds, fill, onExpire]);
 
   useEffect(() => {
     fired.current = false;

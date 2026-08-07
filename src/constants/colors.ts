@@ -19,38 +19,30 @@
 
 export const darkColors = {
   // ── Elevation ladder ──────────────────────────────────────────────
-  primaryBackground: '#0B0D10',
-  surface: '#12151A',
-  surfaceElevated: '#191D23',
-  surfaceOverlay: '#20252D',
-  surfaceInput: '#191D23',
-  surfaceSunken: '#080A0D',
+  primaryBackground: '#08090A', // canvas — the app floor
+  surface: '#101215', // resting cards
+  surfaceElevated: '#171A1E', // raised: sheets, active states
+  surfaceOverlay: '#1F242A', // highest: menus, tooltips
+  surfaceInput: '#050607', // wells read as recessed, below the canvas
+  surfaceSunken: '#050607',
 
   // ── Action ────────────────────────────────────────────────────────
-  primaryAccent: '#45D6A0',
-  accentPressed: '#35BC8A',
-  accentDim: 'rgba(69, 214, 160, 0.12)',
-  accentEdge: 'rgba(69, 214, 160, 0.30)',
-  buttonTextOnAccent: '#07251C',
-  brandSpark: '#B7F34A',
-
-  // Deep money panel on home (white type sits on top)
-  balancePanel: '#053D2E',
-  balancePanelEdge: 'rgba(69, 214, 160, 0.28)',
-  balancePanelText: '#FFFFFF',
-  balancePanelMuted: 'rgba(255, 255, 255, 0.72)',
-  balancePanelControl: 'rgba(255, 255, 255, 0.14)',
+  primaryAccent: '#AAFF00', // brand lime — actions only
+  accentPressed: '#93DD00',
+  accentDim: 'rgba(170, 255, 0, 0.10)',
+  accentEdge: 'rgba(170, 255, 0, 0.22)',
+  buttonTextOnAccent: '#0A0F00',
 
   // ── Text ──────────────────────────────────────────────────────────
-  primaryText: '#F4F6F8',
-  secondaryText: '#A2A9B3',
-  tertiaryText: '#77808B',
-  quaternaryText: '#59616B',
+  primaryText: '#F2F4F5',
+  secondaryText: '#8B939C',
+  tertiaryText: '#5B636B',
+  quaternaryText: '#3C4349',
 
   // ── Structure ─────────────────────────────────────────────────────
-  border: '#252A32',
-  borderLight: '#343B45',
-  hairline: 'rgba(255, 255, 255, 0.09)',
+  border: '#1C2126',
+  borderLight: '#2A3037',
+  hairline: 'rgba(255, 255, 255, 0.06)',
 
   // ── Status: money states, deliberately not lime ───────────────────
   positive: '#3DD68C', // credited, paid, confirmed
@@ -59,9 +51,6 @@ export const darkColors = {
   warningDim: 'rgba(255, 176, 32, 0.12)',
   negative: '#FF5A5A', // failed, rejected, wrong network
   negativeDim: 'rgba(255, 90, 90, 0.12)',
-  /** Irreversible-risk UI (wrong network, permanent loss). Same ink as negative. */
-  danger: '#FF5A5A',
-  dangerDim: 'rgba(255, 90, 90, 0.14)',
   info: '#63A0FF',
   infoDim: 'rgba(99, 160, 255, 0.12)',
 
@@ -74,37 +63,29 @@ export const darkColors = {
 } as const;
 
 export const lightColors = {
-  primaryBackground: '#F7F8FA',
+  primaryBackground: '#FAFAFA',
   surface: '#FFFFFF',
-  surfaceElevated: '#F1F3F5',
+  surfaceElevated: '#FFFFFF',
   surfaceOverlay: '#FFFFFF',
-  surfaceInput: '#F1F3F5',
-  surfaceSunken: '#ECEFF2',
+  surfaceInput: '#F2F3F5',
+  surfaceSunken: '#F0F1F3',
 
   // Lime on white fails contrast at text sizes, so the light theme runs a
   // darkened brand green for anything that carries a label.
-  primaryAccent: '#0B7A53',
-  accentPressed: '#086542',
-  accentDim: 'rgba(11, 122, 83, 0.10)',
-  accentEdge: 'rgba(11, 122, 83, 0.24)',
+  primaryAccent: '#4F7D00',
+  accentPressed: '#3F6600',
+  accentDim: 'rgba(79, 125, 0, 0.10)',
+  accentEdge: 'rgba(79, 125, 0, 0.20)',
   buttonTextOnAccent: '#FFFFFF',
-  brandSpark: '#9DDC2C',
 
-  // Deep money panel on home (white type sits on top)
-  balancePanel: '#0A5C40',
-  balancePanelEdge: 'rgba(7, 37, 28, 0.20)',
-  balancePanelText: '#FFFFFF',
-  balancePanelMuted: 'rgba(255, 255, 255, 0.78)',
-  balancePanelControl: 'rgba(255, 255, 255, 0.16)',
+  primaryText: '#0C0E10',
+  secondaryText: '#5C646D',
+  tertiaryText: '#8A929B',
+  quaternaryText: '#B4BAC1',
 
-  primaryText: '#101114',
-  secondaryText: '#5F6670',
-  tertiaryText: '#747C86',
-  quaternaryText: '#9AA1AA',
-
-  border: '#E4E7EB',
-  borderLight: '#CFD4DA',
-  hairline: 'rgba(16, 17, 20, 0.09)',
+  border: '#E6E8EB',
+  borderLight: '#D6D9DD',
+  hairline: 'rgba(0, 0, 0, 0.07)',
 
   positive: '#0F9D58',
   positiveDim: 'rgba(15, 157, 88, 0.10)',
@@ -112,9 +93,6 @@ export const lightColors = {
   warningDim: 'rgba(180, 83, 9, 0.10)',
   negative: '#D92D20',
   negativeDim: 'rgba(217, 45, 32, 0.10)',
-  /** Irreversible-risk UI (wrong network, permanent loss). Same ink as negative. */
-  danger: '#D92D20',
-  dangerDim: 'rgba(217, 45, 32, 0.12)',
   info: '#1D4ED8',
   infoDim: 'rgba(29, 78, 216, 0.10)',
 

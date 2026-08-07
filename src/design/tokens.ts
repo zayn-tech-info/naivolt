@@ -16,36 +16,22 @@ export const space = {
   base: 12,
   comfy: 16,
   roomy: 20,
-  generous: 24,
   section: 28,
-  spacious: 32,
   major: 40,
-  jumbo: 48,
   hero: 56,
 } as const;
 
 /**
- * Radii — Convert’s cards are the app-wide reference (~16).
- *
- *  - `card` / `tile` / `field` / `control`: soft rounded surfaces (cards, list
- *    shells, inputs, buttons, icon wells). Same value on purpose so redesigned
- *    screens do not drift.
- *  - `chip`: true pills only (selected indicators, status chips, circular wells).
- *  - `sheet`: top corners of bottom sheets, slightly softer than cards.
+ * Radii are generous but not pill-shaped except where a thing is genuinely a
+ * pill (chips, the tab bar). Cards at 18–20 read contemporary; 12 reads 2019.
  */
 export const radius = {
   chip: 999,
-  control: 16,
-  field: 16,
-  card: 16,
-  sheet: 24,
+  control: 14,
+  field: 14,
+  card: 20,
+  sheet: 28,
   tile: 16,
-} as const;
-
-export const iconSize = {
-  small: 16,
-  medium: 20,
-  large: 24,
 } as const;
 
 /** Standard touch target. Anything tappable clears 44pt. */
@@ -100,10 +86,10 @@ export const motion = {
   /** Value landing in place: a touch of overshoot to draw the eye. */
   settle: { damping: 18, stiffness: 240, mass: 0.9 },
   duration: {
-    instant: 80,
-    fast: 160,
+    instant: 110,
+    fast: 180,
     base: 240,
-    slow: 420,
+    slow: 320,
   },
   /** Scale a control drops to while held. */
   pressScale: 0.97,

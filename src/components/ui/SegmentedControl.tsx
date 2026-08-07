@@ -9,10 +9,10 @@
 
 import { useCallback, useState } from 'react';
 import { LayoutChangeEvent, Pressable, View } from 'react-native';
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from 'react-native-reanimated';
+import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { useTheme } from '@/design';
-import { Text } from './Text';
+import Text from './Text';
 
 export interface Segment<T extends string> {
   value: T;
@@ -30,8 +30,7 @@ export function SegmentedControl<T extends string>({
   value,
   onChange,
 }: SegmentedControlProps<T>) {
-  const { c, motion, space, radius } = useTheme();
-  const reduceMotion = useReducedMotion();
+  const { c, radius, motion, space } = useTheme();
   const [trackWidth, setTrackWidth] = useState(0);
   const offset = useSharedValue(0);
 
@@ -54,10 +53,10 @@ export function SegmentedControl<T extends string>({
     (next: T, i: number) => {
       if (next === value) return;
       Haptics.selectionAsync().catch(() => {});
-      offset.value = reduceMotion ? segWidth * i : withSpring(segWidth * i, motion.press);
+      offset.value = withSpring(segWidth * i, motion.press);
       onChange(next);
     },
-    [value, segWidth, motion, reduceMotion, offset, onChange]
+    [value, segWidth, motion, offset, onChange]
   );
 
   const indicator = useAnimatedStyle(() => ({
@@ -69,10 +68,8 @@ export function SegmentedControl<T extends string>({
       onLayout={onLayout}
       style={{
         flexDirection: 'row',
-        backgroundColor: c.surfaceSunken,
-        borderRadius: radius.card,
-        borderWidth: 1,
-        borderColor: c.hairline,
+        backgroundColor: c.surfaceInput,
+        borderRadius: radius.chip,
         padding: 2,
         position: 'relative',
       }}
@@ -86,10 +83,8 @@ export function SegmentedControl<T extends string>({
               left: 2,
               bottom: 2,
               width: segWidth,
-              backgroundColor: c.surface,
-              borderRadius: radius.control - 2,
-              borderWidth: 1,
-              borderColor: c.hairline,
+              backgroundColor: c.surfaceOverlay,
+              borderRadius: radius.chip,
             },
             indicator,
           ]}
@@ -108,11 +103,10 @@ export function SegmentedControl<T extends string>({
               flex: 1,
               alignItems: 'center',
               justifyContent: 'center',
-              paddingVertical: space.base,
-              minHeight: 40,
+              paddingVertical: space.snug + 2,
             }}
           >
-            <Text variant="subheading" color={active ? 'primaryText' : 'tertiaryText'} numberOfLines={1}>
+            <Text variant="action" color={active ? 'primaryText' : 'tertiaryText'} numberOfLines={1}>
               {segment.label}
             </Text>
           </Pressable>

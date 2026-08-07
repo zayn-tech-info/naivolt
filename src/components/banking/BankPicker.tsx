@@ -42,7 +42,7 @@ function initials(name: string): string {
 }
 
 export function BankPicker({ visible, onClose, onSelect, selectedCode }: BankPickerProps) {
-  const { c, iconSize, minTouch, space, radius } = useTheme();
+  const { c, space, radius } = useTheme();
   const [query, setQuery] = useState('');
   const { data: banks = [], isLoading } = useBanks();
 
@@ -95,15 +95,15 @@ export function BankPicker({ visible, onClose, onSelect, selectedCode }: BankPic
             accessibilityRole="button"
             accessibilityLabel="Close"
             style={{
-              width: minTouch,
-              height: minTouch,
-              borderRadius: radius.chip,
+              width: 34,
+              height: 34,
+              borderRadius: 17,
               backgroundColor: c.surface,
               alignItems: 'center',
               justifyContent: 'center',
             }}
           >
-            <Ionicons name="close" size={iconSize.medium} color={c.primaryText} />
+            <Ionicons name="close" size={18} color={c.primaryText} />
           </Pressable>
         </View>
 
@@ -168,13 +168,13 @@ export function BankPicker({ visible, onClose, onSelect, selectedCode }: BankPic
                     style={{
                       width: 38,
                       height: 38,
-                      borderRadius: radius.chip,
+                      borderRadius: 19,
                       backgroundColor: `${tint}22`,
                       alignItems: 'center',
                       justifyContent: 'center',
                     }}
                   >
-                    <Text variant="label" color={tint}>
+                    <Text variant="label" color={tint} style={{ fontSize: 12 }}>
                       {initials(item.name)}
                     </Text>
                   </View>
