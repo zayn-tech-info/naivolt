@@ -36,6 +36,9 @@ CREATE TABLE number_countries (
     name             TEXT NOT NULL,
     dial_code        TEXT NOT NULL,
     provider_country TEXT NOT NULL,
+    -- Nigeria leads. Alphabetical ordering put Ghana first, which is a strange
+    -- default for a Nigerian product; everything else falls back to by-name.
+    sort_order       INTEGER NOT NULL DEFAULT 100,
     active           BOOLEAN NOT NULL DEFAULT true,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -129,13 +132,13 @@ INSERT INTO number_products (slug, name, provider_product, sort_order) VALUES
     ('tinder',    'Tinder',    'tinder',   110),
     ('amazon',    'Amazon',    'amazon',   120);
 
-INSERT INTO number_countries (code, name, dial_code, provider_country) VALUES
-    ('NG', 'Nigeria',        '+234', 'nigeria'),
-    ('US', 'United States',  '+1',   'usa'),
-    ('GB', 'United Kingdom', '+44',  'england'),
-    ('GH', 'Ghana',          '+233', 'ghana'),
-    ('ZA', 'South Africa',   '+27',  'southafrica'),
-    ('KE', 'Kenya',          '+254', 'kenya');
+INSERT INTO number_countries (code, name, dial_code, provider_country, sort_order) VALUES
+    ('NG', 'Nigeria',        '+234', 'nigeria',      10),
+    ('US', 'United States',  '+1',   'usa',         100),
+    ('GB', 'United Kingdom', '+44',  'england',     100),
+    ('GH', 'Ghana',          '+233', 'ghana',       100),
+    ('ZA', 'South Africa',   '+27',  'southafrica', 100),
+    ('KE', 'Kenya',          '+254', 'kenya',       100);
 
 INSERT INTO number_prices (product_id, country_id, price_ngn)
 SELECT p.id,

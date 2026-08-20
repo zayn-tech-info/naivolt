@@ -1,4 +1,6 @@
--- Auth schema invariants. Requires 0001 and 0002 applied.
+-- Auth schema invariants. Requires 0001 through 0003, and 0009 for the Google
+-- provider — 0003 narrowed the provider set to { phone, email } and 0009 admits
+-- google again, which is what the first assertion here depends on.
 \set ON_ERROR_STOP on
 
 BEGIN;
@@ -59,10 +61,10 @@ END $$;
 -- 4. Only one live OTP challenge per destination.
 DO $$
 BEGIN
-    INSERT INTO otp_challenges (destination, code_hash, expires_at)
-    VALUES ('+2348099999999', '$argon2id$fake', now() + interval '10 min');
-    INSERT INTO otp_challenges (destination, code_hash, expires_at)
-    VALUES ('+2348099999999', '$argon2id$fake2', now() + interval '10 min');
+    INSERT INTO otp_challenges (destination, code_hash, channel, expires_at)
+    VALUES ('+2348099999999', '$argon2id$fake', 'sms', now() + interval '10 min');
+    INSERT INTO otp_challenges (destination, code_hash, channel, expires_at)
+    VALUES ('+2348099999999', '$argon2id$fake2', 'sms', now() + interval '10 min');
     RAISE EXCEPTION 'FAIL: two live OTP codes for one number';
 EXCEPTION
     WHEN unique_violation THEN

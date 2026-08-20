@@ -43,7 +43,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/numbers/catalog", get(catalog))
         .route("/numbers/orders", post(create_order).get(list_orders))
-        .route("/numbers/orders/{id}", get(get_order))
+        .route("/numbers/orders/:id", get(get_order))
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ async fn catalog(State(state): State<AppState>) -> ApiResult<Json<Vec<CatalogPro
            JOIN number_products  p ON p.id = pr.product_id
            JOIN number_countries c ON c.id = pr.country_id
           WHERE pr.active AND p.active AND c.active
-          ORDER BY p.sort_order, p.name, c.name",
+          ORDER BY p.sort_order, p.name, c.sort_order, c.name",
     )
     .fetch_all(&state.db)
     .await?;

@@ -157,6 +157,13 @@ async fn seed_user(pool: &PgPool, seed: &MasterSeed, spec: UserSpec) -> Result<S
     let raw = match spec.provider {
         Provider::Phone => spec.phone.context("phone provider needs a phone")?,
         Provider::Email => spec.email.context("email provider needs an email")?,
+        // Deliberately unsupported. Every identity here is built through the OTP
+        // path, which proves ownership of a channel. A Google identity is proved
+        // by a token from Google, and its subject is Google's `sub` — inventing
+        // one would seed an account that no real sign-in could ever match.
+        Provider::Google => {
+            anyhow::bail!("seed cannot mint a Google identity; sign in through the API instead")
+        }
     };
     let identifier = parse_identifier(raw)?;
     let claim = IdentityClaim::from_verified_otp(&identifier);
