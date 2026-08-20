@@ -19,15 +19,16 @@ use uuid::Uuid;
 
 /// How a user proves who they are.
 ///
-/// Both are OTP channels — there is no OAuth. Dropping Google/Apple removed the
-/// per-platform client-id configuration and, because Apple's Sign in with Apple
-/// requirement (App Store Guideline 4.8) only binds apps offering a *third-party*
-/// social login, the obligation to implement it as well.
+/// Phone and email are OTP channels. Google is an OIDC provider, verified in
+/// [`crate::oidc`], and is offered on the website only — App Store Guideline 4.8
+/// requires Sign in with Apple alongside any third-party social login an *app*
+/// offers, so the Expo app cannot show a Google button until Apple's ships too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Phone,
     Email,
+    Google,
 }
 
 impl Provider {
@@ -35,6 +36,7 @@ impl Provider {
         match self {
             Provider::Phone => "phone",
             Provider::Email => "email",
+            Provider::Google => "google",
         }
     }
 }

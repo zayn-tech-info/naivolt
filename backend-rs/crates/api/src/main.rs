@@ -9,12 +9,15 @@
 mod auth_routes;
 mod config;
 mod error;
+mod google_keys;
 mod middleware;
 mod activity_routes;
 mod bank_routes;
 mod giftcard_routes;
 mod kyc_routes;
 mod notify;
+mod number_provider;
+mod number_routes;
 mod payout_provider;
 mod payout_routes;
 mod pricing;
@@ -103,6 +106,20 @@ async fn main() -> Result<()> {
         rates: pricing::Rates::new(&config),
         dev_otp_code: config.dev_otp_code.clone(),
         auto_approve_kyc: config.auto_approve_kyc,
+        google_keys: Arc::new(google_keys::GoogleKeys::new()),
+        google_client_id: config.google_client_id.clone(),
+        numbers: Arc::new(match &config.fivesim_api_key {
+            Some(key) => number_provider::AnyNumberProvider::FiveSim(
+                number_provider::FiveSimProvider::new(
+                    key.clone(),
+                    config.fivesim_currency.clone(),
+                ),
+            ),
+            None => {
+                tracing::warn!("no number provider configured — numbers will be stubbed");
+                number_provider::AnyNumberProvider::Stub(number_provider::StubProvider)
+            }
+        }),
         payouts: Arc::new(match &config.paystack_secret_key {
             Some(key) => payout_provider::AnyPayoutProvider::Paystack(
                 payout_provider::PaystackProvider::new(key.clone()),
@@ -126,6 +143,7 @@ async fn main() -> Result<()> {
                 .merge(activity_routes::routes())
                 .merge(giftcard_routes::routes())
                 .merge(giftcard_routes::push_routes())
+                .merge(number_routes::routes())
                 .merge(kyc_routes::routes()),
         )
         .layer(TraceLayer::new_for_http())

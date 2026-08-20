@@ -1,6 +1,8 @@
 //! Shared application state.
 
+use crate::google_keys::GoogleKeys;
 use crate::notify::AnyNotifier;
+use crate::number_provider::AnyNumberProvider;
 use crate::payout_provider::AnyPayoutProvider;
 use crate::pricing::Rates;
 use crate::signer::AnyAddressProvider;
@@ -16,6 +18,13 @@ pub struct AppState {
     pub addresses: Arc<AnyAddressProvider>,
     pub rates: Rates,
     pub payouts: Arc<AnyPayoutProvider>,
+    pub numbers: Arc<AnyNumberProvider>,
+    /// Google's signing keys, fetched once and refreshed on rotation.
+    pub google_keys: Arc<GoogleKeys>,
+    /// The OAuth client id incoming ID tokens must be addressed to. None when
+    /// Google sign-in is not configured, which the route reports as such rather
+    /// than accepting tokens minted for some other app.
+    pub google_client_id: Option<String>,
     /// Development only: when set, every OTP challenge uses this code instead of
     /// a random one. Guaranteed None in production by Config validation.
     pub dev_otp_code: Option<String>,

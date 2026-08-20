@@ -30,6 +30,12 @@ pub enum JournalKind {
     PayoutSettle,
     /// Payout failed; the reservation is released back to the user.
     PayoutReversal,
+    /// Naira reserved for a virtual-number order, before the supplier is called.
+    NumberReserve,
+    /// The verification code arrived; the reservation becomes revenue.
+    NumberSettle,
+    /// No code arrived, or the order was cancelled. Reverses the reservation.
+    NumberRefund,
     /// Manual correction by an admin. Always references the journal it corrects.
     Adjustment,
 }
@@ -54,6 +60,9 @@ impl JournalKind {
             JournalKind::PayoutReserve => "payout_reserve",
             JournalKind::PayoutSettle => "payout_settle",
             JournalKind::PayoutReversal => "payout_reversal",
+            JournalKind::NumberReserve => "number_reserve",
+            JournalKind::NumberSettle => "number_settle",
+            JournalKind::NumberRefund => "number_refund",
             JournalKind::Adjustment => "adjustment",
         }
     }
@@ -363,6 +372,57 @@ mod tests {
             .entry(id(), AccountKind::NgnFloat, Asset::Ngn, dec!(155000))
             .build();
         assert!(journal.is_ok(), "{:?}", journal.unwrap_err());
+    }
+
+    #[test]
+    fn a_number_order_that_never_delivers_leaves_the_user_whole() {
+        // The refund must reverse the reservation exactly. Netting the two
+        // journals per account is what a user's balance actually does, so if
+        // these do not cancel, someone is short ₦620.
+        let user_ngn = id();
+        let pending = id();
+
+        let reserve = JournalBuilder::new(JournalKind::NumberReserve, "NVNO-1", "intent:1")
+            .entry(user_ngn, AccountKind::UserNgn, Asset::Ngn, dec!(620))
+            .entry(pending, AccountKind::NumberPayablePending, Asset::Ngn, dec!(-620))
+            .build()
+            .expect("reserve balances");
+
+        let refund = JournalBuilder::new(JournalKind::NumberRefund, "NVNO-1", "NVNO-1:refund")
+            .entry(pending, AccountKind::NumberPayablePending, Asset::Ngn, dec!(620))
+            .entry(user_ngn, AccountKind::UserNgn, Asset::Ngn, dec!(-620))
+            .build()
+            .expect("refund balances");
+
+        let net: Decimal = reserve
+            .entries
+            .iter()
+            .chain(refund.entries.iter())
+            .filter(|e| e.account_id == user_ngn)
+            .map(|e| e.amount)
+            .sum();
+        assert_eq!(net, Decimal::ZERO, "the user paid for a code that never came");
+
+        let held: Decimal = reserve
+            .entries
+            .iter()
+            .chain(refund.entries.iter())
+            .filter(|e| e.account_id == pending)
+            .map(|e| e.amount)
+            .sum();
+        assert_eq!(held, Decimal::ZERO, "the reservation was never released");
+    }
+
+    #[test]
+    fn a_delivered_number_turns_the_reservation_into_revenue() {
+        // Settling must discharge the *whole* reservation — anything left in
+        // number_payable_pending is money we still owe but have booked as earned.
+        let pending = id();
+        let settle = JournalBuilder::new(JournalKind::NumberSettle, "NVNO-2", "NVNO-2:settle")
+            .entry(pending, AccountKind::NumberPayablePending, Asset::Ngn, dec!(620))
+            .entry(id(), AccountKind::NumberRevenue, Asset::Ngn, dec!(-620))
+            .build();
+        assert!(settle.is_ok(), "{:?}", settle.unwrap_err());
     }
 
     #[test]

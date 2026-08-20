@@ -26,6 +26,9 @@ pub enum AccountKind {
     UserNgn,
     /// NGN reserved for an in-flight payout — left `UserNgn`, not yet paid out.
     NgnPayablePending,
+    /// NGN reserved for an in-flight number order — left `UserNgn`, and owed
+    /// back to the user if no verification code ever arrives.
+    NumberPayablePending,
 
     // ----- ASSET: what we actually hold -----
     /// Coins sitting in user deposit addresses, not yet swept.
@@ -36,12 +39,18 @@ pub enum AccountKind {
     CustodyMaster,
     /// Naira float held at the payout provider (Paystack balance).
     NgnFloat,
+    /// Crypto prepaid to a number supplier and not yet spent. An asset, but one
+    /// held by a counterparty who can vanish — SMS-Activate closed in December
+    /// 2025 and kept every balance under $30 — so this is kept deliberately thin.
+    SupplierFloat,
 
     // ----- REVENUE -----
     /// Margin earned on the spread between mid-market and our quoted rate.
     SpreadRevenue,
     /// Explicit fees charged to users.
     FeeRevenue,
+    /// Margin on virtual numbers, recognised when the code is delivered.
+    NumberRevenue,
 
     // ----- EXPENSE -----
     /// Gas/bandwidth burned funding and executing sweeps.
@@ -55,7 +64,10 @@ impl AccountKind {
     pub const fn is_liability(self) -> bool {
         matches!(
             self,
-            AccountKind::UserCrypto | AccountKind::UserNgn | AccountKind::NgnPayablePending
+            AccountKind::UserCrypto
+                | AccountKind::UserNgn
+                | AccountKind::NgnPayablePending
+                | AccountKind::NumberPayablePending
         )
     }
 
@@ -92,12 +104,15 @@ impl AccountKind {
             AccountKind::UserCrypto => "user_crypto",
             AccountKind::UserNgn => "user_ngn",
             AccountKind::NgnPayablePending => "ngn_payable_pending",
+            AccountKind::NumberPayablePending => "number_payable_pending",
             AccountKind::CustodyDepositAddrs => "custody_deposit_addrs",
             AccountKind::CustodyHot => "custody_hot",
             AccountKind::CustodyMaster => "custody_master",
             AccountKind::NgnFloat => "ngn_float",
+            AccountKind::SupplierFloat => "supplier_float",
             AccountKind::SpreadRevenue => "spread_revenue",
             AccountKind::FeeRevenue => "fee_revenue",
+            AccountKind::NumberRevenue => "number_revenue",
             AccountKind::GasExpense => "gas_expense",
             AccountKind::PayoutFeeExpense => "payout_fee_expense",
         }

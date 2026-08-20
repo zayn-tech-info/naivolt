@@ -51,6 +51,16 @@ pub struct Config {
 
     /// None outside production, where account resolution falls back to a stub.
     pub paystack_secret_key: Option<String>,
+    /// The web OAuth client id. Tokens minted for any other client are valid
+    /// Google tokens signed by the same issuer — checking the audience against
+    /// this is what stops one being replayed here.
+    pub google_client_id: Option<String>,
+    /// None outside production, where numbers come from a stub provider.
+    pub fivesim_api_key: Option<String>,
+    /// The unit 5SIM quotes prices in. Their API returns a bare number and never
+    /// names the currency, so it is stated here rather than guessed at — a wrong
+    /// guess would put a mislabelled cost on every order.
+    pub fivesim_currency: Option<String>,
     /// Naira per US dollar before margin. Tracks the parallel market, not the
     /// official rate — see `pricing.rs` for why that distinction matters.
     pub usd_ngn_mid: Decimal,
@@ -123,6 +133,9 @@ impl Config {
             dev_otp_code,
             auto_approve_kyc,
             paystack_secret_key: env::var("PAYSTACK_SECRET_KEY").ok().filter(|s| !s.is_empty()),
+            google_client_id: env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
+            fivesim_api_key: env::var("FIVESIM_API_KEY").ok().filter(|s| !s.is_empty()),
+            fivesim_currency: env::var("FIVESIM_CURRENCY").ok().filter(|s| !s.is_empty()),
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
         };
@@ -175,6 +188,13 @@ impl Config {
             bail!("PAYSTACK_SECRET_KEY is required in production — account names must be verified, not invented");
         }
 
+        // The stub hands out numbers that look plausible and always deliver a
+        // code. Reaching production it would sell people numbers that do not
+        // exist and charge them for the privilege.
+        if self.fivesim_api_key.is_none() {
+            bail!("FIVESIM_API_KEY is required in production — the stub provider issues numbers that do not exist");
+        }
+
         Ok(())
     }
 }
@@ -225,6 +245,9 @@ mod tests {
             dev_otp_code: None,
             auto_approve_kyc: false,
             paystack_secret_key: Some("sk_live".into()),
+            google_client_id: Some("naivolt-web.apps.googleusercontent.com".into()),
+            fivesim_api_key: Some("5sim_live".into()),
+            fivesim_currency: Some("USD".into()),
             usd_ngn_mid: Decimal::from(1530),
             spread_ngn_per_usd: Decimal::from(10),
         }

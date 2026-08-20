@@ -1,4 +1,5 @@
-//! Auth endpoints: request a code, verify it, set a PIN, refresh a session.
+//! Auth endpoints: request a code, verify it, sign in with Google, refresh a
+//! session.
 
 use crate::error::{ApiError, ApiResult};
 use crate::notify::Notifier;
@@ -9,7 +10,8 @@ use axum::{Json, Router};
 use axum::routing::post;
 use chrono::Utc;
 use naivolt_auth::identifier::{parse_identifier, Channel, Identifier};
-use naivolt_auth::identity::{resolve, ExistingMatches, IdentityClaim, Resolution};
+use naivolt_auth::identity::{resolve, ExistingMatches, IdentityClaim, Provider, Resolution};
+use naivolt_auth::oidc::OidcConfig;
 use naivolt_auth::session::{evaluate_refresh, hash_refresh, issue_refresh, RefreshOutcome, StoredSession};
 use naivolt_auth::OtpChallenge;
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth/otp/request", post(request_otp))
         .route("/auth/otp/verify", post(verify_otp))
+        .route("/auth/google", post(google_sign_in))
         .route("/auth/refresh", post(refresh))
         .route("/auth/unlock", post(unlock))
 }
@@ -229,7 +232,7 @@ async fn verify_otp(
             (id, false)
         }
         Resolution::CreateNew => {
-            let id = create_user(&mut tx, &state, &claim, &identifier).await?;
+            let id = create_user(&mut tx, &state, &claim, &identifier.masked()).await?;
             (id, true)
         }
         Resolution::Conflict { .. } => {
@@ -240,6 +243,105 @@ async fn verify_otp(
                 identifier = %identifier.masked(),
                 "identity conflict — manual review required"
             );
+            return Err(ApiError::BadRequest(
+                "We can't sign you in automatically. Please contact support.".into(),
+            ));
+        }
+    };
+
+    let user = load_user(&mut tx, user_id).await?;
+    let session = start_session(&mut tx, &state, user_id, user.kyc_tier, body.device_id, now).await?;
+
+    tx.commit().await?;
+
+    Ok(Json(SessionResponse {
+        token: session.0,
+        refresh_token: session.1,
+        is_new_account,
+        user,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /auth/google
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleSignInBody {
+    /// The ID token from Google Identity Services, exactly as the browser
+    /// received it. Verified here — the client decoding it for display proves
+    /// nothing, since a client can send any string it likes.
+    pub credential: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+/// Sign in with Google.
+///
+/// Web only, deliberately: App Store Guideline 4.8 requires Sign in with Apple
+/// alongside any third-party social login an *app* offers, and the Expo app
+/// stays OTP-only until Apple's ships too.
+///
+/// Everything after verification is the same path an OTP sign-in takes —
+/// identity resolution, linking rules, wallet provisioning — because a Google
+/// user and a phone user are the same kind of account. The only thing that
+/// differs is how ownership was proved.
+async fn google_sign_in(
+    State(state): State<AppState>,
+    Json(body): Json<GoogleSignInBody>,
+) -> ApiResult<Json<SessionResponse>> {
+    let audience = state.google_client_id.as_deref().ok_or_else(|| {
+        ApiError::ServiceUnavailable("Google sign-in isn't set up yet.".into())
+    })?;
+
+    let kid = naivolt_auth::key_id(&body.credential).map_err(|e| {
+        tracing::debug!(error = %e, "google credential has no usable key id");
+        ApiError::Unauthorized
+    })?;
+    let key = state.google_keys.decoding_key(&kid).await?;
+
+    let claim = naivolt_auth::verify_id_token(
+        &body.credential,
+        &key,
+        &OidcConfig {
+            provider: Provider::Google,
+            audience: audience.to_owned(),
+        },
+    )
+    .map_err(|e| {
+        // Deliberately opaque to the caller. Signature, audience, issuer and
+        // expiry failures are all "this token is not usable here", and saying
+        // which one would help someone probing for a token we would accept.
+        tracing::warn!(error = %e, "google id token rejected");
+        ApiError::Unauthorized
+    })?;
+
+    let now = Utc::now();
+    let mut tx = state.db.begin().await?;
+
+    let matches = lookup_matches(&mut tx, &claim).await?;
+
+    let (user_id, is_new_account) = match resolve(&claim, &matches) {
+        Resolution::Existing(id) => (id, false),
+        Resolution::LinkTo(id) => {
+            // A user who signed up by email OTP and later uses Google with the
+            // same *verified* address is one person. Linking is what stops them
+            // finding an empty second account.
+            attach_identity(&mut tx, id, &claim).await?;
+            (id, false)
+        }
+        Resolution::CreateNew => {
+            let label = claim
+                .verified_email
+                .clone()
+                .map(|email| Identifier::Email(email).masked())
+                .unwrap_or_else(|| format!("google:{}", &claim.subject));
+            let id = create_user(&mut tx, &state, &claim, &label).await?;
+            (id, true)
+        }
+        Resolution::Conflict { .. } => {
+            tracing::error!(subject = %claim.subject, "identity conflict — manual review required");
             return Err(ApiError::BadRequest(
                 "We can't sign you in automatically. Please contact support.".into(),
             ));
@@ -528,11 +630,13 @@ async fn attach_identity(
     Ok(())
 }
 
+/// `label` is a masked identifier for the log line only — never an address in
+/// the clear, and never anything the caller has not already masked.
 async fn create_user(
     tx: &mut Transaction<'_, Postgres>,
     state: &AppState,
     claim: &IdentityClaim,
-    identifier: &Identifier,
+    label: &str,
 ) -> ApiResult<Uuid> {
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (phone, email) VALUES ($1, $2) RETURNING id",
@@ -573,7 +677,7 @@ async fn create_user(
         .await?;
     }
 
-    tracing::info!(%user_id, identifier = %identifier.masked(), "account created");
+    tracing::info!(%user_id, identifier = %label, "account created");
     Ok(user_id)
 }
 

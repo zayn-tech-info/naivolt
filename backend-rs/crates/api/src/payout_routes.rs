@@ -368,7 +368,7 @@ async fn resolve_destination(
 }
 
 /// Locks the user's NGN ledger account, creating it if this is their first.
-async fn lock_user_ngn_account(
+pub(crate) async fn lock_user_ngn_account(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
 ) -> ApiResult<Uuid> {
@@ -399,7 +399,7 @@ async fn lock_user_ngn_account(
 }
 
 /// Finds or creates a platform-scoped account.
-async fn platform_account(
+pub(crate) async fn platform_account(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     kind: AccountKind,
 ) -> ApiResult<Uuid> {
