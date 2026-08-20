@@ -9,6 +9,8 @@
 mod auth_routes;
 mod config;
 mod error;
+mod funding_provider;
+mod funding_routes;
 mod google_keys;
 mod middleware;
 mod activity_routes;
@@ -106,6 +108,15 @@ async fn main() -> Result<()> {
         rates: pricing::Rates::new(&config),
         dev_otp_code: config.dev_otp_code.clone(),
         auto_approve_kyc: config.auto_approve_kyc,
+        funding: Arc::new(match &config.paystack_secret_key {
+            Some(key) => funding_provider::AnyFundingProvider::Paystack(
+                funding_provider::PaystackFunding::new(key.clone()),
+            ),
+            None => {
+                tracing::warn!("no funding provider configured — top-ups will be stubbed");
+                funding_provider::AnyFundingProvider::Stub(funding_provider::StubFunding)
+            }
+        }),
         google_keys: Arc::new(google_keys::GoogleKeys::new()),
         google_client_id: config.google_client_id.clone(),
         numbers: Arc::new(match &config.fivesim_api_key {
@@ -144,6 +155,7 @@ async fn main() -> Result<()> {
                 .merge(giftcard_routes::routes())
                 .merge(giftcard_routes::push_routes())
                 .merge(number_routes::routes())
+                .merge(funding_routes::routes())
                 .merge(kyc_routes::routes()),
         )
         .layer(TraceLayer::new_for_http())
@@ -185,6 +197,10 @@ fn cors(environment: Environment) -> CorsLayer {
         .allow_headers([
             HeaderName::from_static("authorization"),
             HeaderName::from_static("content-type"),
+            // Every money-moving endpoint requires this header, and it is not a
+            // CORS-simple one — omitting it here fails the preflight, so a
+            // browser cannot buy or fund at all while curl works fine.
+            HeaderName::from_static("idempotency-key"),
         ]);
 
     if environment.is_production() {

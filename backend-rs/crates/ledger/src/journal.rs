@@ -30,6 +30,8 @@ pub enum JournalKind {
     PayoutSettle,
     /// Payout failed; the reservation is released back to the user.
     PayoutReversal,
+    /// A card charge confirmed by the funding provider. Credits a naira balance.
+    NgnDeposit,
     /// Naira reserved for a virtual-number order, before the supplier is called.
     NumberReserve,
     /// The verification code arrived; the reservation becomes revenue.
@@ -60,6 +62,7 @@ impl JournalKind {
             JournalKind::PayoutReserve => "payout_reserve",
             JournalKind::PayoutSettle => "payout_settle",
             JournalKind::PayoutReversal => "payout_reversal",
+            JournalKind::NgnDeposit => "ngn_deposit",
             JournalKind::NumberReserve => "number_reserve",
             JournalKind::NumberSettle => "number_settle",
             JournalKind::NumberRefund => "number_refund",

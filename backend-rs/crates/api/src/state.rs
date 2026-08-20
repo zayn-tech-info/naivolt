@@ -1,5 +1,6 @@
 //! Shared application state.
 
+use crate::funding_provider::AnyFundingProvider;
 use crate::google_keys::GoogleKeys;
 use crate::notify::AnyNotifier;
 use crate::number_provider::AnyNumberProvider;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub rates: Rates,
     pub payouts: Arc<AnyPayoutProvider>,
     pub numbers: Arc<AnyNumberProvider>,
+    pub funding: Arc<AnyFundingProvider>,
     /// Google's signing keys, fetched once and refreshed on rotation.
     pub google_keys: Arc<GoogleKeys>,
     /// The OAuth client id incoming ID tokens must be addressed to. None when
