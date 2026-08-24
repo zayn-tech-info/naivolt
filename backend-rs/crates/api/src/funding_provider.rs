@@ -42,9 +42,12 @@ impl AnyFundingProvider {
         email: &str,
         amount_ngn: Decimal,
         reference: &str,
+        callback_url: &str,
     ) -> ApiResult<InitializedCharge> {
         match self {
-            AnyFundingProvider::Paystack(p) => p.initialize(email, amount_ngn, reference).await,
+            AnyFundingProvider::Paystack(p) => {
+                p.initialize(email, amount_ngn, reference, callback_url).await
+            }
             AnyFundingProvider::Stub(p) => p.initialize(email, amount_ngn, reference).await,
         }
     }
@@ -111,6 +114,7 @@ impl PaystackFunding {
         email: &str,
         amount_ngn: Decimal,
         reference: &str,
+        callback_url: &str,
     ) -> ApiResult<InitializedCharge> {
         // Kobo, and integral. A fractional kobo is not a thing Paystack can
         // charge, and rounding it here rather than letting them do it keeps the
@@ -126,6 +130,11 @@ impl PaystackFunding {
                 "amount": kobo,
                 "reference": reference,
                 "currency": "NGN",
+                // Sent per transaction rather than left to the dashboard
+                // setting: the dashboard's URL is one value for every
+                // integration, and this one has to carry the intent id so the
+                // page the payer lands on knows which top-up to confirm.
+                "callback_url": callback_url,
             }))
             .send()
             .await

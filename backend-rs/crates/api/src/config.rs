@@ -61,6 +61,15 @@ pub struct Config {
     /// names the currency, so it is stated here rather than guessed at — a wrong
     /// guess would put a mislabelled cost on every order.
     pub fivesim_currency: Option<String>,
+    /// Where the dashboard lives. Paystack sends the payer back here, so a wrong
+    /// value strands someone who has already been charged on a page that cannot
+    /// tell them their money arrived.
+    pub web_app_url: String,
+    /// What a number sells for, as a multiple of what the supplier charges. The
+    /// naira price is derived rather than typed, because a hand-set price goes
+    /// stale silently: 5SIM moved US WhatsApp to $0.90 while our table still
+    /// said ₦1,010, which is a loss on every sale.
+    pub numbers_margin: Decimal,
     /// Naira per US dollar before margin. Tracks the parallel market, not the
     /// official rate — see `pricing.rs` for why that distinction matters.
     pub usd_ngn_mid: Decimal,
@@ -136,9 +145,22 @@ impl Config {
             google_client_id: env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
             fivesim_api_key: env::var("FIVESIM_API_KEY").ok().filter(|s| !s.is_empty()),
             fivesim_currency: env::var("FIVESIM_CURRENCY").ok().filter(|s| !s.is_empty()),
+            web_app_url: env::var("WEB_APP_URL")
+                .unwrap_or_else(|_| "http://localhost:5173".into())
+                .trim_end_matches('/')
+                .to_owned(),
+            numbers_margin: decimal_env("NUMBERS_MARGIN", Decimal::new(16, 1))?,
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
         };
+
+        // A margin at or below 1 sells every number for less than it costs.
+        if config.numbers_margin <= Decimal::ONE {
+            bail!(
+                "NUMBERS_MARGIN is {}; at or below 1 every number sells at a loss",
+                config.numbers_margin
+            );
+        }
 
         config.validate_for_environment()?;
         Ok(config)
@@ -195,6 +217,18 @@ impl Config {
             bail!("FIVESIM_API_KEY is required in production — the stub provider issues numbers that do not exist");
         }
 
+        // Paystack returns the payer to this URL. Left at its development
+        // default, everyone who pays in production lands on a page that only
+        // exists on the developer's laptop.
+        if self.web_app_url.starts_with("http://localhost")
+            || self.web_app_url.starts_with("http://127.")
+        {
+            bail!(
+                "WEB_APP_URL is {} in production — card payers would be returned to a local address",
+                self.web_app_url
+            );
+        }
+
         Ok(())
     }
 }
@@ -248,6 +282,8 @@ mod tests {
             google_client_id: Some("naivolt-web.apps.googleusercontent.com".into()),
             fivesim_api_key: Some("5sim_live".into()),
             fivesim_currency: Some("USD".into()),
+            web_app_url: "https://naivolt.com".into(),
+            numbers_margin: Decimal::new(16, 1),
             usd_ngn_mid: Decimal::from(1530),
             spread_ngn_per_usd: Decimal::from(10),
         }
@@ -256,6 +292,19 @@ mod tests {
     #[test]
     fn a_valid_production_config_passes() {
         assert!(production_config().validate_for_environment().is_ok());
+    }
+
+    /// Paystack returns the payer to this URL. Left at its development default,
+    /// every successful card payment in production lands on a page that exists
+    /// only on someone's laptop — money taken, balance apparently unchanged.
+    #[test]
+    fn production_refuses_to_boot_returning_payers_to_localhost() {
+        let mut config = production_config();
+        config.web_app_url = "http://localhost:5173".into();
+        assert!(config.validate_for_environment().is_err());
+
+        config.web_app_url = "http://127.0.0.1:5173".into();
+        assert!(config.validate_for_environment().is_err());
     }
 
     /// The most important assertion in this file. A fixed OTP means anyone who

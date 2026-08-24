@@ -37,6 +37,7 @@ use naivolt_core::Asset;
 use naivolt_ledger::{AccountKind, JournalKind};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub fn routes() -> Router<AppState> {
@@ -115,6 +116,11 @@ async fn catalog(State(state): State<AppState>) -> ApiResult<Json<Vec<CatalogPro
 pub struct CreateOrderBody {
     pub product_slug: String,
     pub country_code: String,
+    /// What the client last showed the user. Optional, but when it is sent an
+    /// order that would cost more than that is refused rather than charged: the
+    /// catalogue tracks the supplier now, so a price can move between reading a
+    /// page and buying from it.
+    pub expected_price_ngn: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -174,6 +180,18 @@ async fn create_order(
     .ok_or_else(|| {
         ApiError::BadRequest("That app isn't available in that country yet.".into())
     })?;
+
+    if let Some(expected) = body.expected_price_ngn.as_deref() {
+        let expected = Decimal::from_str(expected.trim())
+            .map_err(|_| ApiError::BadRequest("That expected price isn't a number.".into()))?;
+        // Only a rise is refused. A number that got cheaper is charged at the
+        // cheaper price, which needs no permission from anyone.
+        if price_ngn > expected {
+            return Err(ApiError::PriceMoved {
+                price_ngn: price_ngn.normalize().to_string(),
+            });
+        }
+    }
 
     // --- Reserve, under a row lock -------------------------------------------
     let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;

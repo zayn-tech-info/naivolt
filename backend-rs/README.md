@@ -17,7 +17,7 @@ Custodial wallet, ledger and payout core. Design: [`../docs/ARCHITECTURE.md`](..
 ## Running things
 
 ```sh
-cargo test --workspace          # 185 tests, no database needed
+cargo test --workspace          # 190 tests, no database needed
 
 # schema + its own invariant tests (25 assertions)
 createdb naivolt_dev

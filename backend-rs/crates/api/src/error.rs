@@ -46,6 +46,11 @@ pub enum ApiError {
     QuoteExpired,
     #[error("that quote was already used")]
     QuoteConsumed,
+    /// The catalogue price moved between the page the user read it from and the
+    /// order they placed. Carries the current price so the client can show what
+    /// it is now rather than making them reload and guess what changed.
+    #[error("that price changed to ₦{price_ngn}")]
+    PriceMoved { price_ngn: String },
     #[error("this bank account isn't verified yet")]
     BankUnverified,
     #[error("{asset} is paused right now")]
@@ -80,6 +85,7 @@ impl ApiError {
             ApiError::KycRequired { .. } => "KYC_REQUIRED",
             ApiError::QuoteExpired => "QUOTE_EXPIRED",
             ApiError::QuoteConsumed => "QUOTE_CONSUMED",
+            ApiError::PriceMoved { .. } => "PRICE_MOVED",
             ApiError::BankUnverified => "BANK_UNVERIFIED",
             ApiError::AssetPaused { .. } => "ASSET_PAUSED",
             ApiError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
@@ -101,7 +107,9 @@ impl ApiError {
             | ApiError::LimitExceeded { .. }
             | ApiError::BankUnverified => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::KycRequired { .. } => StatusCode::FORBIDDEN,
-            ApiError::QuoteExpired | ApiError::QuoteConsumed => StatusCode::CONFLICT,
+            ApiError::QuoteExpired | ApiError::QuoteConsumed | ApiError::PriceMoved { .. } => {
+                StatusCode::CONFLICT
+            }
             ApiError::AssetPaused { .. } | ApiError::ServiceUnavailable(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -127,6 +135,7 @@ impl ApiError {
             ApiError::LimitExceeded { limit } => Some(json!({ "limit": limit })),
             ApiError::KycRequired { next_step } => Some(json!({ "nextStep": next_step })),
             ApiError::AssetPaused { asset } => Some(json!({ "asset": asset })),
+            ApiError::PriceMoved { price_ngn } => Some(json!({ "priceNgn": price_ngn })),
             _ => None,
         }
     }

@@ -32,4 +32,7 @@ pub struct AppState {
     pub dev_otp_code: Option<String>,
     /// Development only: approve KYC on submission. False in production.
     pub auto_approve_kyc: bool,
+    /// Where the dashboard lives, without a trailing slash. Paystack returns the
+    /// payer to a URL under it.
+    pub web_app_url: String,
 }

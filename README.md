@@ -185,9 +185,17 @@ EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=
 DATABASE_URL=postgres://localhost/naivolt_dev
 REDIS_URL=redis://localhost:6379
 
-PAYSTACK_SECRET_KEY=        # bank payouts
+PAYSTACK_SECRET_KEY=        # bank payouts, and card top-ups
 TERMII_API_KEY=             # SMS OTP
 DOJAH_API_KEY=              # BVN / NIN / liveness
+
+# Where Paystack returns a card payer. Production refuses to boot on a
+# localhost value — everyone who paid would land on a page that isn't there.
+WEB_APP_URL=http://localhost:5173
+
+FIVESIM_API_KEY=            # virtual numbers; stubbed without it
+FIVESIM_CURRENCY=USD        # the unit 5SIM quotes in — see docs/NUMBERS.md §5
+NUMBERS_MARGIN=1.6          # sale price as a multiple of supplier cost
 
 # Deposit watching. A network with no URL here is not watched at all.
 ETHEREUM_RPC_URL=https://ethereum-rpc.publicnode.com
@@ -211,7 +219,7 @@ ignored.
 
 ```sh
 cd backend-rs
-cargo test --workspace                                       # 185 tests
+cargo test --workspace                                       # 190 tests
 cargo clippy --workspace --all-targets
 psql -d naivolt_dev -f migrations/tests/invariants.sql        # 14 assertions
 psql -d naivolt_dev -f migrations/tests/auth_invariants.sql   # 11 assertions
@@ -248,7 +256,7 @@ reload automatically.
 
 | | |
 |---|---|
-| Rust tests | 185 passing |
+| Rust tests | 190 passing |
 | SQL invariants | 25 passing |
 | Clippy | clean |
 | iOS bundle | exports clean |

@@ -112,9 +112,17 @@ async fn create_intent(
     .fetch_one(&state.db)
     .await?;
 
+    // Where Paystack returns the payer. The intent id rides along so the page
+    // they land on can confirm this top-up specifically, rather than guessing
+    // from whatever Paystack appends.
+    let callback_url = format!("{}/dashboard?intent={id}", state.web_app_url);
+
     // The row exists before the provider is called, so a charge that succeeds
     // while our response is lost still has somewhere to be reconciled to.
-    let charge = state.funding.initialize(&email, amount, &reference).await?;
+    let charge = state
+        .funding
+        .initialize(&email, amount, &reference, &callback_url)
+        .await?;
 
     Ok(Json(IntentResponse {
         id,
@@ -145,31 +153,7 @@ async fn get_intent(
     let (status, amount, reference, created_at) = row.ok_or(ApiError::NotFound)?;
 
     let status = if status == "pending" {
-        match state.funding.verify(&reference, amount).await {
-            Ok(ChargeState::Succeeded { amount_ngn }) => {
-                credit_deposit(&state, id, user.id, &reference, amount_ngn).await?;
-                "succeeded".to_owned()
-            }
-            Ok(ChargeState::Failed { reason }) => {
-                sqlx::query(
-                    "UPDATE ngn_deposits SET status = 'failed', failure_reason = $2,
-                            updated_at = now()
-                      WHERE id = $1 AND status = 'pending'",
-                )
-                .bind(id)
-                .bind(&reason)
-                .execute(&state.db)
-                .await?;
-                "failed".to_owned()
-            }
-            Ok(ChargeState::Pending) => status,
-            // A provider we cannot reach is not a failed payment. The intent
-            // stays open and the next read asks again.
-            Err(e) => {
-                tracing::warn!(error = %e, intent = %id, "funding verify failed");
-                status
-            }
-        }
+        settle(&state, id, user.id, &reference, amount).await?
     } else {
         status
     };
@@ -183,6 +167,46 @@ async fn get_intent(
         live: state.funding.is_live(),
         created_at: created_at.to_rfc3339(),
     }))
+}
+
+/// Ask the provider where a charge stands, and settle the intent if it has
+/// finished. Returns the status the intent now holds.
+///
+/// Shared with the reconciler in `funding_reconciler.rs`, because a top-up that
+/// nobody is watching has to reach the same conclusion as one someone is: the
+/// user who pays and closes the tab has been charged either way.
+pub(crate) async fn settle(
+    state: &AppState,
+    id: Uuid,
+    user_id: Uuid,
+    reference: &str,
+    amount: Decimal,
+) -> ApiResult<String> {
+    match state.funding.verify(reference, amount).await {
+        Ok(ChargeState::Succeeded { amount_ngn }) => {
+            credit_deposit(state, id, user_id, reference, amount_ngn).await?;
+            Ok("succeeded".to_owned())
+        }
+        Ok(ChargeState::Failed { reason }) => {
+            sqlx::query(
+                "UPDATE ngn_deposits SET status = 'failed', failure_reason = $2,
+                        updated_at = now()
+                  WHERE id = $1 AND status = 'pending'",
+            )
+            .bind(id)
+            .bind(&reason)
+            .execute(&state.db)
+            .await?;
+            Ok("failed".to_owned())
+        }
+        Ok(ChargeState::Pending) => Ok("pending".to_owned()),
+        // A provider we cannot reach is not a failed payment. The intent stays
+        // open and the next read — or the next reconciler pass — asks again.
+        Err(e) => {
+            tracing::warn!(error = %e, intent = %id, "funding verify failed");
+            Ok("pending".to_owned())
+        }
+    }
 }
 
 async fn list_intents(

@@ -10,6 +10,7 @@ mod auth_routes;
 mod config;
 mod error;
 mod funding_provider;
+mod funding_reconciler;
 mod funding_routes;
 mod google_keys;
 mod middleware;
@@ -18,6 +19,7 @@ mod bank_routes;
 mod giftcard_routes;
 mod kyc_routes;
 mod notify;
+mod number_catalog;
 mod number_provider;
 mod number_routes;
 mod payout_provider;
@@ -108,6 +110,7 @@ async fn main() -> Result<()> {
         rates: pricing::Rates::new(&config),
         dev_otp_code: config.dev_otp_code.clone(),
         auto_approve_kyc: config.auto_approve_kyc,
+        web_app_url: config.web_app_url.clone(),
         funding: Arc::new(match &config.paystack_secret_key {
             Some(key) => funding_provider::AnyFundingProvider::Paystack(
                 funding_provider::PaystackFunding::new(key.clone()),
@@ -141,6 +144,19 @@ async fn main() -> Result<()> {
             }
         }),
     };
+
+    // A charge nobody came back for is still a charge (funding_reconciler.rs),
+    // and a catalogue nobody synced shows every number as out of stock
+    // (number_catalog.rs). Both run for the life of the process.
+    funding_reconciler::spawn(state.clone());
+    number_catalog::spawn(
+        state.clone(),
+        number_catalog::Pricing {
+            usd_ngn: config.usd_ngn_mid,
+            margin: config.numbers_margin,
+            supplier_currency: config.fivesim_currency.clone(),
+        },
+    );
 
     let app = Router::new()
         .route("/health", get(health))
