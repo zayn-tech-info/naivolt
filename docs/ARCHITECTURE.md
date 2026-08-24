@@ -218,21 +218,28 @@ restored. There is no window in which the money is in neither place.
 
 ## 6. Deposit pipeline
 
-Per chain, a `watcher` task:
+Per *network* — Ethereum, BSC, Polygon and Base share one address but are four
+chains with independent heights — a `watcher` task:
 
-1. tails new blocks from the head (websocket where available, else 3s poll)
-2. matches transfers against `wallets.address` (in-memory bloom filter + PG lookup)
+1. polls the head, and scans a bounded window of blocks behind it
+2. matches transfers against `wallets.address` by putting the address set in the
+   node's own log filter, so nothing but our own deposits comes back
 3. inserts `deposits` row, idempotent on `(chain, tx_hash, log_index)`
 4. tracks confirmations; credits the ledger only at threshold
-5. handles reorgs: if a credited tx disappears from the canonical chain, write a
-   reversing journal and flag the account
+5. handles reorgs: if a credited tx is no longer in the canonical chain *at all*,
+   write a reversing journal and flag the account — a tx merely re-included in a
+   different block is followed, not reversed
 
 **Confirmation thresholds:** BTC 2 · EVM 12 (Ethereum) / 20 (BSC, Polygon) /
 10 (Base) · TRON 20 (solid block) · Solana finalized commitment.
 
-A cursor table per chain makes the watcher crash-safe: restart resumes from the
+A cursor table per network makes the watcher crash-safe: restart resumes from the
 last fully-processed block, and reprocessing is harmless because step 3 is
-idempotent.
+idempotent — which is also what lets every pass overlap the previous one, so a
+pooled RPC answering from a lagging node cannot hide a deposit permanently.
+
+What the public endpoints actually do to all of this, and the two mechanisms that
+came out of finding out, are in [WATCHERS.md](WATCHERS.md).
 
 ---
 
@@ -455,7 +462,7 @@ request.
 |---|---|
 | 1 | Workspace, migrations, ledger core + invariant tests, `signer` + derivation (all 4 chains) with BIP-39 test vectors |
 | 2 | Auth: phone + email OTP, identity linking, PIN, JWT sessions with rotating refresh, user + wallet provisioning, balance reads |
-| 3 | Watchers: TRON + EVM (covers ~90% of NG volume), deposit crediting, reorg handling |
+| 3 | Watchers: TRON + EVM (covers ~90% of NG volume), deposit crediting, reorg handling — **done**, see [WATCHERS.md](WATCHERS.md) |
 | 4 | Rates + quotes + sell flow |
 | 5 | KYC tiers + provider integration, then payouts + Paystack + webhooks + reconciliation |
 | 6 | Sweeper + gas station + admin treasury/wallets pages |

@@ -51,6 +51,9 @@ reversed if it fails. There is no window where the money is in neither place.
 
 Full design in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**; the HTTP surface
 between the core and the app in **[docs/API-CONTRACT.md](docs/API-CONTRACT.md)**.
+Two subsystems have their own notes: deposit detection in
+**[docs/WATCHERS.md](docs/WATCHERS.md)**, virtual numbers and naira funding in
+**[docs/NUMBERS.md](docs/NUMBERS.md)**.
 
 ---
 
@@ -130,6 +133,18 @@ createdb naivolt_dev
 for f in migrations/0*.sql; do psql -v ON_ERROR_STOP=1 -d naivolt_dev -f "$f"; done
 ```
 
+### Watching for deposits
+
+```sh
+set -a && . ./backend-rs/.env.local && set +a   # RPC endpoints
+DATABASE_URL=postgres://localhost/naivolt_dev cargo run -p naivolt-watcher
+```
+
+Only networks with an RPC URL configured are watched, and the process refuses to
+start if none are. Not every public endpoint serves `eth_getLogs` — the ones that
+do, and the ones that quietly do not, are listed in
+[docs/WATCHERS.md](docs/WATCHERS.md) §4.
+
 ### Test accounts
 
 ```sh
@@ -173,6 +188,14 @@ REDIS_URL=redis://localhost:6379
 PAYSTACK_SECRET_KEY=        # bank payouts
 TERMII_API_KEY=             # SMS OTP
 DOJAH_API_KEY=              # BVN / NIN / liveness
+
+# Deposit watching. A network with no URL here is not watched at all.
+ETHEREUM_RPC_URL=https://ethereum-rpc.publicnode.com
+BSC_RPC_URL=https://bsc-rpc.publicnode.com
+POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com
+BASE_RPC_URL=https://mainnet.base.org
+TRON_RPC_URL=https://api.trongrid.io
+TRON_API_KEY=               # without it, TRON is polled slowly to dodge 429s
 ```
 
 > The master seed is **never** an environment variable. It is KMS-wrapped and
@@ -188,9 +211,9 @@ ignored.
 
 ```sh
 cd backend-rs
-cargo test --workspace                                       # 82 tests
+cargo test --workspace                                       # 185 tests
 cargo clippy --workspace --all-targets
-psql -d naivolt_dev -f migrations/tests/invariants.sql        # 10 assertions
+psql -d naivolt_dev -f migrations/tests/invariants.sql        # 14 assertions
 psql -d naivolt_dev -f migrations/tests/auth_invariants.sql   # 11 assertions
 ```
 
@@ -225,14 +248,14 @@ reload automatically.
 
 | | |
 |---|---|
-| Rust tests | 82 passing |
-| SQL invariants | 21 passing |
+| Rust tests | 185 passing |
+| SQL invariants | 25 passing |
 | Clippy | clean |
 | iOS bundle | exports clean |
 
-Phases 1–2 of the build order in ARCHITECTURE.md §13 are done: ledger, key
-derivation, auth. Chain watchers, sweeping and payouts (phases 3–7) are next.
-Nothing before phase 5 can move customer funds.
+Phases 1–3 of the build order in ARCHITECTURE.md §13 are done: ledger, key
+derivation, auth, and the TRON + EVM watchers that credit deposits. Sweeping and
+payouts (phases 4–7) are next. Nothing before phase 5 can move customer funds.
 
 ---
 

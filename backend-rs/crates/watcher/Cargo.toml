@@ -1,0 +1,32 @@
+[package]
+name = "naivolt-watcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "watcher"
+path = "src/main.rs"
+
+[dependencies]
+naivolt-core = { path = "../core" }
+naivolt-ledger = { path = "../ledger" }
+
+tokio.workspace = true
+sqlx.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hex.workspace = true
+bs58.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true

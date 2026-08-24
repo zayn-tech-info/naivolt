@@ -1647,6 +1647,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "naivolt-watcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bs58",
+ "chrono",
+ "hex",
+ "naivolt-core",
+ "naivolt-ledger",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "no-std-compat"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

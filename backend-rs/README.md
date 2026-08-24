@@ -10,14 +10,16 @@ Custodial wallet, ledger and payout core. Design: [`../docs/ARCHITECTURE.md`](..
 | `naivolt-wallet` | BIP-39 seed handling and address derivation (BTC, EVM, TRON, Solana) |
 | `naivolt-ledger` | Double-entry journals, accounts, balance invariants |
 | `naivolt-auth` | Google/Apple OIDC, phone OTP, identity linking, PIN, KYC tiers |
+| `naivolt-api` | HTTP surface: auth, wallets, quotes, virtual numbers, funding |
+| `naivolt-watcher` | Chain watchers: deposit detection, confirmations, reorgs |
 | `naivolt-devtools` | Local seeding. Never deployed (`publish = false`) |
 
 ## Running things
 
 ```sh
-cargo test --workspace          # 82 tests, no database needed
+cargo test --workspace          # 185 tests, no database needed
 
-# schema + its own invariant tests (19 assertions)
+# schema + its own invariant tests (25 assertions)
 createdb naivolt_dev
 for f in migrations/0*.sql; do psql -v ON_ERROR_STOP=1 -d naivolt_dev -f "$f"; done
 psql -v ON_ERROR_STOP=1 -d naivolt_dev -f migrations/tests/invariants.sql

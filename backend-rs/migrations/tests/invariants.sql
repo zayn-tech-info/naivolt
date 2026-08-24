@@ -174,5 +174,84 @@ BEGIN
         user_balance, float_balance;
 END $$;
 
+
+-- 9. A credited deposit must point at the journal that credited it. Without
+--    this, a crediting bug could leave a balance with no journal behind it —
+--    money reconciliation could never explain.
+DO $$
+DECLARE
+    uid UUID;
+    wid UUID;
+BEGIN
+    SELECT id INTO uid FROM users WHERE phone = '+2348012345678';
+    SELECT id INTO wid FROM wallets WHERE address = 'TSweepTestWallet';
+
+    INSERT INTO deposits (user_id, wallet_id, chain, network, asset, tx_hash,
+                          amount, block_number, status)
+    VALUES (uid, wid, 'tron', 'tron', 'USDT', 'tx-confirmed-no-journal',
+            10, 1, 'confirmed');
+    RAISE EXCEPTION 'FAIL: deposit marked confirmed with no journal';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE '  ok: confirmed deposit without a journal rejected';
+END $$;
+
+-- 10. And a reversed one at the journal that undid it, for the same reason in
+--     the other direction.
+DO $$
+DECLARE
+    uid UUID;
+    wid UUID;
+    jid UUID;
+BEGIN
+    SELECT id INTO uid FROM users WHERE phone = '+2348012345678';
+    SELECT id INTO wid FROM wallets WHERE address = 'TSweepTestWallet';
+    SELECT id INTO jid FROM ledger_journals WHERE idempotency_key = 'test-key-1';
+
+    INSERT INTO deposits (user_id, wallet_id, chain, network, asset, tx_hash,
+                          amount, block_number, status, credited_journal_id)
+    VALUES (uid, wid, 'tron', 'tron', 'USDT', 'tx-reversed-no-journal',
+            10, 1, 'reversed', jid);
+    RAISE EXCEPTION 'FAIL: deposit marked reversed with no reversing journal';
+EXCEPTION
+    WHEN check_violation THEN
+        RAISE NOTICE '  ok: reversed deposit without a reversing journal rejected';
+END $$;
+
+-- 11. The watcher's whole idempotency guarantee: reprocessing a block must not
+--     insert the same transfer twice.
+DO $$
+DECLARE
+    uid UUID;
+    wid UUID;
+BEGIN
+    SELECT id INTO uid FROM users WHERE phone = '+2348012345678';
+    SELECT id INTO wid FROM wallets WHERE address = 'TSweepTestWallet';
+
+    INSERT INTO deposits (user_id, wallet_id, chain, network, asset, tx_hash,
+                          output_index, amount, block_number)
+    VALUES (uid, wid, 'tron', 'tron', 'USDT', 'tx-seen-twice', 0, 10, 1);
+    INSERT INTO deposits (user_id, wallet_id, chain, network, asset, tx_hash,
+                          output_index, amount, block_number)
+    VALUES (uid, wid, 'tron', 'tron', 'USDT', 'tx-seen-twice', 0, 10, 1);
+    RAISE EXCEPTION 'FAIL: the same transfer was recorded twice';
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE NOTICE '  ok: the same transfer cannot be recorded twice';
+END $$;
+
+-- 12. One native-coin row per network. NULL is distinct from NULL in a plain
+--     unique index, so two "native" rows would otherwise both be accepted and
+--     the watcher would credit a deposit against whichever it read first.
+DO $$
+BEGIN
+    INSERT INTO token_contracts (network, asset, contract, decimals)
+    VALUES ('tron', 'TRX', NULL, 6);
+    RAISE EXCEPTION 'FAIL: two native rows accepted for one network';
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE NOTICE '  ok: one native-coin row per network';
+END $$;
+
 \echo ''
 \echo 'All schema invariants hold.'
