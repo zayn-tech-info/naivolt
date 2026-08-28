@@ -1,0 +1,19 @@
+[Unit]
+Description=Naivolt API
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/naivolt/backend-rs
+EnvironmentFile=/opt/naivolt/backend-rs/.env
+ExecStart=/opt/naivolt/backend-rs/target/release/api
+Restart=on-failure
+RestartSec=5
+# One vCPU shared with mongod, qdrant and a Next app: keep the API from
+# starving them if it ever spins.
+CPUWeight=50
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
