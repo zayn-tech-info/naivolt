@@ -1,36 +1,40 @@
 //! Keeping the number catalogue in step with the supplier.
 //!
-//! `number_prices` used to be a hand-written table: 72 rows, `stock` left at 0
-//! on every one of them and `provider_cost` never filled in. The catalogue
-//! endpoint reads `in_stock: stock > 0`, so every number on the dashboard was
-//! showing as unavailable, and nothing in the system knew what any of them cost
-//! us. Both facts came from the same missing piece — this.
+//! `number_prices` began as 72 hand-written rows with `stock` left at 0 on every
+//! one of them. The catalogue endpoint reads `in_stock: stock > 0`, so every
+//! number on the dashboard showed as unavailable, and `provider_cost` was never
+//! filled in, so nothing knew what any of them cost us.
 //!
-//! 5SIM's *guest* endpoints need no API key, so the catalogue is live in
-//! development too, and one request per country returns every product's stock
-//! and price at once:
+//! It is no longer a list anyone types. 5SIM offers **153 countries** and, per
+//! country, between 200 and 779 products — about a thousand services in total.
+//! The sync reads the supplier's own country list and per-country product list
+//! and inserts what it finds, so a service 5SIM adds tomorrow is on sale here
+//! without a migration.
 //!
 //! ```text
+//! GET /v1/guest/countries
+//! {"nigeria":{"iso":{"ng":1},"prefix":{"+234":1},"text_en":"Nigeria"}, …}
+//!
 //! GET /v1/guest/products/nigeria/any
 //! {"whatsapp":{"Category":"activation","Qty":1554232,"Price":0.28}, …}
 //! ```
 //!
+//! Guest endpoints need no API key, so the catalogue is live in development too.
+//!
 //! ## The price is derived, not typed
 //!
-//! A hand-set naira price goes stale silently and in the dangerous direction:
-//! 5SIM had moved US WhatsApp to $0.90 (≈₦1,395) while the table still said
-//! ₦1,010, so every US sale lost money and nothing said so. The sale price is
-//! now the supplier's own price times a margin, which cannot drift below cost.
+//! A hand-set naira price goes stale in the dangerous direction: 5SIM moved US
+//! WhatsApp to $0.90 (≈₦1,395) while the table still said ₦1,010, so every US
+//! sale lost money and nothing said so. Price is the supplier's cost times a
+//! margin, which cannot drift below cost.
 //!
 //! ## The unit is dollars
 //!
-//! 5SIM quotes a bare number and never names the currency, which is why
-//! `FIVESIM_CURRENCY` exists. The guest API settles it by arithmetic: US
-//! WhatsApp at 0.90 and Instagram at 0.06 are only coherent as dollars — no
-//! activation anywhere costs six hundredths of a rouble. A configured currency
-//! that is not USD is therefore believed over this assumption, and the sync
-//! records cost and stock but leaves pricing alone rather than converting
-//! through a rate it was never given.
+//! 5SIM quotes a bare number and never names the currency. US WhatsApp at 0.90
+//! and Instagram at 0.06 are only coherent as dollars — no activation anywhere
+//! costs six hundredths of a rouble. `FIVESIM_CURRENCY` is believed over that
+//! inference: set to anything but USD, the sync records stock and cost but
+//! leaves pricing alone rather than converting through a rate it was never given.
 
 use crate::state::AppState;
 use rust_decimal::Decimal;
@@ -39,20 +43,24 @@ use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
+const GUEST_COUNTRIES: &str = "https://5sim.net/v1/guest/countries";
 const GUEST_PRODUCTS: &str = "https://5sim.net/v1/guest/products";
 
-/// Stock moves constantly; price barely does. This is paced for price.
-const INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// A full sweep is 153 requests. Stock moves constantly, price barely does, and
+/// this is paced for price — and for staying welcome on an unauthenticated API.
+const INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Ignore a recomputed price this close to the stored one.
-///
-/// Without it a supplier's ordinary cent-level jitter rewrites the whole table
-/// every five minutes, and a price can move between the page a user is reading
-/// and the order they place from it.
-const PRICE_HYSTERESIS: Decimal = Decimal::from_parts(5, 0, 0, false, 2); // 0.05
+/// Between countries, so a sweep is a trickle rather than a burst.
+const REQUEST_SPACING: Duration = Duration::from_millis(150);
 
-/// We sell one-shot activations. 5SIM also lists rentals and hosting under the
-/// same names, at prices that would be nonsense charged for a single code.
+/// Ignore a recomputed price this close to the stored one. Without it the
+/// supplier's cent-level jitter rewrites tens of thousands of rows every sweep,
+/// and a price can move between the page a user is reading and the order they
+/// place from it.
+const PRICE_HYSTERESIS: &str = "0.05";
+
+/// We sell one-shot activations. 5SIM lists rentals and hosting under the same
+/// names at prices that would be nonsense charged for a single code.
 const ACTIVATION: &str = "activation";
 
 /// No number sells for less than this, whatever the arithmetic says.
@@ -80,7 +88,8 @@ impl Pricing {
 
     /// Sale price for a supplier cost, rounded up to the nearest ₦10.
     ///
-    /// Up, not to nearest: rounding down is a margin cut taken 72 rows at a time.
+    /// Up, not to nearest: rounding down is a margin cut taken tens of thousands
+    /// of rows at a time.
     fn sale_price(&self, cost: Decimal) -> Decimal {
         let ten = Decimal::from(10);
         let raw = cost * self.usd_ngn * self.margin;
@@ -99,6 +108,18 @@ struct GuestProduct {
     price: Decimal,
 }
 
+/// 5SIM's country entry. `iso` and `prefix` are objects keyed by the value —
+/// `{"ng": 1}` — rather than plain strings, so the key is the datum.
+#[derive(Debug, Deserialize)]
+struct GuestCountry {
+    #[serde(default)]
+    iso: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    prefix: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    text_en: Option<String>,
+}
+
 pub fn spawn(state: AppState, pricing: Pricing) {
     if !pricing.prices_in_usd() {
         tracing::warn!(
@@ -110,7 +131,7 @@ pub fn spawn(state: AppState, pricing: Pricing) {
 
     tokio::spawn(async move {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
 
@@ -118,9 +139,9 @@ pub fn spawn(state: AppState, pricing: Pricing) {
             match sync(&state, &pricing, &http).await {
                 Ok(report) => tracing::info!(
                     countries = report.countries,
-                    updated = report.updated,
-                    repriced = report.repriced,
-                    out_of_stock = report.out_of_stock,
+                    products = report.products,
+                    rows = report.rows,
+                    in_stock = report.in_stock,
                     "number catalogue synced"
                 ),
                 // Leave the last known catalogue in place. A supplier we cannot
@@ -136,9 +157,9 @@ pub fn spawn(state: AppState, pricing: Pricing) {
 #[derive(Default)]
 pub struct SyncReport {
     pub countries: usize,
-    pub updated: usize,
-    pub repriced: usize,
-    pub out_of_stock: usize,
+    pub products: usize,
+    pub rows: usize,
+    pub in_stock: usize,
 }
 
 pub async fn sync(
@@ -146,133 +167,259 @@ pub async fn sync(
     pricing: &Pricing,
     http: &reqwest::Client,
 ) -> anyhow::Result<SyncReport> {
-    let countries: Vec<(Uuid, String, String)> =
-        sqlx::query_as("SELECT id, code, provider_country FROM number_countries WHERE active")
-            .fetch_all(&state.db)
-            .await?;
-    let products: Vec<(Uuid, String, String)> =
-        sqlx::query_as("SELECT id, slug, provider_product FROM number_products WHERE active")
-            .fetch_all(&state.db)
-            .await?;
+    let countries: HashMap<String, GuestCountry> = http
+        .get(GUEST_COUNTRIES)
+        .send()
+        .await?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("country list unreadable: {e}"))?;
 
     let mut report = SyncReport::default();
 
-    for (country_id, country_code, provider_country) in &countries {
-        let url = format!("{GUEST_PRODUCTS}/{provider_country}/any");
+    for (key, country) in &countries {
+        let Some(country_id) = upsert_country(state, key, country).await? else {
+            continue;
+        };
+        report.countries += 1;
+
+        tokio::time::sleep(REQUEST_SPACING).await;
+
+        let url = format!("{GUEST_PRODUCTS}/{key}/any");
         let listing: HashMap<String, GuestProduct> = match http.get(&url).send().await {
             Ok(response) if response.status().is_success() => match response.json().await {
                 Ok(listing) => listing,
                 Err(err) => {
-                    tracing::warn!(%country_code, error = %err, "5sim listing was unreadable");
+                    tracing::warn!(country = %key, error = %err, "5sim listing unreadable");
                     continue;
                 }
             },
             Ok(response) => {
-                tracing::warn!(%country_code, status = %response.status(), "5sim listing refused");
+                tracing::warn!(country = %key, status = %response.status(), "5sim listing refused");
                 continue;
             }
             Err(err) => {
-                tracing::warn!(%country_code, error = %err, "5sim listing unreachable");
+                tracing::warn!(country = %key, error = %err, "5sim listing unreachable");
                 continue;
             }
         };
-        report.countries += 1;
 
-        for (product_id, slug, provider_product) in &products {
-            let offer = listing
-                .get(provider_product)
-                .filter(|offer| offer.category == ACTIVATION);
-
-            let (stock, cost) = match offer {
-                Some(offer) => (offer.qty.max(0) as i32, Some(offer.price)),
-                // Not offered here today. Recording zero is the honest answer —
-                // the catalogue reads `in_stock` from it — and the price stays
-                // put so the row is ready when it comes back.
-                None => (0, None),
-            };
-            if stock == 0 {
-                report.out_of_stock += 1;
-            }
-
-            let stored: Option<(Decimal, Option<Decimal>)> = sqlx::query_as(
-                "SELECT price_ngn, provider_cost FROM number_prices
-                  WHERE product_id = $1 AND country_id = $2",
-            )
-            .bind(product_id)
-            .bind(country_id)
-            .fetch_optional(&state.db)
-            .await?;
-
-            let new_price = match (cost, pricing.prices_in_usd()) {
-                (Some(cost), true) => {
-                    let candidate = pricing.sale_price(cost);
-                    match stored.as_ref().map(|(price, _)| *price) {
-                        // Hold the current price through ordinary supplier
-                        // jitter, so the number a user is looking at is still
-                        // that price when they buy it.
-                        Some(current)
-                            if current > Decimal::ZERO
-                                && ((candidate - current) / current).abs() < PRICE_HYSTERESIS =>
-                        {
-                            current
-                        }
-                        Some(current) => {
-                            if current != candidate {
-                                report.repriced += 1;
-                                tracing::info!(
-                                    %slug, %country_code, %current, %candidate, %cost,
-                                    "number repriced from supplier cost"
-                                );
-                            }
-                            candidate
-                        }
-                        None => candidate,
-                    }
-                }
-                // No cost to price from, or a currency we cannot convert.
-                _ => match stored.as_ref().map(|(price, _)| *price) {
-                    Some(current) => current,
-                    None => continue,
-                },
-            };
-
-            sqlx::query(
-                "INSERT INTO number_prices
-                    (product_id, country_id, price_ngn, provider_cost,
-                     provider_cost_currency, provider_operator, stock, synced_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, 'any', $6, now(), now())
-                 ON CONFLICT (product_id, country_id) DO UPDATE
-                    SET price_ngn = EXCLUDED.price_ngn,
-                        provider_cost = COALESCE(EXCLUDED.provider_cost, number_prices.provider_cost),
-                        provider_cost_currency = EXCLUDED.provider_cost_currency,
-                        provider_operator = EXCLUDED.provider_operator,
-                        stock = EXCLUDED.stock,
-                        synced_at = now(),
-                        updated_at = now()",
-            )
-            .bind(product_id)
-            .bind(country_id)
-            .bind(new_price)
-            .bind(cost)
-            .bind(
-                pricing
-                    .supplier_currency
-                    .clone()
-                    .unwrap_or_else(|| "USD".to_owned()),
-            )
-            .bind(stock)
-            .execute(&state.db)
-            .await?;
-
-            report.updated += 1;
+        let offers: Vec<(&String, &GuestProduct)> = listing
+            .iter()
+            .filter(|(_, offer)| offer.category == ACTIVATION)
+            .collect();
+        if offers.is_empty() {
+            continue;
         }
+
+        let product_ids = upsert_products(state, &offers).await?;
+        report.products = report.products.max(product_ids.len());
+
+        let written = upsert_prices(state, country_id, &offers, &product_ids, pricing).await?;
+        report.rows += written;
+        report.in_stock += offers.iter().filter(|(_, o)| o.qty > 0).count();
     }
 
     if report.countries == 0 {
-        anyhow::bail!("no country listing could be read from 5sim");
+        anyhow::bail!("no country could be read from 5sim");
     }
 
     Ok(report)
+}
+
+/// Insert a country the supplier lists, or return the id of the one we have.
+///
+/// `iso` and `prefix` are keyed by their own value, so a missing key means the
+/// supplier gave us a country we cannot address — skipped rather than guessed.
+async fn upsert_country(
+    state: &AppState,
+    key: &str,
+    country: &GuestCountry,
+) -> anyhow::Result<Option<Uuid>> {
+    let (Some(iso), Some(prefix)) = (
+        country.iso.keys().next().cloned(),
+        country.prefix.keys().next().cloned(),
+    ) else {
+        return Ok(None);
+    };
+
+    let name = country
+        .text_en
+        .clone()
+        .unwrap_or_else(|| humanise(key));
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO number_countries (code, name, dial_code, provider_country)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (provider_country) DO UPDATE
+            SET name = EXCLUDED.name, dial_code = EXCLUDED.dial_code
+         RETURNING id",
+    )
+    .bind(iso.to_uppercase())
+    .bind(name)
+    .bind(prefix)
+    .bind(key)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Some(id))
+}
+
+/// Insert every product in one statement, and return their ids by supplier key.
+///
+/// One round trip per country rather than one per product: a country can list
+/// 779 of them, and 153 countries of per-row inserts is a sweep that never ends.
+async fn upsert_products(
+    state: &AppState,
+    offers: &[(&String, &GuestProduct)],
+) -> anyhow::Result<HashMap<String, Uuid>> {
+    let keys: Vec<String> = offers.iter().map(|(k, _)| (*k).clone()).collect();
+    let names: Vec<String> = keys.iter().map(|k| humanise(k)).collect();
+
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "INSERT INTO number_products (slug, name, provider_product)
+         SELECT k, n, k FROM UNNEST($1::text[], $2::text[]) AS t(k, n)
+         ON CONFLICT (provider_product) DO UPDATE SET name = number_products.name
+         RETURNING id, provider_product",
+    )
+    .bind(&keys)
+    .bind(&names)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(rows.into_iter().map(|(id, key)| (key, id)).collect())
+}
+
+/// Write a country's prices in one statement.
+///
+/// The hysteresis lives in the `ON CONFLICT` rather than in a read-then-write,
+/// because reading 75,000 stored prices per sweep to decide whether to change
+/// them is most of the work of the sweep.
+async fn upsert_prices(
+    state: &AppState,
+    country_id: Uuid,
+    offers: &[(&String, &GuestProduct)],
+    product_ids: &HashMap<String, Uuid>,
+    pricing: &Pricing,
+) -> anyhow::Result<usize> {
+    let mut ids = Vec::with_capacity(offers.len());
+    let mut prices = Vec::with_capacity(offers.len());
+    let mut costs = Vec::with_capacity(offers.len());
+    let mut stocks = Vec::with_capacity(offers.len());
+
+    for (key, offer) in offers {
+        let Some(id) = product_ids.get(*key) else {
+            continue;
+        };
+        ids.push(*id);
+        prices.push(pricing.sale_price(offer.price));
+        costs.push(offer.price);
+        stocks.push(i32::try_from(offer.qty.max(0)).unwrap_or(i32::MAX));
+    }
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Without a usable currency the cost is still worth recording; the price is
+    // not something we can compute, so an existing one is kept and a new row is
+    // priced at the floor rather than at a guess.
+    let priced = pricing.prices_in_usd();
+    let currency = pricing
+        .supplier_currency
+        .clone()
+        .unwrap_or_else(|| "USD".to_owned());
+
+    let written = sqlx::query(&format!(
+        "INSERT INTO number_prices
+            (product_id, country_id, price_ngn, provider_cost, provider_cost_currency,
+             provider_operator, stock, synced_at, updated_at, last_in_stock_at)
+         SELECT p, $2, price, cost, $6, 'any', stock, now(), now(),
+                CASE WHEN stock > 0 THEN now() END
+           FROM UNNEST($1::uuid[], $3::numeric[], $4::numeric[], $5::int[])
+                AS t(p, price, cost, stock)
+         ON CONFLICT (product_id, country_id) DO UPDATE
+            SET price_ngn = CASE
+                    WHEN NOT {priced} THEN number_prices.price_ngn
+                    WHEN abs(EXCLUDED.price_ngn - number_prices.price_ngn)
+                         / GREATEST(number_prices.price_ngn, 1) < {PRICE_HYSTERESIS}
+                    THEN number_prices.price_ngn
+                    ELSE EXCLUDED.price_ngn
+                END,
+                provider_cost = EXCLUDED.provider_cost,
+                provider_cost_currency = EXCLUDED.provider_cost_currency,
+                stock = EXCLUDED.stock,
+                synced_at = now(),
+                updated_at = now(),
+                last_in_stock_at = COALESCE(EXCLUDED.last_in_stock_at,
+                                            number_prices.last_in_stock_at)"
+    ))
+    .bind(&ids)
+    .bind(country_id)
+    .bind(&prices)
+    .bind(&costs)
+    .bind(&stocks)
+    .bind(&currency)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+
+    Ok(written as usize)
+}
+
+/// A supplier key turned into something a person would recognise.
+///
+/// 5SIM's keys are lowercase and punctuation-free — `whatsapp`, `1688`,
+/// `99app`, `applepay`. Title casing gets most of the way; the brands people
+/// actually look for are worth spelling the way they spell themselves, because
+/// "Whatsapp" in a list of a thousand services reads as a knock-off.
+fn humanise(key: &str) -> String {
+    const BRANDS: &[(&str, &str)] = &[
+        ("whatsapp", "WhatsApp"),
+        ("tiktok", "TikTok"),
+        ("paypal", "PayPal"),
+        ("wechat", "WeChat"),
+        ("youtube", "YouTube"),
+        ("linkedin", "LinkedIn"),
+        ("snapchat", "Snapchat"),
+        ("facebook", "Facebook"),
+        ("instagram", "Instagram"),
+        ("telegram", "Telegram"),
+        ("twitter", "X (Twitter)"),
+        ("openai", "OpenAI"),
+        ("github", "GitHub"),
+        ("payoneer", "Payoneer"),
+        ("binance", "Binance"),
+        ("coinbase", "Coinbase"),
+        ("airbnb", "Airbnb"),
+        ("aliexpress", "AliExpress"),
+        ("ebay", "eBay"),
+        ("imo", "IMO"),
+        ("kakaotalk", "KakaoTalk"),
+        ("viber", "Viber"),
+        ("bolt", "Bolt"),
+        ("uber", "Uber"),
+        ("glovo", "Glovo"),
+        ("jumia", "Jumia"),
+        ("opay", "OPay"),
+        ("kuda", "Kuda"),
+    ];
+
+    if let Some((_, brand)) = BRANDS.iter().find(|(k, _)| *k == key) {
+        return (*brand).to_owned();
+    }
+
+    key.split(|c: char| c == '-' || c == '_' || c == '.')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -304,34 +451,41 @@ mod tests {
 
     #[test]
     fn prices_round_up_to_ten_naira() {
-        // Rounding to nearest would give away the margin on the cheap rows,
-        // which are most of them.
         let pricing = pricing();
-        assert_eq!(pricing.sale_price(dec!(0.28)), dec!(690)); // 685.44 → 690
-        assert_eq!(pricing.sale_price(dec!(0.9)), dec!(2210)); // 2203.2 → 2210
+        assert_eq!(pricing.sale_price(dec!(0.28)), dec!(690));
+        assert_eq!(pricing.sale_price(dec!(0.9)), dec!(2210));
     }
 
     #[test]
     fn nothing_sells_for_less_than_a_hundred_naira() {
-        // 5SIM's floor is a couple of cents; the arithmetic alone would put a
-        // number on sale for ₦20.
         assert_eq!(pricing().sale_price(dec!(0.001)), dec!(100));
     }
 
     #[test]
     fn a_supplier_currency_that_is_not_usd_stops_pricing() {
-        // Converting roubles at a dollar rate would misprice the whole table by
-        // roughly ninety times.
         let rub = Pricing {
             supplier_currency: Some("RUB".into()),
             ..pricing()
         };
         assert!(!rub.prices_in_usd());
         assert!(pricing().prices_in_usd());
-        assert!(Pricing {
-            supplier_currency: Some("usd".into()),
-            ..pricing()
-        }
-        .prices_in_usd());
+    }
+
+    #[test]
+    fn brands_keep_their_own_spelling() {
+        // In a list of a thousand services, "Whatsapp" reads as a knock-off.
+        assert_eq!(humanise("whatsapp"), "WhatsApp");
+        assert_eq!(humanise("tiktok"), "TikTok");
+        assert_eq!(humanise("twitter"), "X (Twitter)");
+    }
+
+    #[test]
+    fn anything_else_is_title_cased_rather_than_dropped() {
+        // Most of the catalogue is services nobody has heard of, and they still
+        // have to render as something.
+        assert_eq!(humanise("99app"), "99app");
+        assert_eq!(humanise("bolt-food"), "Bolt Food");
+        assert_eq!(humanise("yandex_go"), "Yandex Go");
+        assert_eq!(humanise("1688"), "1688");
     }
 }

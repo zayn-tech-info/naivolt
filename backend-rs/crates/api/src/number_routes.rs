@@ -28,7 +28,7 @@ use crate::middleware::CurrentUser;
 use crate::number_provider::ActivationState;
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -43,6 +43,8 @@ use uuid::Uuid;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/numbers/catalog", get(catalog))
+        .route("/numbers/products", get(products))
+        .route("/numbers/products/:slug/countries", get(product_countries))
         .route("/numbers/orders", post(create_order).get(list_orders))
         .route("/numbers/orders/:id", get(get_order))
 }
@@ -67,8 +69,13 @@ pub struct CatalogCountry {
     pub in_stock: bool,
 }
 
-/// One joined query rather than N+1 per product, the same shape gift card brands
-/// use.
+/// The curated shortlist, fully expanded.
+///
+/// Deliberately not the whole catalogue any more. The sync discovers ~1,000
+/// products across 153 countries, and the cross product is ~75,000 rows — a
+/// payload no phone should be asked to parse to render a picker. This stays
+/// capped at the products someone chose to feature, and `/numbers/products`
+/// plus `/numbers/products/{slug}/countries` serve the rest on demand.
 async fn catalog(State(state): State<AppState>) -> ApiResult<Json<Vec<CatalogProduct>>> {
     let rows: Vec<(String, String, i32, String, String, String, Decimal, i32)> = sqlx::query_as(
         "SELECT p.slug, p.name, p.sort_order,
@@ -78,6 +85,7 @@ async fn catalog(State(state): State<AppState>) -> ApiResult<Json<Vec<CatalogPro
            JOIN number_products  p ON p.id = pr.product_id
            JOIN number_countries c ON c.id = pr.country_id
           WHERE pr.active AND p.active AND c.active
+            AND p.sort_order < 500 AND c.sort_order < 500
           ORDER BY p.sort_order, p.name, c.sort_order, c.name",
     )
     .fetch_all(&state.db)
@@ -110,6 +118,104 @@ async fn catalog(State(state): State<AppState>) -> ApiResult<Json<Vec<CatalogPro
 }
 
 // ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ProductQuery {
+    /// Free text against the product name. Absent means "the popular ones".
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductSummary {
+    pub slug: String,
+    pub name: String,
+    /// Cheapest country currently in stock, which is what a list wants to show.
+    pub from_price_ngn: Option<String>,
+    /// How many countries have it right now — the difference between "rare" and
+    /// "everywhere", and the only honest way to order a list this long.
+    pub country_count: i64,
+}
+
+/// Search the catalogue.
+///
+/// A thousand products cannot be a dropdown, and a phone cannot hold the cross
+/// product. This returns a page of them, ordered by curation first and then by
+/// how widely available they are.
+async fn products(
+    State(state): State<AppState>,
+    Query(query): Query<ProductQuery>,
+) -> ApiResult<Json<Vec<ProductSummary>>> {
+    let limit = query.limit.unwrap_or(60).clamp(1, 200);
+    let search = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(|q| format!("%{}%", q.to_lowercase()));
+
+    let rows: Vec<(String, String, Option<Decimal>, i64)> = sqlx::query_as(
+        "SELECT p.slug, p.name, min(pr.price_ngn), count(*)
+           FROM number_products p
+           JOIN number_prices  pr ON pr.product_id = p.id AND pr.active AND pr.stock > 0
+           JOIN number_countries c ON c.id = pr.country_id AND c.active
+          WHERE p.active
+            AND ($1::text IS NULL OR lower(p.name) LIKE $1 OR p.slug LIKE $1)
+          GROUP BY p.id, p.slug, p.name, p.sort_order
+          ORDER BY p.sort_order, count(*) DESC, p.name
+          LIMIT $2",
+    )
+    .bind(search.as_deref())
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(slug, name, from, count)| ProductSummary {
+                slug,
+                name,
+                from_price_ngn: from.map(|p| p.normalize().to_string()),
+                country_count: count,
+            })
+            .collect(),
+    ))
+}
+
+/// Where one product can be bought, cheapest first.
+///
+/// Only what is in stock: a country listed at a price you cannot buy at is worse
+/// than a country not listed, because the failure arrives after the tap.
+async fn product_countries(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> ApiResult<Json<Vec<CatalogCountry>>> {
+    let rows: Vec<(String, String, String, Decimal, i32)> = sqlx::query_as(
+        "SELECT c.code, c.name, c.dial_code, pr.price_ngn, pr.stock
+           FROM number_prices pr
+           JOIN number_products  p ON p.id = pr.product_id
+           JOIN number_countries c ON c.id = pr.country_id
+          WHERE p.slug = $1 AND pr.active AND p.active AND c.active AND pr.stock > 0
+          ORDER BY pr.price_ngn, c.sort_order, c.name
+          LIMIT 200",
+    )
+    .bind(slug.trim().to_lowercase())
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(code, name, dial_code, price_ngn, stock)| CatalogCountry {
+                code,
+                name,
+                dial_code,
+                price_ngn: price_ngn.normalize().to_string(),
+                in_stock: stock > 0,
+            })
+            .collect(),
+    ))
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
