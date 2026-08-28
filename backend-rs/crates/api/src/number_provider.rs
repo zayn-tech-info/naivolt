@@ -24,6 +24,15 @@ use serde::Deserialize;
 use std::time::Duration;
 
 /// A number the supplier has assigned to one of our orders.
+/// One message a number received.
+#[derive(Debug, Clone)]
+pub struct Sms {
+    pub sender: Option<String>,
+    pub text: String,
+    pub code: Option<String>,
+    pub received_at: Option<DateTime<Utc>>,
+}
+
 pub struct Activation {
     pub provider_order_id: String,
     pub phone: String,
@@ -41,7 +50,14 @@ pub struct Activation {
 pub enum ActivationState {
     /// Bought, no SMS yet.
     Pending,
-    Received { code: String, text: String },
+    Received {
+        code: String,
+        text: String,
+        /// Everything the number received, newest last. A number is live for
+        /// twenty minutes and can take several messages in that window; the
+        /// order settles on the first, and the rest still belong to the buyer.
+        messages: Vec<Sms>,
+    },
     /// Cancelled, timed out, or banned — all of which mean no code is coming.
     Finished,
 }
@@ -115,6 +131,11 @@ struct FiveSimSms {
     text: String,
     #[serde(default)]
     code: Option<String>,
+    #[serde(default)]
+    sender: Option<String>,
+    /// 5SIM sends `date` on some routes and `created_at` on others.
+    #[serde(default, alias = "created_at")]
+    date: Option<DateTime<Utc>>,
 }
 
 impl FiveSimProvider {
@@ -205,11 +226,25 @@ impl FiveSimProvider {
 
         // The SMS list is authoritative over status: a code that arrived is a
         // code we owe the user, whatever the order's label says.
-        if let Some(sms) = order.sms.into_iter().next() {
-            let code = sms.code.unwrap_or_else(|| sms.text.clone());
+        if !order.sms.is_empty() {
+            let messages: Vec<Sms> = order
+                .sms
+                .into_iter()
+                .map(|sms| Sms {
+                    sender: sms.sender,
+                    text: sms.text,
+                    code: sms.code,
+                    received_at: sms.date,
+                })
+                .collect();
+
+            // The order settles on the first message, which is the one the buyer
+            // was waiting for. `messages` carries the rest.
+            let first = &messages[0];
             return Ok(ActivationState::Received {
-                code,
-                text: sms.text,
+                code: first.code.clone().unwrap_or_else(|| first.text.clone()),
+                text: first.text.clone(),
+                messages,
             });
         }
 
@@ -265,6 +300,12 @@ impl StubProvider {
         Ok(ActivationState::Received {
             code: "123456".into(),
             text: "Your code is 123456".into(),
+            messages: vec![Sms {
+                sender: Some("Naivolt".into()),
+                text: "Your code is 123456".into(),
+                code: Some("123456".into()),
+                received_at: None,
+            }],
         })
     }
 }

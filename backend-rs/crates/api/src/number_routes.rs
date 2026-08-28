@@ -25,7 +25,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
-use crate::number_provider::ActivationState;
+use crate::number_provider::{ActivationState, Sms};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -231,6 +231,15 @@ pub struct CreateOrderBody {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MessageResponse {
+    pub sender: Option<String>,
+    pub text: String,
+    pub code: Option<String>,
+    pub received_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrderResponse {
     pub id: Uuid,
     pub reference: String,
@@ -243,6 +252,10 @@ pub struct OrderResponse {
     pub code: Option<String>,
     pub expires_at: Option<String>,
     pub created_at: String,
+    /// Everything the number received. Empty on the list endpoint, which would
+    /// otherwise fetch an inbox per row to render a summary nobody reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<MessageResponse>,
 }
 
 async fn create_order(
@@ -430,6 +443,7 @@ async fn create_order(
         code: None,
         expires_at: activation.expires_at.map(|t| t.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
+        messages: Vec::new(),
     }))
 }
 
@@ -479,8 +493,17 @@ async fn get_order(
 
     if let (true, Some(provider_order_id)) = (is_open, provider_order_id.as_deref()) {
         match state.numbers.check(provider_order_id).await {
-            Ok(ActivationState::Received { code, text }) => {
-                settle_order(&state, id, &reference, price_ngn, &code, &text).await?;
+            Ok(ActivationState::Received {
+                code,
+                text,
+                messages,
+            }) => {
+                // Messages first: the order settles once, but a number that
+                // takes a second message after settling still has it recorded.
+                save_messages(&state, id, &messages).await;
+                if is_open {
+                    settle_order(&state, id, &reference, price_ngn, &code, &text).await?;
+                }
             }
             Ok(ActivationState::Finished) => {
                 refund_order(&state, id, &reference, price_ngn, user.id, "no_code").await?;
@@ -500,6 +523,32 @@ async fn get_order(
     }
 
     load_order(&state, user.id, id).await.map(Json)
+}
+
+/// Record everything the number received.
+///
+/// Failure here is logged rather than propagated: the inbox is a record beside
+/// the order, and losing a copy of a message must never stop the order itself
+/// from settling — the money side is what the buyer is waiting on.
+async fn save_messages(state: &AppState, order_id: Uuid, messages: &[Sms]) {
+    for message in messages {
+        let result = sqlx::query(
+            "INSERT INTO number_messages (order_id, sender, text, code, received_at)
+             VALUES ($1, $2, $3, $4, COALESCE($5, now()))
+             ON CONFLICT (order_id, text) DO NOTHING",
+        )
+        .bind(order_id)
+        .bind(message.sender.as_deref())
+        .bind(&message.text)
+        .bind(message.code.as_deref())
+        .bind(message.received_at)
+        .execute(&state.db)
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!(%order_id, error = %err, "could not record a number's message");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +721,7 @@ fn into_response(row: OrderRow) -> OrderResponse {
         code,
         expires_at: expires_at.map(|t| t.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
+        messages: Vec::new(),
     }
 }
 
@@ -684,5 +734,26 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
     .fetch_optional(&state.db)
     .await?;
 
-    row.map(into_response).ok_or(ApiError::NotFound)
+    let mut response = row.map(into_response).ok_or(ApiError::NotFound)?;
+
+    let messages: Vec<(Option<String>, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT sender, text, code, received_at
+           FROM number_messages WHERE order_id = $1
+          ORDER BY received_at",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
+    response.messages = messages
+        .into_iter()
+        .map(|(sender, text, code, received_at)| MessageResponse {
+            sender,
+            text,
+            code,
+            received_at: received_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(response)
 }
