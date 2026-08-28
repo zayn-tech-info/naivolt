@@ -169,6 +169,20 @@ impl Config {
     /// Production has stricter requirements than development, and they are
     /// enforced here rather than trusted to deployment discipline.
     fn validate_for_environment(&self) -> Result<()> {
+        // Anywhere that is not a developer's laptop, money must be real money.
+        // Without a key the funding provider is the stub, which confirms every
+        // charge it is asked about — so a balance appears that nobody paid for,
+        // and it spends exactly like one that was. A staging box reachable from
+        // the internet is not a place to hand out free naira.
+        if !matches!(self.environment, Environment::Development)
+            && self.paystack_secret_key.is_none()
+        {
+            bail!(
+                "PAYSTACK_SECRET_KEY is required outside development — without it top-ups \
+                 credit a balance nobody paid for"
+            );
+        }
+
         if !self.environment.is_production() {
             return Ok(());
         }
@@ -297,6 +311,20 @@ mod tests {
     /// Paystack returns the payer to this URL. Left at its development default,
     /// every successful card payment in production lands on a page that exists
     /// only on someone's laptop — money taken, balance apparently unchanged.
+    #[test]
+    fn staging_refuses_to_boot_without_a_payment_provider() {
+        // The stub confirms every charge, so a missing key is not "funding is
+        // switched off" — it is "funding is free", on a box the public can reach.
+        let mut config = production_config();
+        config.environment = Environment::Staging;
+        config.paystack_secret_key = None;
+        assert!(config.validate_for_environment().is_err());
+
+        // A laptop is still allowed to run the stub; that is what it is for.
+        config.environment = Environment::Development;
+        assert!(config.validate_for_environment().is_ok());
+    }
+
     #[test]
     fn production_refuses_to_boot_returning_payers_to_localhost() {
         let mut config = production_config();

@@ -181,6 +181,18 @@ async fn create_order(
         ApiError::BadRequest("That app isn't available in that country yet.".into())
     })?;
 
+    // Real money must not buy a number that does not exist. The stub issues
+    // plausible-looking activations that always deliver `123456`, which is
+    // exactly what a developer wants and exactly what a paying customer must
+    // never receive. Production refuses to boot without a supplier key at all;
+    // this covers the staging box in between, where the balance being spent was
+    // charged to a real card.
+    if !state.numbers.is_live() && state.funding.is_live() {
+        return Err(ApiError::ServiceUnavailable(
+            "Numbers aren't on sale yet. Nothing has been charged.".into(),
+        ));
+    }
+
     if let Some(expected) = body.expected_price_ngn.as_deref() {
         let expected = Decimal::from_str(expected.trim())
             .map_err(|_| ApiError::BadRequest("That expected price isn't a number.".into()))?;
