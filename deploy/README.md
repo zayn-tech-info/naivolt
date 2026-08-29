@@ -85,6 +85,25 @@ locks you out of your own box. Recovering needs the provider's browser console.
 Do **not** allow 5432. ufw on this host allows Postgres from anywhere, and the
 provider's firewall is the only thing currently hiding it.
 
+## Migrations are compiled in, not read at boot
+
+`sqlx::migrate!("../../migrations")` embeds the SQL **at compile time**. Syncing
+a new `.sql` file to the server and restarting does nothing at all: cargo sees no
+changed source, skips the rebuild, and the running binary still carries the old
+set. It looks exactly like a migration that ran and did nothing.
+
+```sh
+rsync … migrations/ root@HOST:/opt/naivolt/backend-rs/migrations/
+ssh root@HOST 'cd /opt/naivolt/backend-rs \
+  && touch crates/api/src/main.rs \
+  && cargo build --release -p naivolt-api -j 2 \
+  && systemctl restart naivolt-api'
+```
+
+The `touch` is the whole fix. And never edit a migration that has already run —
+sqlx stores its checksum, and a changed file fails the next boot rather than
+re-applying. Write another one.
+
 ## Checking it
 
 ```sh
