@@ -15,6 +15,7 @@ mod funding_routes;
 mod google_keys;
 mod middleware;
 mod activity_routes;
+mod admin_routes;
 mod bank_routes;
 mod giftcard_routes;
 mod kyc_routes;
@@ -111,6 +112,8 @@ async fn main() -> Result<()> {
         dev_otp_code: config.dev_otp_code.clone(),
         auto_approve_kyc: config.auto_approve_kyc,
         web_app_url: config.web_app_url.clone(),
+        admin_token: config.admin_token.clone(),
+        google_allowed_emails: Arc::new(config.google_allowed_emails.clone()),
         funding: Arc::new(match &config.paystack_secret_key {
             Some(key) => funding_provider::AnyFundingProvider::Paystack(
                 funding_provider::PaystackFunding::new(key.clone()),
@@ -172,7 +175,8 @@ async fn main() -> Result<()> {
                 .merge(giftcard_routes::push_routes())
                 .merge(number_routes::routes())
                 .merge(funding_routes::routes())
-                .merge(kyc_routes::routes()),
+                .merge(kyc_routes::routes())
+                .merge(admin_routes::routes()),
         )
         .layer(TraceLayer::new_for_http())
         // A slow client must not hold a database connection open indefinitely.
@@ -217,6 +221,10 @@ fn cors(environment: Environment) -> CorsLayer {
             // CORS-simple one — omitting it here fails the preflight, so a
             // browser cannot buy or fund at all while curl works fine.
             HeaderName::from_static("idempotency-key"),
+            // Same trap, second time: the admin page sends this and the
+            // preflight rejects it, which presents as "wrong token" rather than
+            // as a CORS failure.
+            HeaderName::from_static("x-admin-token"),
         ]);
 
     if environment.is_production() {

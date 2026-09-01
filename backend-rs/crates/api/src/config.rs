@@ -61,6 +61,14 @@ pub struct Config {
     /// names the currency, so it is stated here rather than guessed at — a wrong
     /// guess would put a mislabelled cost on every order.
     pub fivesim_currency: Option<String>,
+    /// Who may sign in with Google. Empty means anyone with a Google account,
+    /// which is the right default for a public product and the wrong one for a
+    /// deployment taking real card payments before it has opened to anybody.
+    pub google_allowed_emails: Vec<String>,
+    /// Shared secret for the read-only admin endpoints. Unset means those routes
+    /// do not exist, which is the right default: they expose customer emails and
+    /// order history to anyone holding the string.
+    pub admin_token: Option<String>,
     /// Where the dashboard lives. Paystack sends the payer back here, so a wrong
     /// value strands someone who has already been charged on a page that cannot
     /// tell them their money arrived.
@@ -145,6 +153,13 @@ impl Config {
             google_client_id: env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
             fivesim_api_key: env::var("FIVESIM_API_KEY").ok().filter(|s| !s.is_empty()),
             fivesim_currency: env::var("FIVESIM_CURRENCY").ok().filter(|s| !s.is_empty()),
+            google_allowed_emails: env::var("GOOGLE_ALLOWED_EMAILS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|e| e.trim().to_ascii_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect(),
+            admin_token: env::var("ADMIN_TOKEN").ok().filter(|s| s.len() >= 24),
             web_app_url: env::var("WEB_APP_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into())
                 .trim_end_matches('/')
@@ -296,6 +311,8 @@ mod tests {
             google_client_id: Some("naivolt-web.apps.googleusercontent.com".into()),
             fivesim_api_key: Some("5sim_live".into()),
             fivesim_currency: Some("USD".into()),
+            google_allowed_emails: Vec::new(),
+            admin_token: None,
             web_app_url: "https://naivolt.com".into(),
             numbers_margin: Decimal::new(16, 1),
             usd_ngn_mid: Decimal::from(1530),
@@ -311,6 +328,15 @@ mod tests {
     /// Paystack returns the payer to this URL. Left at its development default,
     /// every successful card payment in production lands on a page that exists
     /// only on someone's laptop — money taken, balance apparently unchanged.
+    #[test]
+    fn a_short_admin_token_is_no_admin_token() {
+        // A guessable shared secret is worse than none: it reads as protection
+        // while exposing every customer email to anyone who tries.
+        std::env::set_var("ADMIN_TOKEN", "letmein");
+        assert!(env::var("ADMIN_TOKEN").ok().filter(|s| s.len() >= 24).is_none());
+        std::env::remove_var("ADMIN_TOKEN");
+    }
+
     #[test]
     fn staging_refuses_to_boot_without_a_payment_provider() {
         // The stub confirms every charge, so a missing key is not "funding is

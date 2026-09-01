@@ -317,6 +317,33 @@ async fn google_sign_in(
         ApiError::Unauthorized
     })?;
 
+    // The allowlist, checked against the *verified* email in the token rather
+    // than anything the client sent. Empty list means the door is open, which is
+    // right for a public product and wrong for one that is taking real card
+    // payments before it has opened to anybody.
+    if !state.google_allowed_emails.is_empty() {
+        let permitted = claim
+            .verified_email
+            .as_deref()
+            .map(|email| {
+                state
+                    .google_allowed_emails
+                    .iter()
+                    .any(|allowed| allowed == &email.to_ascii_lowercase())
+            })
+            .unwrap_or(false);
+
+        if !permitted {
+            // Says why, unlike the token failures above. This is not a probe
+            // surface — the account is real and the answer is "not yet" — and a
+            // bare 401 would read as a broken sign-in worth retrying forever.
+            tracing::info!(email = ?claim.verified_email, "google sign-in refused: not on the allowlist");
+            return Err(ApiError::BadRequest(
+                "Naivolt isn't open yet. This account isn't on the early access list.".into(),
+            ));
+        }
+    }
+
     let now = Utc::now();
     let mut tx = state.db.begin().await?;
 

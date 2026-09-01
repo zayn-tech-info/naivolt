@@ -47,6 +47,7 @@ pub fn routes() -> Router<AppState> {
         .route("/numbers/products/:slug/countries", get(product_countries))
         .route("/numbers/orders", post(create_order).get(list_orders))
         .route("/numbers/orders/:id", get(get_order))
+        .route("/numbers/orders/:id/cancel", post(cancel_order))
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +526,56 @@ async fn get_order(
     load_order(&state, user.id, id).await.map(Json)
 }
 
+/// Give a number back before its twenty minutes are up.
+///
+/// Without this, a user watching a number that will plainly never receive
+/// anything waits out the full hold to get their money back. The refund is the
+/// same one expiry performs — the reservation reverses, so no rounding step or
+/// double refund can leave anyone short.
+///
+/// A code that already arrived is not cancellable. The order was fulfilled, the
+/// money is revenue, and the number is spent.
+async fn cancel_order(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<OrderResponse>> {
+    let row: Option<(String, Option<String>, Decimal, String)> = sqlx::query_as(
+        "SELECT status, provider_order_id, price_ngn, reference
+           FROM number_orders WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let (status, provider_order_id, price_ngn, reference) = row.ok_or(ApiError::NotFound)?;
+
+    if !matches!(status.as_str(), "reserved" | "awaiting_code") {
+        return Err(ApiError::BadRequest(
+            "That number can't be cancelled any more.".into(),
+        ));
+    }
+
+    // Tell the supplier first. Refunding a user while still paying for the
+    // number would be a loss taken quietly, one order at a time — and 5SIM
+    // refuses a cancel in the first couple of minutes, which is a real answer
+    // to pass on rather than swallow.
+    if let Some(provider_order_id) = provider_order_id.as_deref() {
+        if state.numbers.is_live() {
+            state.numbers.cancel(provider_order_id).await.map_err(|e| {
+                tracing::warn!(order = %id, error = %e, "supplier refused cancel");
+                ApiError::ServiceUnavailable(
+                    "That number can't be released just yet — try again in a moment.".into(),
+                )
+            })?;
+        }
+    }
+
+    refund_order(&state, id, &reference, price_ngn, user.id, "cancelled").await?;
+    load_order(&state, user.id, id).await.map(Json)
+}
+
 /// Record everything the number received.
 ///
 /// Failure here is logged rather than propagated: the inbox is a record beside
@@ -648,10 +699,10 @@ async fn refund_order(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
 
-    let status = if reason == "supplier_unavailable" {
-        "failed"
-    } else {
-        "expired"
+    let status = match reason {
+        "supplier_unavailable" => "failed",
+        "cancelled" => "cancelled",
+        _ => "expired",
     };
 
     sqlx::query(

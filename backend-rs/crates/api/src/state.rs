@@ -32,6 +32,10 @@ pub struct AppState {
     pub dev_otp_code: Option<String>,
     /// Development only: approve KYC on submission. False in production.
     pub auto_approve_kyc: bool,
+    /// Who may sign in with Google. Empty means anyone.
+    pub google_allowed_emails: Arc<Vec<String>>,
+    /// Shared secret for the read-only admin endpoints; None disables them.
+    pub admin_token: Option<String>,
     /// Where the dashboard lives, without a trailing slash. Paystack returns the
     /// payer to a URL under it.
     pub web_app_url: String,
