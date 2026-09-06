@@ -29,6 +29,16 @@ echo "==> [3/5] Node dependencies"
 npm ci --legacy-peer-deps
 ( cd admin && npm ci )
 
+# The marketing site (naivolt-website) is a sibling repo pulled in via
+# repositoryDependencies. It uses pnpm and consumes the Rust API at VITE_API_URL.
+WEBSITE_DIR="$(cd "$REPO_ROOT/.." && pwd)/naivolt-website"
+if [ -d "$WEBSITE_DIR" ]; then
+  echo "==> [3b/5] Website dependencies (pnpm)"
+  ( cd "$WEBSITE_DIR" && pnpm install --frozen-lockfile )
+else
+  echo "==> [3b/5] naivolt-website not present; skipping website deps"
+fi
+
 echo "==> [4/5] sqlx-cli (runs DB migrations outside the API process)"
 if ! command -v sqlx >/dev/null 2>&1; then
   cargo install sqlx-cli --version '^0.8' --no-default-features --features rustls,postgres
