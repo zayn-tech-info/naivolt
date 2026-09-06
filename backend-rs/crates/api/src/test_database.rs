@@ -121,6 +121,24 @@ fn cleanup_blocking(database_url: String, schema: String) {
 mod tests {
     use super::*;
 
+    fn without_psql_commands(source: &str) -> String {
+        source.lines().filter(|line| !line.trim_start().starts_with('\\')).collect::<Vec<_>>().join("\n")
+    }
+
+    #[tokio::test]
+    async fn every_sql_invariant_suite_passes_in_an_isolated_schema() {
+        let database = IsolatedDatabase::new("sql_invariant_test").await;
+        for source in [
+            include_str!("../../../migrations/tests/invariants.sql"),
+            include_str!("../../../migrations/tests/auth_invariants.sql"),
+            include_str!("../../../migrations/tests/number_order_invariants.sql"),
+            include_str!("../../../migrations/tests/closing_number_order_identity.sql"),
+        ] {
+            sqlx::raw_sql(&without_psql_commands(source)).execute(&database.pool).await.unwrap();
+        }
+        database.cleanup().await;
+    }
+
     #[tokio::test]
     async fn panic_still_removes_the_temporary_schema() {
         let database = IsolatedDatabase::new("number_cleanup_test").await;

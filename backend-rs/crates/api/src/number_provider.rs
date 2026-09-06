@@ -23,6 +23,12 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::time::Duration;
 
+#[derive(Debug)]
+pub enum PurchaseError {
+    Rejected(ApiError),
+    Ambiguous,
+}
+
 /// A number the supplier has assigned to one of our orders.
 /// One message a number received.
 #[derive(Debug, Clone)]
@@ -72,7 +78,7 @@ pub enum AnyNumberProvider {
 }
 
 impl AnyNumberProvider {
-    pub async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+    pub async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         match self {
             AnyNumberProvider::FiveSim(p) => p.buy(country, product).await,
             AnyNumberProvider::Stub(p) => p.buy(country, product).await,
@@ -158,7 +164,7 @@ impl FiveSimProvider {
         }
     }
 
-    async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         let url = format!("{FIVESIM_BASE}/buy/activation/{country}/{ANY_OPERATOR}/{product}");
 
         let response = self
@@ -169,15 +175,13 @@ impl FiveSimProvider {
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, %country, %product, "5sim buy failed");
-                ApiError::ServiceUnavailable(
-                    "We couldn't reach our number provider. Nothing was charged.".into(),
-                )
+                PurchaseError::Ambiguous
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            tracing::warn!(%status, %body, %country, %product, "5sim buy rejected");
+            tracing::warn!(%status, %country, %product, "5sim buy rejected");
 
             // 5SIM answers in bare strings rather than codes. Only the
             // out-of-stock case is worth showing a user, because it is the only
@@ -190,12 +194,17 @@ impl FiveSimProvider {
             } else {
                 "We couldn't get a number just now. Nothing was charged."
             };
-            return Err(ApiError::ServiceUnavailable(message.into()));
+            let error = ApiError::ServiceUnavailable(message.into());
+            return if status.is_server_error() {
+                Err(PurchaseError::Ambiguous)
+            } else {
+                Err(PurchaseError::Rejected(error))
+            };
         }
 
         let order: FiveSimOrder = response.json().await.map_err(|e| {
             tracing::warn!(error = %e, "5sim buy returned unreadable body");
-            ApiError::ServiceUnavailable("We couldn't get a number just now.".into())
+            PurchaseError::Ambiguous
         })?;
 
         Ok(Activation {
@@ -301,7 +310,7 @@ impl CountingStubProvider {
         self.buy_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         self.buy_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         StubProvider.buy(country, product).await
@@ -309,7 +318,7 @@ impl CountingStubProvider {
 }
 
 impl StubProvider {
-    async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         let seed = uuid::Uuid::new_v4().simple().to_string();
         Ok(Activation {
             provider_order_id: format!("stub-{}", &seed[..12]),
@@ -346,11 +355,10 @@ mod tests {
         // `is_live` gates the provider label written onto every order. A stub
         // that claimed to be live would leave rows saying 5SIM sold a number it
         // has never heard of.
-        assert!(AnyNumberProvider::FiveSim(FiveSimProvider::new(
-            "key".into(),
-            Some("USD".into())
-        ))
-        .is_live());
+        assert!(
+            AnyNumberProvider::FiveSim(FiveSimProvider::new("key".into(), Some("USD".into())))
+                .is_live()
+        );
         assert!(!AnyNumberProvider::Stub(StubProvider).is_live());
     }
 

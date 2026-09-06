@@ -1,4 +1,5 @@
 use crate::error::{ApiError, ApiResult};
+use crate::number_provider::Sms;
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use naivolt_core::Asset;
 use naivolt_ledger::journal::JournalBuilder;
@@ -9,8 +10,14 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub(crate) enum OrderTransition {
-    Deliver { code: String, text: String },
-    Refund { status: RefundStatus, reason: String },
+    Deliver {
+        code: String,
+        text: String,
+    },
+    Refund {
+        status: RefundStatus,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,18 +43,65 @@ pub(crate) enum TransitionOutcome {
     AlreadyTerminal(String),
 }
 
+type LockedOrder = (
+    Uuid,
+    Decimal,
+    String,
+    String,
+    Option<Uuid>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<String>,
+);
+
 pub(crate) async fn apply(
     db: &PgPool,
     order_id: Uuid,
     transition: OrderTransition,
+) -> ApiResult<TransitionOutcome> {
+    apply_inner(db, order_id, transition, None, &[]).await
+}
+
+pub(crate) async fn apply_claimed(
+    db: &PgPool,
+    order_id: Uuid,
+    claim_token: Uuid,
+    transition: OrderTransition,
+) -> ApiResult<TransitionOutcome> {
+    apply_inner(db, order_id, transition, Some(claim_token), &[]).await
+}
+
+pub(crate) async fn deliver_claimed(
+    db: &PgPool,
+    order_id: Uuid,
+    claim_token: Uuid,
+    code: String,
+    text: String,
+    messages: &[Sms],
+) -> ApiResult<TransitionOutcome> {
+    apply_inner(
+        db,
+        order_id,
+        OrderTransition::Deliver { code, text },
+        Some(claim_token),
+        messages,
+    )
+    .await
+}
+
+async fn apply_inner(
+    db: &PgPool,
+    order_id: Uuid,
+    transition: OrderTransition,
+    claim_token: Option<Uuid>,
+    messages: &[Sms],
 ) -> ApiResult<TransitionOutcome> {
     let requested = match &transition {
         OrderTransition::Deliver { .. } => "deliver",
         OrderTransition::Refund { status, .. } => status.as_str(),
     };
     let mut tx = db.begin().await.map_err(anyhow::Error::from)?;
-    let row: Option<(Uuid, Decimal, String, String)> = sqlx::query_as(
-        "SELECT user_id, price_ngn, reference, status
+    let row: Option<LockedOrder> = sqlx::query_as(
+        "SELECT user_id, price_ngn, reference, status, reconcile_claim_token, reconcile_claimed_until, provider_order_id
            FROM number_orders
           WHERE id = $1
           FOR UPDATE",
@@ -57,11 +111,47 @@ pub(crate) async fn apply(
     .await
     .map_err(anyhow::Error::from)?;
 
-    let (user_id, price_ngn, reference, current_status) = row.ok_or(ApiError::NotFound)?;
-    if !matches!(current_status.as_str(), "reserved" | "awaiting_code") {
+    let (
+        user_id,
+        price_ngn,
+        reference,
+        current_status,
+        stored_token,
+        claimed_until,
+        provider_order_id,
+    ) = row.ok_or(ApiError::NotFound)?;
+    if let Some(token) = claim_token {
+        if stored_token != Some(token)
+            || claimed_until.map_or(true, |until| until <= chrono::Utc::now())
+        {
+            return Err(ApiError::Conflict(
+                "The reconciliation claim is no longer current.".into(),
+            ));
+        }
+    }
+    if !matches!(
+        current_status.as_str(),
+        "reserved" | "awaiting_code" | "review_required"
+    ) {
         tx.commit().await.map_err(anyhow::Error::from)?;
         tracing::info!(order = %reference, transition = requested, status = %current_status, outcome = "replayed", "number order transition completed");
         return Ok(TransitionOutcome::AlreadyTerminal(current_status));
+    }
+
+    if !messages.is_empty() {
+        let provider_order_id = provider_order_id
+            .as_deref()
+            .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("delivery has no provider order")))?;
+        for message in messages {
+            sqlx::query(
+                "INSERT INTO number_messages (order_id, sender, text, code, received_at, provider_message_key)
+                 VALUES ($1, $2, $3, $4, COALESCE($5, now()),
+                    encode(digest(jsonb_build_array($6::text, $2::text, $3::text, $4::text, $5::timestamptz)::text, 'sha256'), 'hex'))
+                 ON CONFLICT (order_id, provider_message_key) WHERE provider_message_key IS NOT NULL DO NOTHING")
+                .bind(order_id).bind(message.sender.as_deref()).bind(&message.text)
+                .bind(message.code.as_deref()).bind(message.received_at).bind(provider_order_id)
+                .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
+        }
     }
 
     let (journal, next_status, reason, code, text) = match transition {
@@ -73,7 +163,12 @@ pub(crate) async fn apply(
                 reference.clone(),
                 format!("{reference}:settle"),
             )
-            .entry(pending, AccountKind::NumberPayablePending, Asset::Ngn, price_ngn)
+            .entry(
+                pending,
+                AccountKind::NumberPayablePending,
+                Asset::Ngn,
+                price_ngn,
+            )
             .entry(revenue, AccountKind::NumberRevenue, Asset::Ngn, -price_ngn)
             .build()
             .map_err(|error| ApiError::Internal(anyhow::anyhow!(error)))?;
@@ -81,7 +176,9 @@ pub(crate) async fn apply(
         }
         OrderTransition::Refund { status, reason } => {
             if reason.trim().is_empty() {
-                return Err(ApiError::Internal(anyhow::anyhow!("refund reason is empty")));
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "refund reason is empty"
+                )));
             }
             let user_account = lock_user_ngn_account(&mut tx, user_id).await?;
             let pending = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
@@ -90,7 +187,12 @@ pub(crate) async fn apply(
                 reference.clone(),
                 format!("{reference}:refund"),
             )
-            .entry(pending, AccountKind::NumberPayablePending, Asset::Ngn, price_ngn)
+            .entry(
+                pending,
+                AccountKind::NumberPayablePending,
+                Asset::Ngn,
+                price_ngn,
+            )
             .entry(user_account, AccountKind::UserNgn, Asset::Ngn, -price_ngn)
             .metadata(serde_json::json!({ "reason": reason.clone() }))
             .build()
@@ -113,8 +215,11 @@ pub(crate) async fn apply(
                 received_at = CASE WHEN $2 = 'delivered' THEN now() ELSE received_at END,
                 settled_journal_id = CASE WHEN $2 = 'delivered' THEN $6 ELSE settled_journal_id END,
                 refunded_journal_id = CASE WHEN $2 <> 'delivered' THEN $6 ELSE refunded_journal_id END,
+                reconcile_next_at = NULL,
+                reconcile_claim_token = NULL,
+                reconcile_claimed_until = NULL,
                 updated_at = now()
-          WHERE id = $1 AND status IN ('reserved', 'awaiting_code')",
+          WHERE id = $1 AND status IN ('reserved', 'awaiting_code', 'review_required')",
     )
     .bind(order_id)
     .bind(next_status)
@@ -145,13 +250,12 @@ mod tests {
     use sqlx::Executor;
 
     async fn seeded_order(pool: &PgPool, suffix: &str) -> Uuid {
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (email) VALUES ($1) RETURNING id",
-        )
-        .bind(format!("transition-{suffix}@example.test"))
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let user_id: Uuid =
+            sqlx::query_scalar("INSERT INTO users (email) VALUES ($1) RETURNING id")
+                .bind(format!("transition-{suffix}@example.test"))
+                .fetch_one(pool)
+                .await
+                .unwrap();
         let user_account: Uuid = sqlx::query_scalar(
             "INSERT INTO ledger_accounts (kind, user_id, asset)
              VALUES ('user_ngn', $1, 'NGN') RETURNING id",
@@ -251,7 +355,13 @@ mod tests {
         );
         let (left, right) = tokio::join!(delivery, refund);
         let outcomes = [left.unwrap(), right.unwrap()];
-        assert_eq!(outcomes.iter().filter(|o| **o == TransitionOutcome::Applied).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == TransitionOutcome::Applied)
+                .count(),
+            1
+        );
 
         let (status, settlements, refunds): (String, i64, i64) = sqlx::query_as(
             "SELECT status,
@@ -297,7 +407,13 @@ mod tests {
         );
         let (first, second) = tokio::join!(first, second);
         let outcomes = [first.unwrap(), second.unwrap()];
-        assert_eq!(outcomes.iter().filter(|o| **o == TransitionOutcome::Applied).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == TransitionOutcome::Applied)
+                .count(),
+            1
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM ledger_journals j
@@ -330,7 +446,13 @@ mod tests {
         );
         let (first, second) = tokio::join!(first, second);
         let outcomes = [first.unwrap(), second.unwrap()];
-        assert_eq!(outcomes.iter().filter(|o| **o == TransitionOutcome::Applied).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == TransitionOutcome::Applied)
+                .count(),
+            1
+        );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
                 "SELECT count(*) FROM ledger_journals j
@@ -363,7 +485,13 @@ mod tests {
         );
         let (delivery, expiry) = tokio::join!(delivery, expiry);
         let outcomes = [delivery.unwrap(), expiry.unwrap()];
-        assert_eq!(outcomes.iter().filter(|o| **o == TransitionOutcome::Applied).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == TransitionOutcome::Applied)
+                .count(),
+            1
+        );
 
         let unbalanced_terminal_journals: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM (
@@ -492,5 +620,33 @@ mod tests {
         .fetch_one(pool)
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn claimed_delivery_keeps_distinct_supplier_timestamps_and_deduplicates_replays() {
+        let database = IsolatedDatabase::new("number_message_identity_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "MESSAGES").await;
+        let token = Uuid::new_v4();
+        sqlx::query("UPDATE number_orders SET provider_order_id='provider-1' WHERE id=$1")
+            .bind(order_id).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/staged/0017_close_number_reconciliation.sql"))
+            .execute(&pool).await.unwrap();
+        sqlx::query("UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1")
+            .bind(order_id).bind(token).execute(&pool).await.unwrap();
+        let first_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let second_at = chrono::Utc::now();
+        let messages = vec![
+            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(first_at) },
+            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(second_at) },
+            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(second_at) },
+        ];
+        deliver_claimed(&pool, order_id, token, "123".into(), "same text".into(), &messages).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM number_messages WHERE order_id=$1")
+            .bind(order_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 2);
+        let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id=$1")
+            .bind(order_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(status, "delivered");
     }
 }

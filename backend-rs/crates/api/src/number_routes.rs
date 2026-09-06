@@ -26,7 +26,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
-use crate::number_provider::{ActivationState, Sms};
+use crate::number_provider::PurchaseError;
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -317,7 +317,7 @@ async fn create_order(
         return load_order(&state, user.id, id).await.map(Json);
     }
 
-    let (product_id, product_name, provider_product): (Uuid, String, String) = sqlx::query_as(
+    let (product_id, _product_name, provider_product): (Uuid, String, String) = sqlx::query_as(
         "SELECT id, name, provider_product FROM number_products WHERE slug = $1 AND active",
     )
     .bind(body.product_slug.trim().to_lowercase())
@@ -325,7 +325,7 @@ async fn create_order(
     .await?
     .ok_or_else(|| ApiError::BadRequest("We don't sell numbers for that app.".into()))?;
 
-    let (country_id, country_name, provider_country): (Uuid, String, String) = sqlx::query_as(
+    let (country_id, _country_name, provider_country): (Uuid, String, String) = sqlx::query_as(
         "SELECT id, name, provider_country FROM number_countries WHERE code = $1 AND active",
     )
     .bind(body.country_code.trim().to_uppercase())
@@ -341,9 +341,7 @@ async fn create_order(
     .bind(country_id)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| {
-        ApiError::BadRequest("That app isn't available in that country yet.".into())
-    })?;
+    .ok_or_else(|| ApiError::BadRequest("That app isn't available in that country yet.".into()))?;
 
     // This availability gate applies only to a new purchase. Replays return
     // their stored result even when provider configuration changes later.
@@ -376,7 +374,10 @@ async fn create_order(
     }
 
     let pending_account_id = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
-    let reference = format!("NVNO-{}", &Uuid::new_v4().simple().to_string()[..10].to_uppercase());
+    let reference = format!(
+        "NVNO-{}",
+        &Uuid::new_v4().simple().to_string()[..10].to_uppercase()
+    );
 
     // Until the closing migration, keep writing the raw UUID understood by
     // the previous API binary. Once 0015 makes the order key required, every
@@ -421,12 +422,12 @@ async fn create_order(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
 
-    let (order_id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
+    let (order_id, _created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
         "INSERT INTO number_orders
            (user_id, product_id, country_id, price_ngn, provider, status, reference,
             reserved_journal_id, idempotency_key, expected_price_ngn,
-            idempotency_payload_complete)
-         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, true)
+            idempotency_payload_complete, reconciliation_payload_complete, reconcile_next_at)
+         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, true, true, now() + interval '5 seconds')
          RETURNING id, created_at",
     )
     .bind(user.id)
@@ -444,31 +445,57 @@ async fn create_order(
 
     tx.commit().await.map_err(anyhow::Error::from)?;
 
-    // --- Only now is the supplier called -------------------------------------
-    // The reservation is durable. If this fails the user is refunded before the
-    // response returns, so a supplier outage costs them nothing.
-    let activation = match state.numbers.buy(&provider_country, &provider_product).await {
+    let claim_token = Uuid::new_v4();
+    let claimed = sqlx::query(
+        "UPDATE number_orders SET provider_purchase_started_at = now(),
+                reconcile_claim_token = $2, reconcile_claimed_until = now() + interval '60 seconds', updated_at = now()
+          WHERE id = $1 AND status = 'reserved' AND provider_purchase_started_at IS NULL
+            AND (reconcile_claimed_until IS NULL OR reconcile_claimed_until < now())")
+        .bind(order_id).bind(claim_token).execute(&state.db).await?;
+    if claimed.rows_affected() != 1 {
+        return load_order(&state, user.id, order_id).await.map(Json);
+    }
+
+    let activation = match state
+        .numbers
+        .buy(&provider_country, &provider_product)
+        .await
+    {
         Ok(activation) => activation,
-        Err(err) => {
-            number_order_transitions::apply(
+        Err(PurchaseError::Rejected(err)) => {
+            number_order_transitions::apply_claimed(
                 &state.db,
                 order_id,
+                claim_token,
                 OrderTransition::Refund {
                     status: RefundStatus::Failed,
-                    reason: "supplier_unavailable".into(),
+                    reason: "supplier_rejected".into(),
                 },
             )
             .await?;
             return Err(err);
+        }
+        Err(PurchaseError::Ambiguous) => {
+            crate::number_reconciler::mark_review_required(
+                &state.db,
+                order_id,
+                claim_token,
+                "purchase_outcome_unknown",
+            )
+            .await?;
+            return load_order(&state, user.id, order_id).await.map(Json);
         }
     };
 
     let assigned = sqlx::query(
         "UPDATE number_orders
             SET status = 'awaiting_code', provider_order_id = $2, phone_number = $3,
-                provider_cost = $4, provider_cost_currency = $5, expires_at = $6,
+                provider_cost = $4, provider_cost_currency = $5,
+                expires_at = COALESCE($6, now() + interval '15 minutes'),
+                reconcile_next_at = now() + interval '10 seconds',
+                reconcile_claim_token = NULL, reconcile_claimed_until = NULL,
                 updated_at = now()
-          WHERE id = $1 AND status = 'reserved'",
+          WHERE id = $1 AND status = 'reserved' AND reconcile_claim_token = $7 AND reconcile_claimed_until > now()",
     )
     .bind(order_id)
     .bind(&activation.provider_order_id)
@@ -476,6 +503,7 @@ async fn create_order(
     .bind(activation.cost)
     .bind(activation.cost_currency.as_deref())
     .bind(activation.expires_at)
+    .bind(claim_token)
     .execute(&state.db)
     .await?;
 
@@ -486,20 +514,7 @@ async fn create_order(
         return load_order(&state, user.id, order_id).await.map(Json);
     }
 
-    Ok(Json(OrderResponse {
-        id: order_id,
-        reference,
-        product: product_name,
-        country: country_name,
-        country_code: body.country_code.trim().to_uppercase(),
-        price_ngn: price_ngn.normalize().to_string(),
-        status: "awaiting_code".into(),
-        phone_number: Some(activation.phone),
-        code: None,
-        expires_at: activation.expires_at.map(|t| t.to_rfc3339()),
-        created_at: created_at.to_rfc3339(),
-        messages: Vec::new(),
-    }))
+    load_order(&state, user.id, order_id).await.map(Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -521,83 +536,12 @@ async fn list_orders(
     Ok(Json(rows.into_iter().map(into_response).collect()))
 }
 
-/// Reads an order, and advances it first if the supplier has news.
-///
-/// The client polls this. There is no separate worker yet: the only orders that
-/// need chasing are ones a user is actively watching, and asking the supplier on
-/// their behalf is both simpler and exactly as timely.
+/// Reads the stored order. Supplier state is owned by the reconciler.
 async fn get_order(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<OrderResponse>> {
-    let row: Option<(String, Option<String>, Decimal, String, Option<DateTime<Utc>>)> =
-        sqlx::query_as(
-            "SELECT status, provider_order_id, price_ngn, reference, expires_at
-               FROM number_orders WHERE id = $1 AND user_id = $2",
-        )
-        .bind(id)
-        .bind(user.id)
-        .fetch_optional(&state.db)
-        .await?;
-
-    let (status, provider_order_id, _price_ngn, _reference, expires_at) =
-        row.ok_or(ApiError::NotFound)?;
-
-    let is_open = matches!(status.as_str(), "reserved" | "awaiting_code");
-
-    if let (true, Some(provider_order_id)) = (is_open, provider_order_id.as_deref()) {
-        match state.numbers.check(provider_order_id).await {
-            Ok(ActivationState::Received {
-                code,
-                text,
-                messages,
-            }) => {
-                // Messages first: the order settles once, but a number that
-                // takes a second message after settling still has it recorded.
-                save_messages(&state, id, &messages).await;
-                if is_open {
-                    number_order_transitions::apply(
-                        &state.db,
-                        id,
-                        OrderTransition::Deliver { code, text },
-                    )
-                    .await?;
-                }
-            }
-            Ok(ActivationState::Finished) => {
-                number_order_transitions::apply(
-                    &state.db,
-                    id,
-                    OrderTransition::Refund {
-                        status: RefundStatus::Expired,
-                        reason: "no_code".into(),
-                    },
-                )
-                .await?;
-            }
-            Ok(ActivationState::Pending) => {
-                // A number nobody answered is still a number we paid for, so the
-                // hold is released rather than left to rot in the supplier's pool.
-                if expires_at.is_some_and(|t| t < Utc::now()) {
-                    let _ = state.numbers.cancel(provider_order_id).await;
-                    number_order_transitions::apply(
-                        &state.db,
-                        id,
-                        OrderTransition::Refund {
-                            status: RefundStatus::Expired,
-                            reason: "expired".into(),
-                        },
-                    )
-                    .await?;
-                }
-            }
-            // A supplier we cannot reach is not a reason to fail the read. The
-            // order stays open and the next poll tries again.
-            Err(e) => tracing::warn!(error = %e, order_id = %id, "number check failed"),
-        }
-    }
-
     load_order(&state, user.id, id).await.map(Json)
 }
 
@@ -659,32 +603,6 @@ async fn cancel_order(
     )
     .await?;
     load_order(&state, user.id, id).await.map(Json)
-}
-
-/// Record everything the number received.
-///
-/// Failure here is logged rather than propagated: the inbox is a record beside
-/// the order, and losing a copy of a message must never stop the order itself
-/// from settling — the money side is what the buyer is waiting on.
-async fn save_messages(state: &AppState, order_id: Uuid, messages: &[Sms]) {
-    for message in messages {
-        let result = sqlx::query(
-            "INSERT INTO number_messages (order_id, sender, text, code, received_at)
-             VALUES ($1, $2, $3, $4, COALESCE($5, now()))
-             ON CONFLICT (order_id, text) DO NOTHING",
-        )
-        .bind(order_id)
-        .bind(message.sender.as_deref())
-        .bind(&message.text)
-        .bind(message.code.as_deref())
-        .bind(message.received_at)
-        .execute(&state.db)
-        .await;
-
-        if let Err(err) = result {
-            tracing::warn!(%order_id, error = %err, "could not record a number's message");
-        }
-    }
 }
 
 /// The columns every order response is built from, and the joins they need.
@@ -799,6 +717,7 @@ mod tests {
             termii_api_key: None,
             termii_sender_id: "Naivolt".into(),
             resend_api_key: None,
+            operations_alert_email: None,
             email_from: "test@example.test".into(),
             signer_url: None,
             dev_mnemonic: None,
@@ -886,6 +805,7 @@ mod tests {
             auto_approve_kyc: false,
             google_allowed_emails: Arc::new(Vec::new()),
             admin_token: None,
+            operations_alert_email: None,
             web_app_url: "http://localhost".into(),
         };
         let (product_slug, country_code, price): (String, String, Decimal) = sqlx::query_as(
@@ -912,7 +832,12 @@ mod tests {
             tier_at_issue: 0,
             session_family: Uuid::new_v4(),
         };
-        let first = create_order(State(state.clone()), user(), headers.clone(), Json(request.clone()));
+        let first = create_order(
+            State(state.clone()),
+            user(),
+            headers.clone(),
+            Json(request.clone()),
+        );
         let second = create_order(State(state.clone()), user(), headers, Json(request.clone()));
         let (first, second) = tokio::join!(first, second);
         let first = first.unwrap().0;
@@ -943,7 +868,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap(),
-            key
+            format!("number-reserve:{user_id}:{key}")
         );
 
         sqlx::query("UPDATE number_prices SET active = false")
@@ -1000,9 +925,9 @@ mod tests {
         let legacy_order: Uuid = sqlx::query_scalar(
             "INSERT INTO number_orders (
                  user_id, product_id, country_id, price_ngn, status, reference,
-                 reserved_journal_id, idempotency_payload_complete
+                 reserved_journal_id, idempotency_key, idempotency_payload_complete
              )
-             SELECT $1, p.id, c.id, $2, 'reserved', $3, $4, false
+             SELECT $1, p.id, c.id, $2, 'reserved', $3, $4, $7, false
                FROM number_products p, number_countries c
               WHERE p.slug = $5 AND c.code = $6
              RETURNING id",
@@ -1013,6 +938,7 @@ mod tests {
         .bind(legacy_reservation)
         .bind(&request.product_slug)
         .bind(&request.country_code)
+        .bind(legacy_key)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1046,10 +972,7 @@ mod tests {
 
         let closed_key = Uuid::new_v4();
         let mut closed_headers = HeaderMap::new();
-        closed_headers.insert(
-            "Idempotency-Key",
-            closed_key.to_string().parse().unwrap(),
-        );
+        closed_headers.insert("Idempotency-Key", closed_key.to_string().parse().unwrap());
         let _ = create_order(State(state), user(), closed_headers, Json(request))
             .await
             .unwrap();

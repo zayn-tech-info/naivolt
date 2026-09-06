@@ -31,6 +31,45 @@ END $$;
 
 DO $$
 BEGIN
+    UPDATE number_orders SET status = 'review_required' WHERE reference = 'NVNO-INVARIANT-1';
+    RAISE EXCEPTION 'FAIL: review state without reason and timestamp accepted';
+EXCEPTION WHEN check_violation THEN
+    RAISE NOTICE '  ok: review state needs safe reason and timestamp';
+END $$;
+
+UPDATE number_orders
+   SET status = 'review_required', review_required_at = now(), review_reason = 'purchase_outcome_unknown'
+ WHERE reference = 'NVNO-INVARIANT-1';
+
+DO $$
+BEGIN
+    UPDATE number_orders SET reconcile_claim_token = gen_random_uuid() WHERE reference = 'NVNO-INVARIANT-1';
+    RAISE EXCEPTION 'FAIL: partial reconciliation claim accepted';
+EXCEPTION WHEN check_violation THEN
+    RAISE NOTICE '  ok: reconciliation claim token and lease are paired';
+END $$;
+
+DO $$
+DECLARE slot_count INTEGER;
+BEGIN
+    SELECT count(*) INTO slot_count FROM number_provider_slots;
+    IF slot_count <> 10 THEN RAISE EXCEPTION 'FAIL: expected ten provider slots, got %', slot_count; END IF;
+    RAISE NOTICE '  ok: ten provider slots are seeded';
+END $$;
+
+INSERT INTO operator_alerts(number_order_id, dedupe_key)
+SELECT id, 'number-review:' || id FROM number_orders WHERE reference = 'NVNO-INVARIANT-1';
+DO $$
+BEGIN
+    INSERT INTO operator_alerts(number_order_id, dedupe_key)
+    SELECT id, 'number-review:' || id FROM number_orders WHERE reference = 'NVNO-INVARIANT-1';
+    RAISE EXCEPTION 'FAIL: duplicate operator alert accepted';
+EXCEPTION WHEN unique_violation THEN
+    RAISE NOTICE '  ok: operator review alerts are deduplicated';
+END $$;
+
+DO $$
+BEGIN
     UPDATE number_orders SET status = 'delivered' WHERE reference = 'NVNO-INVARIANT-1';
     RAISE EXCEPTION 'FAIL: delivery without settlement accepted';
 EXCEPTION WHEN check_violation THEN

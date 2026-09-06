@@ -9,11 +9,19 @@
 //! two together.
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 use naivolt_auth::Channel;
 
 #[allow(async_fn_in_trait)]
 pub trait Notifier: Send + Sync {
     async fn send_code(&self, destination: &str, channel: Channel, code: &str) -> Result<()>;
+    async fn send_operator_alert(
+        &self,
+        destination: &str,
+        reference: &str,
+        category: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()>;
 }
 
 /// The message a user receives. Kept in one place so SMS and email stay
@@ -56,6 +64,16 @@ impl Notifier for LogNotifier {
             code,
             "DEV ONLY — code logged instead of sent"
         );
+        Ok(())
+    }
+    async fn send_operator_alert(
+        &self,
+        _destination: &str,
+        reference: &str,
+        category: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        tracing::warn!(order=%reference, error_category=category, at=%at, "DEV ONLY operator review alert");
         Ok(())
     }
 }
@@ -153,6 +171,26 @@ impl Notifier for HttpNotifier {
             Channel::Email => self.send_email(destination, code).await,
         }
     }
+    async fn send_operator_alert(
+        &self,
+        destination: &str,
+        reference: &str,
+        category: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        let key = self
+            .resend_key
+            .as_ref()
+            .context("operator alert requested but RESEND_API_KEY is not configured")?;
+        let response = self.client.post("https://api.resend.com/emails").bearer_auth(key).json(&serde_json::json!({
+            "from": self.email_from, "to": [destination], "subject": format!("Number order {reference} requires review"),
+            "html": format!("<p>Order <strong>{reference}</strong> requires review.</p><p>Category: {category}</p><p>Detected: {at}</p><p>Open the admin dashboard to investigate.</p>")
+        })).send().await.context("Resend operator alert request failed")?;
+        if !response.status().is_success() {
+            bail!("Resend rejected operator alert ({})", response.status());
+        }
+        Ok(())
+    }
 }
 
 /// Either transport, chosen at boot.
@@ -170,6 +208,24 @@ impl Notifier for AnyNotifier {
         match self {
             AnyNotifier::Log(n) => n.send_code(destination, channel, code).await,
             AnyNotifier::Http(n) => n.send_code(destination, channel, code).await,
+        }
+    }
+    async fn send_operator_alert(
+        &self,
+        destination: &str,
+        reference: &str,
+        category: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        match self {
+            AnyNotifier::Log(n) => {
+                n.send_operator_alert(destination, reference, category, at)
+                    .await
+            }
+            AnyNotifier::Http(n) => {
+                n.send_operator_alert(destination, reference, category, at)
+                    .await
+            }
         }
     }
 }

@@ -36,6 +36,7 @@ pub struct AppState {
     pub google_allowed_emails: Arc<Vec<String>>,
     /// Shared secret for the read-only admin endpoints; None disables them.
     pub admin_token: Option<String>,
+    pub operations_alert_email: Option<String>,
     /// Where the dashboard lives, without a trailing slash. Paystack returns the
     /// payer to a URL under it.
     pub web_app_url: String,

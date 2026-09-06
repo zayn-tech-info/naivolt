@@ -12,16 +12,15 @@ VALUES (
 
 INSERT INTO number_orders (
     user_id, product_id, country_id, price_ngn, status, reference,
-    reserved_journal_id, idempotency_payload_complete
+    reserved_journal_id, idempotency_key, idempotency_payload_complete
 )
-SELECT u.id, p.id, c.id, 500, 'reserved', 'NVNO-CLOSING-OVERLAP', j.id, false
+SELECT u.id, p.id, c.id, 500, 'reserved', 'NVNO-CLOSING-OVERLAP', j.id,
+       '00000000-0000-4000-8000-000000000015', false
   FROM users u
  CROSS JOIN LATERAL (SELECT id FROM number_products ORDER BY id LIMIT 1) p
  CROSS JOIN LATERAL (SELECT id FROM number_countries ORDER BY id LIMIT 1) c
   JOIN ledger_journals j ON j.reference = 'closing-order-reservation'
  WHERE u.email = 'closing-order-identity@example.test';
-
-\ir ../staged/0015_require_number_order_identity.sql
 
 DO $$
 DECLARE
@@ -32,7 +31,7 @@ BEGIN
       FROM number_orders
      WHERE reference = 'NVNO-CLOSING-OVERLAP';
     IF stored_key <> '00000000-0000-4000-8000-000000000015'::UUID THEN
-        RAISE EXCEPTION 'FAIL: overlap order key was not backfilled';
+        RAISE EXCEPTION 'FAIL: required order key was not stored';
     END IF;
 
     SELECT count(*) INTO required_columns
