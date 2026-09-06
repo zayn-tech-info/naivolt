@@ -67,6 +67,8 @@ pub enum AnyNumberProvider {
     FiveSim(FiveSimProvider),
     /// Development only.
     Stub(StubProvider),
+    #[cfg(test)]
+    CountingStub(CountingStubProvider),
 }
 
 impl AnyNumberProvider {
@@ -74,6 +76,8 @@ impl AnyNumberProvider {
         match self {
             AnyNumberProvider::FiveSim(p) => p.buy(country, product).await,
             AnyNumberProvider::Stub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(p) => p.buy(country, product).await,
         }
     }
 
@@ -81,6 +85,8 @@ impl AnyNumberProvider {
         match self {
             AnyNumberProvider::FiveSim(p) => p.check(order_id).await,
             AnyNumberProvider::Stub(p) => p.check(order_id).await,
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(_) => Ok(ActivationState::Pending),
         }
     }
 
@@ -90,6 +96,8 @@ impl AnyNumberProvider {
         match self {
             AnyNumberProvider::FiveSim(p) => p.cancel(order_id).await,
             AnyNumberProvider::Stub(_) => Ok(()),
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(_) => Ok(()),
         }
     }
 
@@ -280,6 +288,25 @@ impl FiveSimProvider {
 /// happy path is walkable without spending real money. Refused in production.
 #[derive(Clone)]
 pub struct StubProvider;
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct CountingStubProvider {
+    buy_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl CountingStubProvider {
+    pub fn buy_calls(&self) -> usize {
+        self.buy_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+        self.buy_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        StubProvider.buy(country, product).await
+    }
+}
 
 impl StubProvider {
     async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {

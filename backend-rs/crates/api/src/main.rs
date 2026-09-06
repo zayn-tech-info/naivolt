@@ -22,6 +22,7 @@ mod kyc_routes;
 mod notify;
 mod number_catalog;
 mod number_provider;
+mod number_order_transitions;
 mod number_routes;
 mod payout_provider;
 mod payout_routes;
@@ -29,6 +30,8 @@ mod pricing;
 mod rate_routes;
 mod signer;
 mod state;
+#[cfg(test)]
+mod test_database;
 mod user_routes;
 
 use anyhow::{Context, Result};

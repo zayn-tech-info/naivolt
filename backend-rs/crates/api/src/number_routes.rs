@@ -25,6 +25,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
+use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
 use crate::number_provider::{ActivationState, Sms};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
@@ -218,7 +219,7 @@ async fn product_countries(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrderBody {
     pub product_slug: String,
@@ -270,14 +271,57 @@ async fn create_order(
     let idempotency_key = headers
         .get("Idempotency-Key")
         .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
         .ok_or_else(|| ApiError::BadRequest("Idempotency-Key header is required".into()))?;
+    let idempotency_key = Uuid::parse_str(idempotency_key)
+        .map_err(|_| ApiError::BadRequest("Idempotency-Key must be a UUID".into()))?;
+
+    let expected_price_ngn = body
+        .expected_price_ngn
+        .as_deref()
+        .map(|value| Decimal::from_str(value.trim()))
+        .transpose()
+        .map_err(|_| ApiError::BadRequest("That expected price isn't a number.".into()))?;
+    // --- Reserve, under a row lock -------------------------------------------
+    let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
+
+    let ngn_account_id = lock_user_ngn_account(&mut tx, user.id).await?;
+
+    let existing: Option<(Uuid, String, String, Option<Decimal>, bool)> = sqlx::query_as(
+        "SELECT o.id, p.slug, c.code, o.expected_price_ngn, o.idempotency_payload_complete
+           FROM number_orders o
+           JOIN number_products p ON p.id = o.product_id
+           JOIN number_countries c ON c.id = o.country_id
+           LEFT JOIN ledger_journals j ON j.id = o.reserved_journal_id
+          WHERE o.user_id = $1
+            AND (o.idempotency_key = $2
+                 OR (o.idempotency_key IS NULL AND j.idempotency_key = $3))
+          LIMIT 1",
+    )
+    .bind(user.id)
+    .bind(idempotency_key)
+    .bind(idempotency_key.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    if let Some((id, stored_product, stored_country, stored_expected, complete)) = existing {
+        if stored_product != body.product_slug.trim().to_lowercase()
+            || stored_country != body.country_code.trim().to_uppercase()
+            || (complete && stored_expected != expected_price_ngn)
+        {
+            return Err(ApiError::Conflict(
+                "That Idempotency-Key belongs to a different number purchase.".into(),
+            ));
+        }
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        return load_order(&state, user.id, id).await.map(Json);
+    }
 
     let (product_id, product_name, provider_product): (Uuid, String, String) = sqlx::query_as(
         "SELECT id, name, provider_product FROM number_products WHERE slug = $1 AND active",
     )
     .bind(body.product_slug.trim().to_lowercase())
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::BadRequest("We don't sell numbers for that app.".into()))?;
 
@@ -285,7 +329,7 @@ async fn create_order(
         "SELECT id, name, provider_country FROM number_countries WHERE code = $1 AND active",
     )
     .bind(body.country_code.trim().to_uppercase())
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::BadRequest("We don't sell numbers in that country.".into()))?;
 
@@ -295,40 +339,29 @@ async fn create_order(
     )
     .bind(product_id)
     .bind(country_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| {
         ApiError::BadRequest("That app isn't available in that country yet.".into())
     })?;
 
-    // Real money must not buy a number that does not exist. The stub issues
-    // plausible-looking activations that always deliver `123456`, which is
-    // exactly what a developer wants and exactly what a paying customer must
-    // never receive. Production refuses to boot without a supplier key at all;
-    // this covers the staging box in between, where the balance being spent was
-    // charged to a real card.
+    // This availability gate applies only to a new purchase. Replays return
+    // their stored result even when provider configuration changes later.
     if !state.numbers.is_live() && state.funding.is_live() {
         return Err(ApiError::ServiceUnavailable(
             "Numbers aren't on sale yet. Nothing has been charged.".into(),
         ));
     }
 
-    if let Some(expected) = body.expected_price_ngn.as_deref() {
-        let expected = Decimal::from_str(expected.trim())
-            .map_err(|_| ApiError::BadRequest("That expected price isn't a number.".into()))?;
-        // Only a rise is refused. A number that got cheaper is charged at the
-        // cheaper price, which needs no permission from anyone.
+    if let Some(expected) = expected_price_ngn {
+        // Only a new purchase is price checked. A replay returns its stored
+        // order even when the live catalogue price has moved since the commit.
         if price_ngn > expected {
             return Err(ApiError::PriceMoved {
                 price_ngn: price_ngn.normalize().to_string(),
             });
         }
     }
-
-    // --- Reserve, under a row lock -------------------------------------------
-    let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
-
-    let ngn_account_id = lock_user_ngn_account(&mut tx, user.id).await?;
 
     let raw_balance: Decimal = sqlx::query_scalar(
         "SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account_id = $1",
@@ -348,7 +381,7 @@ async fn create_order(
     let journal = naivolt_ledger::journal::JournalBuilder::new(
         JournalKind::NumberReserve,
         reference.clone(),
-        idempotency_key.clone(),
+        format!("number-reserve:{}:{idempotency_key}", user.id),
     )
     .entry(ngn_account_id, AccountKind::UserNgn, Asset::Ngn, price_ngn)
     .entry(
@@ -369,26 +402,12 @@ async fn create_order(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
 
-    // A replay of the same intent returns the original order rather than buying
-    // a second number. The journal is already idempotent; this keeps the order
-    // row in step with it.
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM number_orders WHERE reserved_journal_id = $1")
-            .bind(outcome.journal_id())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(anyhow::Error::from)?;
-
-    if let Some(id) = existing {
-        tx.commit().await.map_err(anyhow::Error::from)?;
-        return load_order(&state, user.id, id).await.map(Json);
-    }
-
     let (order_id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
         "INSERT INTO number_orders
            (user_id, product_id, country_id, price_ngn, provider, status, reference,
-            reserved_journal_id)
-         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $7)
+            reserved_journal_id, idempotency_key, expected_price_ngn,
+            idempotency_payload_complete)
+         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, true)
          RETURNING id, created_at",
     )
     .bind(user.id)
@@ -398,6 +417,8 @@ async fn create_order(
     .bind(if state.numbers.is_live() { "5sim" } else { "stub" })
     .bind(&reference)
     .bind(outcome.journal_id())
+    .bind(idempotency_key)
+    .bind(expected_price_ngn)
     .fetch_one(&mut *tx)
     .await
     .map_err(anyhow::Error::from)?;
@@ -410,18 +431,25 @@ async fn create_order(
     let activation = match state.numbers.buy(&provider_country, &provider_product).await {
         Ok(activation) => activation,
         Err(err) => {
-            refund_order(&state, order_id, &reference, price_ngn, user.id, "supplier_unavailable")
-                .await?;
+            number_order_transitions::apply(
+                &state.db,
+                order_id,
+                OrderTransition::Refund {
+                    status: RefundStatus::Failed,
+                    reason: "supplier_unavailable".into(),
+                },
+            )
+            .await?;
             return Err(err);
         }
     };
 
-    sqlx::query(
+    let assigned = sqlx::query(
         "UPDATE number_orders
             SET status = 'awaiting_code', provider_order_id = $2, phone_number = $3,
                 provider_cost = $4, provider_cost_currency = $5, expires_at = $6,
                 updated_at = now()
-          WHERE id = $1",
+          WHERE id = $1 AND status = 'reserved'",
     )
     .bind(order_id)
     .bind(&activation.provider_order_id)
@@ -431,6 +459,13 @@ async fn create_order(
     .bind(activation.expires_at)
     .execute(&state.db)
     .await?;
+
+    if assigned.rows_affected() != 1 {
+        if state.numbers.is_live() {
+            let _ = state.numbers.cancel(&activation.provider_order_id).await;
+        }
+        return load_order(&state, user.id, order_id).await.map(Json);
+    }
 
     Ok(Json(OrderResponse {
         id: order_id,
@@ -487,7 +522,7 @@ async fn get_order(
         .fetch_optional(&state.db)
         .await?;
 
-    let (status, provider_order_id, price_ngn, reference, expires_at) =
+    let (status, provider_order_id, _price_ngn, _reference, expires_at) =
         row.ok_or(ApiError::NotFound)?;
 
     let is_open = matches!(status.as_str(), "reserved" | "awaiting_code");
@@ -503,18 +538,39 @@ async fn get_order(
                 // takes a second message after settling still has it recorded.
                 save_messages(&state, id, &messages).await;
                 if is_open {
-                    settle_order(&state, id, &reference, price_ngn, &code, &text).await?;
+                    number_order_transitions::apply(
+                        &state.db,
+                        id,
+                        OrderTransition::Deliver { code, text },
+                    )
+                    .await?;
                 }
             }
             Ok(ActivationState::Finished) => {
-                refund_order(&state, id, &reference, price_ngn, user.id, "no_code").await?;
+                number_order_transitions::apply(
+                    &state.db,
+                    id,
+                    OrderTransition::Refund {
+                        status: RefundStatus::Expired,
+                        reason: "no_code".into(),
+                    },
+                )
+                .await?;
             }
             Ok(ActivationState::Pending) => {
                 // A number nobody answered is still a number we paid for, so the
                 // hold is released rather than left to rot in the supplier's pool.
                 if expires_at.is_some_and(|t| t < Utc::now()) {
                     let _ = state.numbers.cancel(provider_order_id).await;
-                    refund_order(&state, id, &reference, price_ngn, user.id, "expired").await?;
+                    number_order_transitions::apply(
+                        &state.db,
+                        id,
+                        OrderTransition::Refund {
+                            status: RefundStatus::Expired,
+                            reason: "expired".into(),
+                        },
+                    )
+                    .await?;
                 }
             }
             // A supplier we cannot reach is not a reason to fail the read. The
@@ -549,12 +605,10 @@ async fn cancel_order(
     .fetch_optional(&state.db)
     .await?;
 
-    let (status, provider_order_id, price_ngn, reference) = row.ok_or(ApiError::NotFound)?;
+    let (status, provider_order_id, _price_ngn, _reference) = row.ok_or(ApiError::NotFound)?;
 
     if !matches!(status.as_str(), "reserved" | "awaiting_code") {
-        return Err(ApiError::BadRequest(
-            "That number can't be cancelled any more.".into(),
-        ));
+        return load_order(&state, user.id, id).await.map(Json);
     }
 
     // Tell the supplier first. Refunding a user while still paying for the
@@ -563,16 +617,28 @@ async fn cancel_order(
     // to pass on rather than swallow.
     if let Some(provider_order_id) = provider_order_id.as_deref() {
         if state.numbers.is_live() {
-            state.numbers.cancel(provider_order_id).await.map_err(|e| {
-                tracing::warn!(order = %id, error = %e, "supplier refused cancel");
-                ApiError::ServiceUnavailable(
+            if let Err(error) = state.numbers.cancel(provider_order_id).await {
+                tracing::warn!(order = %id, error = %error, "supplier refused cancel");
+                let current = load_order(&state, user.id, id).await?;
+                if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
+                    return Ok(Json(current));
+                }
+                return Err(ApiError::ServiceUnavailable(
                     "That number can't be released just yet — try again in a moment.".into(),
-                )
-            })?;
+                ));
+            }
         }
     }
 
-    refund_order(&state, id, &reference, price_ngn, user.id, "cancelled").await?;
+    number_order_transitions::apply(
+        &state.db,
+        id,
+        OrderTransition::Refund {
+            status: RefundStatus::Cancelled,
+            reason: "cancelled".into(),
+        },
+    )
+    .await?;
     load_order(&state, user.id, id).await.map(Json)
 }
 
@@ -600,126 +666,6 @@ async fn save_messages(state: &AppState, order_id: Uuid, messages: &[Sms]) {
             tracing::warn!(%order_id, error = %err, "could not record a number's message");
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-
-/// The code arrived: discharge the reservation into revenue.
-async fn settle_order(
-    state: &AppState,
-    order_id: Uuid,
-    reference: &str,
-    price_ngn: Decimal,
-    code: &str,
-    text: &str,
-) -> ApiResult<()> {
-    let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
-
-    let pending_account_id = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
-    let revenue_account_id = platform_account(&mut tx, AccountKind::NumberRevenue).await?;
-
-    let journal = naivolt_ledger::journal::JournalBuilder::new(
-        JournalKind::NumberSettle,
-        reference.to_owned(),
-        format!("{reference}:settle"),
-    )
-    .entry(
-        pending_account_id,
-        AccountKind::NumberPayablePending,
-        Asset::Ngn,
-        price_ngn,
-    )
-    .entry(
-        revenue_account_id,
-        AccountKind::NumberRevenue,
-        Asset::Ngn,
-        -price_ngn,
-    )
-    .build()
-    .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
-
-    let outcome = journal
-        .post(&mut tx)
-        .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
-
-    sqlx::query(
-        "UPDATE number_orders
-            SET status = 'delivered', sms_code = $2, sms_text = $3, received_at = now(),
-                settled_journal_id = $4, updated_at = now()
-          WHERE id = $1 AND status IN ('reserved', 'awaiting_code')",
-    )
-    .bind(order_id)
-    .bind(code)
-    .bind(text)
-    .bind(outcome.journal_id())
-    .execute(&mut *tx)
-    .await
-    .map_err(anyhow::Error::from)?;
-
-    tx.commit().await.map_err(anyhow::Error::from)?;
-    Ok(())
-}
-
-/// No code is coming: reverse the reservation.
-///
-/// This reverses rather than writing a compensating credit, so a user can never
-/// end up short by a rounding step or a double refund.
-async fn refund_order(
-    state: &AppState,
-    order_id: Uuid,
-    reference: &str,
-    price_ngn: Decimal,
-    user_id: Uuid,
-    reason: &str,
-) -> ApiResult<()> {
-    let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
-
-    let ngn_account_id = lock_user_ngn_account(&mut tx, user_id).await?;
-    let pending_account_id = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
-
-    let journal = naivolt_ledger::journal::JournalBuilder::new(
-        JournalKind::NumberRefund,
-        reference.to_owned(),
-        format!("{reference}:refund"),
-    )
-    .entry(
-        pending_account_id,
-        AccountKind::NumberPayablePending,
-        Asset::Ngn,
-        price_ngn,
-    )
-    .entry(ngn_account_id, AccountKind::UserNgn, Asset::Ngn, -price_ngn)
-    .metadata(serde_json::json!({ "reason": reason }))
-    .build()
-    .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
-
-    let outcome = journal
-        .post(&mut tx)
-        .await
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
-
-    let status = match reason {
-        "supplier_unavailable" => "failed",
-        "cancelled" => "cancelled",
-        _ => "expired",
-    };
-
-    sqlx::query(
-        "UPDATE number_orders
-            SET status = $2, failure_reason = $3, refunded_journal_id = $4, updated_at = now()
-          WHERE id = $1 AND status IN ('reserved', 'awaiting_code')",
-    )
-    .bind(order_id)
-    .bind(status)
-    .bind(reason)
-    .bind(outcome.journal_id())
-    .execute(&mut *tx)
-    .await
-    .map_err(anyhow::Error::from)?;
-
-    tx.commit().await.map_err(anyhow::Error::from)?;
-    Ok(())
 }
 
 /// The columns every order response is built from, and the joins they need.
@@ -807,4 +753,255 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
         .collect();
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, Environment};
+    use crate::funding_provider::{AnyFundingProvider, StubFunding};
+    use crate::google_keys::GoogleKeys;
+    use crate::notify::{AnyNotifier, LogNotifier};
+    use crate::number_provider::{AnyNumberProvider, CountingStubProvider};
+    use crate::payout_provider;
+    use crate::pricing::Rates;
+    use crate::signer::{AnyAddressProvider, LocalSigner};
+    use crate::test_database::IsolatedDatabase;
+    use naivolt_auth::session::SessionKeys;
+    use rust_decimal_macros::dec;
+    use std::sync::Arc;
+
+    fn test_config() -> Config {
+        Config {
+            environment: Environment::Development,
+            bind_addr: "127.0.0.1:0".into(),
+            database_url: String::new(),
+            jwt_secret: "01234567890123456789012345678901".into(),
+            termii_api_key: None,
+            termii_sender_id: "Naivolt".into(),
+            resend_api_key: None,
+            email_from: "test@example.test".into(),
+            signer_url: None,
+            dev_mnemonic: None,
+            auto_approve_kyc: false,
+            dev_otp_code: None,
+            paystack_secret_key: None,
+            google_client_id: None,
+            fivesim_api_key: None,
+            fivesim_currency: Some("USD".into()),
+            google_allowed_emails: Vec::new(),
+            admin_token: None,
+            web_app_url: "http://localhost".into(),
+            numbers_margin: dec!(1.25),
+            usd_ngn_mid: dec!(1600),
+            spread_ngn_per_usd: dec!(20),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_purchase_replay_calls_supplier_once() {
+        let database = IsolatedDatabase::new("number_purchase_test").await;
+        let pool = database.pool.clone();
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email) VALUES ('purchase-race@example.test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, user_id, asset)
+             VALUES ('user_ngn', $1, 'NGN') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let float_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, asset)
+             VALUES ('naira_bank_float', 'NGN') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let funding_journal: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('ngn_funding', 'purchase-race-funding', 'purchase-race-funding') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut funding = pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', -100000), ($1, $3, 'NGN', 100000)",
+        )
+        .bind(funding_journal)
+        .bind(user_account)
+        .bind(float_account)
+        .execute(&mut *funding)
+        .await
+        .unwrap();
+        funding.commit().await.unwrap();
+
+        let provider = CountingStubProvider::default();
+        let config = test_config();
+        let state = AppState {
+            db: pool.clone(),
+            keys: Arc::new(SessionKeys::from_secret(config.jwt_secret.as_bytes()).unwrap()),
+            notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
+            addresses: Arc::new(AnyAddressProvider::Local(
+                LocalSigner::from_mnemonic(
+                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                )
+                .unwrap(),
+            )),
+            rates: Rates::new(&config),
+            payouts: Arc::new(payout_provider::AnyPayoutProvider::Stub(
+                payout_provider::StubProvider,
+            )),
+            numbers: Arc::new(AnyNumberProvider::CountingStub(provider.clone())),
+            funding: Arc::new(AnyFundingProvider::Stub(StubFunding)),
+            google_keys: Arc::new(GoogleKeys::new()),
+            google_client_id: None,
+            dev_otp_code: None,
+            auto_approve_kyc: false,
+            google_allowed_emails: Arc::new(Vec::new()),
+            admin_token: None,
+            web_app_url: "http://localhost".into(),
+        };
+        let (product_slug, country_code, price): (String, String, Decimal) = sqlx::query_as(
+            "SELECT p.slug, c.code, pr.price_ngn FROM number_prices pr
+             JOIN number_products p ON p.id = pr.product_id
+             JOIN number_countries c ON c.id = pr.country_id
+             WHERE pr.active AND p.active AND c.active ORDER BY p.id, c.id LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let key = Uuid::new_v4().to_string();
+        let request = CreateOrderBody {
+            product_slug,
+            country_code,
+            expected_price_ngn: Some(price.normalize().to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", key.parse().unwrap());
+        let replay_headers = headers.clone();
+        let replay_request = request.clone();
+        let user = || CurrentUser {
+            id: user_id,
+            tier_at_issue: 0,
+            session_family: Uuid::new_v4(),
+        };
+        let first = create_order(State(state.clone()), user(), headers.clone(), Json(request.clone()));
+        let second = create_order(State(state.clone()), user(), headers, Json(request.clone()));
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap().0;
+        let second = second.unwrap().0;
+        assert_eq!(first.id, second.id);
+        assert_eq!(provider.buy_calls(), 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM number_orders WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM ledger_journals WHERE kind = 'number_reserve'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+
+        sqlx::query("UPDATE number_prices SET active = false")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let inactive_replay = create_order(
+            State(state.clone()),
+            user(),
+            replay_headers,
+            Json(replay_request),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(inactive_replay.id, first.id);
+        assert_eq!(provider.buy_calls(), 1);
+
+        sqlx::query("UPDATE number_prices SET active = true")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let legacy_key = Uuid::new_v4();
+        let legacy_reference = "NVNO-LEGACY-OVERLAP";
+        let legacy_reservation: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('number_reserve', $1, $2) RETURNING id",
+        )
+        .bind(legacy_reference)
+        .bind(legacy_key.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let pending_account: Uuid = sqlx::query_scalar(
+            "SELECT id FROM ledger_accounts
+             WHERE kind = 'number_payable_pending' AND user_id IS NULL AND asset = 'NGN'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut legacy_tx = pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', $4), ($1, $3, 'NGN', -$4)",
+        )
+        .bind(legacy_reservation)
+        .bind(user_account)
+        .bind(pending_account)
+        .bind(price)
+        .execute(&mut *legacy_tx)
+        .await
+        .unwrap();
+        legacy_tx.commit().await.unwrap();
+        let legacy_order: Uuid = sqlx::query_scalar(
+            "INSERT INTO number_orders (
+                 user_id, product_id, country_id, price_ngn, status, reference,
+                 reserved_journal_id, idempotency_payload_complete
+             )
+             SELECT $1, p.id, c.id, $2, 'reserved', $3, $4, false
+               FROM number_products p, number_countries c
+              WHERE p.slug = $5 AND c.code = $6
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(price)
+        .bind(legacy_reference)
+        .bind(legacy_reservation)
+        .bind(&request.product_slug)
+        .bind(&request.country_code)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut legacy_headers = HeaderMap::new();
+        legacy_headers.insert("Idempotency-Key", legacy_key.to_string().parse().unwrap());
+        let legacy_replay = create_order(
+            State(state.clone()),
+            user(),
+            legacy_headers,
+            Json(request.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(legacy_replay.id, legacy_order);
+        assert_eq!(provider.buy_calls(), 1);
+
+        database.cleanup().await;
+    }
 }

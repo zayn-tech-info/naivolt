@@ -194,30 +194,30 @@ impl Journal {
         &self,
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<PostOutcome, LedgerError> {
-        // ON CONFLICT DO NOTHING + RETURNING gives us "insert or tell me it
-        // already existed" in a single round trip, with no race window.
-        let existing: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM ledger_journals WHERE idempotency_key = $1",
-        )
-        .bind(&self.idempotency_key)
-        .fetch_optional(&mut **tx)
-        .await?;
-
-        if let Some((id,)) = existing {
-            return Ok(PostOutcome::AlreadyPosted(id));
-        }
-
-        let journal_id: Uuid = sqlx::query_scalar(
+        // The unique key is the concurrency boundary. DO NOTHING waits for a
+        // competing insert, then a fresh SELECT snapshot observes its result.
+        let inserted: Option<Uuid> = sqlx::query_scalar(
             "INSERT INTO ledger_journals (kind, reference, idempotency_key, metadata)
              VALUES ($1, $2, $3, $4)
+             ON CONFLICT (idempotency_key) DO NOTHING
              RETURNING id",
         )
         .bind(self.kind.as_str())
         .bind(&self.reference)
         .bind(&self.idempotency_key)
         .bind(&self.metadata)
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await?;
+
+        let Some(journal_id) = inserted else {
+            let existing: Uuid = sqlx::query_scalar(
+                "SELECT id FROM ledger_journals WHERE idempotency_key = $1",
+            )
+            .bind(&self.idempotency_key)
+            .fetch_one(&mut **tx)
+            .await?;
+            return Ok(PostOutcome::AlreadyPosted(existing));
+        };
 
         for entry in &self.entries {
             sqlx::query(
