@@ -16,7 +16,7 @@ BEGIN
     SELECT count(*) INTO malformed_keys
       FROM number_orders o
       JOIN ledger_journals j ON j.id = o.reserved_journal_id
-     WHERE j.idempotency_key !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+     WHERE j.idempotency_key !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
     SELECT count(*) INTO unknown_statuses
       FROM number_orders
      WHERE status NOT IN ('reserved', 'awaiting_code', 'delivered', 'expired', 'cancelled', 'failed');

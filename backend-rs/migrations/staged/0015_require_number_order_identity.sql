@@ -3,7 +3,7 @@ UPDATE number_orders o
   FROM ledger_journals j
  WHERE o.idempotency_key IS NULL
    AND j.id = o.reserved_journal_id
-   AND j.idempotency_key ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+   AND j.idempotency_key ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 
 DO $$
 DECLARE

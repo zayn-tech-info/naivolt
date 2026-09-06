@@ -378,10 +378,29 @@ async fn create_order(
     let pending_account_id = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
     let reference = format!("NVNO-{}", &Uuid::new_v4().simple().to_string()[..10].to_uppercase());
 
+    // Until the closing migration, keep writing the raw UUID understood by
+    // the previous API binary. Once 0015 makes the order key required, every
+    // serving process is known to understand user-scoped reservation keys.
+    let order_keys_required: bool = sqlx::query_scalar(
+        "SELECT attnotnull
+           FROM pg_attribute
+          WHERE attrelid = 'number_orders'::regclass
+            AND attname = 'idempotency_key'
+            AND NOT attisdropped",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    let reservation_key = if order_keys_required {
+        format!("number-reserve:{}:{idempotency_key}", user.id)
+    } else {
+        idempotency_key.to_string()
+    };
+
     let journal = naivolt_ledger::journal::JournalBuilder::new(
         JournalKind::NumberReserve,
         reference.clone(),
-        format!("number-reserve:{}:{idempotency_key}", user.id),
+        reservation_key,
     )
     .entry(ngn_account_id, AccountKind::UserNgn, Asset::Ngn, price_ngn)
     .entry(
@@ -917,6 +936,15 @@ mod tests {
             .unwrap(),
             1
         );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT idempotency_key FROM ledger_journals WHERE kind = 'number_reserve'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            key
+        );
 
         sqlx::query("UPDATE number_prices SET active = false")
             .execute(&pool)
@@ -1001,6 +1029,43 @@ mod tests {
         .0;
         assert_eq!(legacy_replay.id, legacy_order);
         assert_eq!(provider.buy_calls(), 1);
+
+        sqlx::query(
+            "UPDATE number_orders o
+                SET idempotency_key = j.idempotency_key::UUID
+               FROM ledger_journals j
+              WHERE o.reserved_journal_id = j.id AND o.idempotency_key IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ALTER TABLE number_orders ALTER COLUMN idempotency_key SET NOT NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let closed_key = Uuid::new_v4();
+        let mut closed_headers = HeaderMap::new();
+        closed_headers.insert(
+            "Idempotency-Key",
+            closed_key.to_string().parse().unwrap(),
+        );
+        let _ = create_order(State(state), user(), closed_headers, Json(request))
+            .await
+            .unwrap();
+        assert_eq!(provider.buy_calls(), 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT idempotency_key
+                   FROM ledger_journals
+                  WHERE idempotency_key = $1",
+            )
+            .bind(format!("number-reserve:{user_id}:{closed_key}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            format!("number-reserve:{user_id}:{closed_key}")
+        );
 
         database.cleanup().await;
     }

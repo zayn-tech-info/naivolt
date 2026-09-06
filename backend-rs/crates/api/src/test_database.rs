@@ -79,7 +79,7 @@ impl IsolatedDatabase {
 
 impl Drop for IsolatedDatabase {
     fn drop(&mut self) {
-        if self.cleaned || !std::thread::panicking() {
+        if self.cleaned {
             return;
         }
 
@@ -131,6 +131,30 @@ mod tests {
             panic!("intentional cleanup regression test");
         });
         assert!(task.await.is_err());
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM information_schema.schemata WHERE schema_name = $1
+             )",
+        )
+        .bind(schema)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn ordinary_drop_still_removes_the_temporary_schema() {
+        let database = IsolatedDatabase::new("number_drop_cleanup_test").await;
+        let database_url = database.database_url.clone();
+        let schema = database.schema.clone();
+        drop(database);
 
         let admin = PgPoolOptions::new()
             .max_connections(1)
