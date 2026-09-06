@@ -1,0 +1,20 @@
+{
+  "name": "Naivolt",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "cd backend-rs && DATABASE_URL=postgres://localhost/naivolt_dev JWT_SECRET=dev_jwt_secret_at_least_32_bytes_long_00 DEV_MNEMONIC='abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about' BIND_ADDR=0.0.0.0:8000 ADMIN_TOKEN=dev_admin_token_0123456789abcdef cargo run -p naivolt-api --bin api"
+    },
+    {
+      "name": "app",
+      "command": "EXPO_PUBLIC_API_URL=http://localhost:8000 EXPO_PUBLIC_USE_MOCK_EXCHANGE=false npx expo start --web --port 8081"
+    },
+    {
+      "name": "admin",
+      "command": "cd admin && NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1 npm run dev"
+    }
+  ],
+  "ports": [8000, 8081, 3000]
+}
