@@ -53,6 +53,7 @@ pub struct Activation {
 }
 
 /// Where an order has got to, as the supplier sees it.
+#[derive(Clone)]
 pub enum ActivationState {
     /// Bought, no SMS yet.
     Pending,
@@ -75,6 +76,8 @@ pub enum AnyNumberProvider {
     Stub(StubProvider),
     #[cfg(test)]
     CountingStub(CountingStubProvider),
+    #[cfg(test)]
+    ScriptedStub(ScriptedStubProvider),
 }
 
 impl AnyNumberProvider {
@@ -84,6 +87,8 @@ impl AnyNumberProvider {
             AnyNumberProvider::Stub(p) => p.buy(country, product).await,
             #[cfg(test)]
             AnyNumberProvider::CountingStub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(p) => p.buy(country, product).await,
         }
     }
 
@@ -93,6 +98,8 @@ impl AnyNumberProvider {
             AnyNumberProvider::Stub(p) => p.check(order_id).await,
             #[cfg(test)]
             AnyNumberProvider::CountingStub(_) => Ok(ActivationState::Pending),
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(p) => p.check(order_id).await,
         }
     }
 
@@ -104,6 +111,8 @@ impl AnyNumberProvider {
             AnyNumberProvider::Stub(_) => Ok(()),
             #[cfg(test)]
             AnyNumberProvider::CountingStub(_) => Ok(()),
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(_) => Ok(()),
         }
     }
 
@@ -286,6 +295,9 @@ impl FiveSimProvider {
 
         if !response.status().is_success() {
             tracing::warn!(status = %response.status(), %order_id, "5sim cancel rejected");
+            return Err(ApiError::ServiceUnavailable(
+                "That number can't be released just yet — try again in a moment.".into(),
+            ));
         }
         Ok(())
     }
@@ -317,6 +329,60 @@ impl CountingStubProvider {
     }
 }
 
+fn stub_received() -> ActivationState {
+    ActivationState::Received {
+        code: "123456".into(),
+        text: "Your code is 123456".into(),
+        messages: vec![Sms {
+            sender: Some("Naivolt".into()),
+            text: "Your code is 123456".into(),
+            code: Some("123456".into()),
+            received_at: None,
+        }],
+    }
+}
+
+/// Test helper: `check()` returns a scripted supplier view, including failures.
+#[cfg(test)]
+#[derive(Clone)]
+pub struct ScriptedStubProvider {
+    check: std::sync::Arc<std::sync::Mutex<Result<ActivationState, String>>>,
+}
+
+#[cfg(test)]
+impl ScriptedStubProvider {
+    pub fn received() -> Self {
+        Self {
+            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(stub_received()))),
+        }
+    }
+
+    pub fn pending() -> Self {
+        Self {
+            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(ActivationState::Pending))),
+        }
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            check: std::sync::Arc::new(std::sync::Mutex::new(Err(
+                "supplier check unavailable".into(),
+            ))),
+        }
+    }
+
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
+        StubProvider.buy(country, product).await
+    }
+
+    async fn check(&self, _order_id: &str) -> ApiResult<ActivationState> {
+        match &*self.check.lock().unwrap() {
+            Ok(state) => Ok(state.clone()),
+            Err(message) => Err(ApiError::ServiceUnavailable(message.clone())),
+        }
+    }
+}
+
 impl StubProvider {
     async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         let seed = uuid::Uuid::new_v4().simple().to_string();
@@ -333,16 +399,7 @@ impl StubProvider {
     }
 
     async fn check(&self, _order_id: &str) -> ApiResult<ActivationState> {
-        Ok(ActivationState::Received {
-            code: "123456".into(),
-            text: "Your code is 123456".into(),
-            messages: vec![Sms {
-                sender: Some("Naivolt".into()),
-                text: "Your code is 123456".into(),
-                code: Some("123456".into()),
-                received_at: None,
-            }],
-        })
+        Ok(stub_received())
     }
 }
 

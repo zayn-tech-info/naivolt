@@ -26,7 +26,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
-use crate::number_provider::PurchaseError;
+use crate::number_provider::{ActivationState, PurchaseError};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -574,20 +574,43 @@ async fn cancel_order(
         return load_order(&state, user.id, id).await.map(Json);
     }
 
-    // Tell the supplier first. Refunding a user while still paying for the
-    // number would be a loss taken quietly, one order at a time — and 5SIM
-    // refuses a cancel in the first couple of minutes, which is a real answer
-    // to pass on rather than swallow.
+    // Ask the supplier whether a code already exists before refunding. A cancel
+    // that wins after SMS arrived at 5SIM would refund the customer while we
+    // still paid for the number. Terminal transitions stay serialized; this
+    // chooses the right terminal.
     if let Some(provider_order_id) = provider_order_id.as_deref() {
-        if state.numbers.is_live() {
-            if let Err(error) = state.numbers.cancel(provider_order_id).await {
-                tracing::warn!(order = %id, error = %error, "supplier refused cancel");
+        match state.numbers.check(provider_order_id).await {
+            Ok(ActivationState::Received {
+                code,
+                text,
+                messages,
+            }) => {
+                number_order_transitions::deliver(&state.db, id, code, text, &messages).await?;
+                return load_order(&state, user.id, id).await.map(Json);
+            }
+            Ok(ActivationState::Finished) => {}
+            Ok(ActivationState::Pending) => {
+                if state.numbers.is_live() {
+                    if let Err(error) = state.numbers.cancel(provider_order_id).await {
+                        tracing::warn!(order = %id, error = %error, "supplier refused cancel");
+                        let current = load_order(&state, user.id, id).await?;
+                        if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
+                            return Ok(Json(current));
+                        }
+                        return Err(ApiError::ServiceUnavailable(
+                            "That number can't be released just yet — try again in a moment."
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
                 let current = load_order(&state, user.id, id).await?;
                 if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
                     return Ok(Json(current));
                 }
                 return Err(ApiError::ServiceUnavailable(
-                    "That number can't be released just yet — try again in a moment.".into(),
+                    "We couldn't check that number just now.".into(),
                 ));
             }
         }
@@ -699,7 +722,7 @@ mod tests {
     use crate::funding_provider::{AnyFundingProvider, StubFunding};
     use crate::google_keys::GoogleKeys;
     use crate::notify::{AnyNotifier, LogNotifier};
-    use crate::number_provider::{AnyNumberProvider, CountingStubProvider};
+    use crate::number_provider::{AnyNumberProvider, CountingStubProvider, ScriptedStubProvider};
     use crate::payout_provider;
     use crate::pricing::Rates;
     use crate::signer::{AnyAddressProvider, LocalSigner};
@@ -990,6 +1013,194 @@ mod tests {
             format!("number-reserve:{user_id}:{closed_key}")
         );
 
+        database.cleanup().await;
+    }
+
+    fn test_state(pool: PgPool, numbers: AnyNumberProvider) -> AppState {
+        let config = test_config();
+        AppState {
+            db: pool,
+            keys: Arc::new(SessionKeys::from_secret(config.jwt_secret.as_bytes()).unwrap()),
+            notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
+            addresses: Arc::new(AnyAddressProvider::Local(
+                LocalSigner::from_mnemonic(
+                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                )
+                .unwrap(),
+            )),
+            rates: Rates::new(&config),
+            payouts: Arc::new(payout_provider::AnyPayoutProvider::Stub(
+                payout_provider::StubProvider,
+            )),
+            numbers: Arc::new(numbers),
+            funding: Arc::new(AnyFundingProvider::Stub(StubFunding)),
+            google_keys: Arc::new(GoogleKeys::new()),
+            google_client_id: None,
+            dev_otp_code: None,
+            auto_approve_kyc: false,
+            google_allowed_emails: Arc::new(Vec::new()),
+            admin_token: None,
+            operations_alert_email: None,
+            web_app_url: "http://localhost".into(),
+        }
+    }
+
+    async fn awaiting_code_order(pool: &sqlx::PgPool, suffix: &str) -> (Uuid, Uuid) {
+        use sqlx::Executor;
+        let user_id: Uuid = sqlx::query_scalar("INSERT INTO users (email) VALUES ($1) RETURNING id")
+            .bind(format!("cancel-{suffix}@example.test"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let user_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, user_id, asset)
+             VALUES ('user_ngn', $1, 'NGN') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        pool.execute(
+            "INSERT INTO ledger_accounts (kind, asset) VALUES ('number_payable_pending', 'NGN')
+             ON CONFLICT DO NOTHING;
+             INSERT INTO ledger_accounts (kind, asset) VALUES ('number_revenue', 'NGN')
+             ON CONFLICT DO NOTHING",
+        )
+        .await
+        .unwrap();
+        let pending: Uuid = sqlx::query_scalar(
+            "SELECT id FROM ledger_accounts WHERE kind = 'number_payable_pending' AND asset = 'NGN'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let reference = format!("NVNO-CANCEL-{suffix}");
+        let reserve_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('number_reserve', $1, $2) RETURNING id",
+        )
+        .bind(&reference)
+        .bind(format!("reserve-cancel-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', 500), ($1, $3, 'NGN', -500)",
+        )
+        .bind(reserve_id)
+        .bind(user_account)
+        .bind(pending)
+        .execute(pool)
+        .await
+        .unwrap();
+        let order_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO number_orders (
+                user_id, product_id, country_id, price_ngn, status, reference,
+                reserved_journal_id, idempotency_key, idempotency_payload_complete,
+                provider_order_id, reconciliation_payload_complete
+             )
+             SELECT $1, p.id, c.id, 500, 'awaiting_code', $2, $3, $4, true, $5, true
+               FROM number_products p, number_countries c
+              ORDER BY p.id, c.id LIMIT 1
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(reference)
+        .bind(reserve_id)
+        .bind(Uuid::new_v4())
+        .bind(format!("provider-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (user_id, order_id)
+    }
+
+    #[tokio::test]
+    async fn cancel_delivers_when_the_supplier_already_has_sms() {
+        let database = IsolatedDatabase::new("number_cancel_received_test").await;
+        let (user_id, order_id) = awaiting_code_order(&database.pool, "RECV").await;
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::received()),
+        );
+        let response = cancel_order(State(state), CurrentUser {
+            id: user_id,
+            tier_at_issue: 0,
+            session_family: Uuid::new_v4(),
+        }, Path(order_id))
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.status, "delivered");
+        assert_eq!(response.code.as_deref(), Some("123456"));
+        let journals: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (CASE WHEN settled_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT,
+                (CASE WHEN refunded_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT
+               FROM number_orders WHERE id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(journals, (1, 0));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_refunds_when_the_supplier_is_still_pending() {
+        let database = IsolatedDatabase::new("number_cancel_pending_test").await;
+        let (user_id, order_id) = awaiting_code_order(&database.pool, "PEND").await;
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::pending()),
+        );
+        let response = cancel_order(State(state), CurrentUser {
+            id: user_id,
+            tier_at_issue: 0,
+            session_family: Uuid::new_v4(),
+        }, Path(order_id))
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.status, "cancelled");
+        let journals: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (CASE WHEN settled_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT,
+                (CASE WHEN refunded_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT
+               FROM number_orders WHERE id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(journals, (0, 1));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_does_not_refund_when_supplier_check_fails() {
+        let database = IsolatedDatabase::new("number_cancel_check_fail_test").await;
+        let (user_id, order_id) = awaiting_code_order(&database.pool, "FAIL").await;
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::failing()),
+        );
+        let err = cancel_order(State(state), CurrentUser {
+            id: user_id,
+            tier_at_issue: 0,
+            session_family: Uuid::new_v4(),
+        }, Path(order_id))
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+        let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "awaiting_code");
         database.cleanup().await;
     }
 }

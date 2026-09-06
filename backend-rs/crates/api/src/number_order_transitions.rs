@@ -70,6 +70,23 @@ pub(crate) async fn apply_claimed(
     apply_inner(db, order_id, transition, Some(claim_token), &[]).await
 }
 
+pub(crate) async fn deliver(
+    db: &PgPool,
+    order_id: Uuid,
+    code: String,
+    text: String,
+    messages: &[Sms],
+) -> ApiResult<TransitionOutcome> {
+    apply_inner(
+        db,
+        order_id,
+        OrderTransition::Deliver { code, text },
+        None,
+        messages,
+    )
+    .await
+}
+
 pub(crate) async fn deliver_claimed(
     db: &PgPool,
     order_id: Uuid,
@@ -630,7 +647,7 @@ mod tests {
         let token = Uuid::new_v4();
         sqlx::query("UPDATE number_orders SET provider_order_id='provider-1' WHERE id=$1")
             .bind(order_id).execute(&pool).await.unwrap();
-        sqlx::raw_sql(include_str!("../../../migrations/staged/0017_close_number_reconciliation.sql"))
+        sqlx::raw_sql(include_str!("../../../migrations/staged/0018_close_number_reconciliation.sql"))
             .execute(&pool).await.unwrap();
         sqlx::query("UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1")
             .bind(order_id).bind(token).execute(&pool).await.unwrap();
@@ -648,5 +665,57 @@ mod tests {
         let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id=$1")
             .bind(order_id).fetch_one(&pool).await.unwrap();
         assert_eq!(status, "delivered");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_supplier_texts_settle_without_the_closing_migration() {
+        let database = IsolatedDatabase::new("number_message_text_unique_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "DUPTEXT").await;
+        sqlx::query("UPDATE number_orders SET provider_order_id='provider-dup' WHERE id=$1")
+            .bind(order_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let second_at = chrono::Utc::now();
+        let messages = vec![
+            Sms {
+                sender: Some("service".into()),
+                text: "same text".into(),
+                code: Some("123".into()),
+                received_at: Some(first_at),
+            },
+            Sms {
+                sender: Some("service".into()),
+                text: "same text".into(),
+                code: Some("123".into()),
+                received_at: Some(second_at),
+            },
+        ];
+        deliver(
+            &pool,
+            order_id,
+            "123".into(),
+            "same text".into(),
+            &messages,
+        )
+        .await
+        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_messages WHERE order_id=$1")
+                .bind(order_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
+        let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id=$1")
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "delivered");
+        database.cleanup().await;
     }
 }

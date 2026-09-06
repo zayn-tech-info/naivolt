@@ -44,5 +44,5 @@ UPDATE number_messages m
   FROM number_orders o
  WHERE o.id = m.order_id AND m.provider_message_key IS NULL;
 
-ALTER TABLE number_messages DROP CONSTRAINT number_messages_order_id_text_key;
+ALTER TABLE number_messages DROP CONSTRAINT IF EXISTS number_messages_order_id_text_key;
 ALTER TABLE number_messages ALTER COLUMN provider_message_key SET NOT NULL;
