@@ -1016,7 +1016,7 @@ mod tests {
         database.cleanup().await;
     }
 
-    fn test_state(pool: PgPool, numbers: AnyNumberProvider) -> AppState {
+    fn test_state(pool: sqlx::PgPool, numbers: AnyNumberProvider) -> AppState {
         let config = test_config();
         AppState {
             db: pool,
@@ -1187,13 +1187,16 @@ mod tests {
             database.pool.clone(),
             AnyNumberProvider::ScriptedStub(ScriptedStubProvider::failing()),
         );
-        let err = cancel_order(State(state), CurrentUser {
+        let err = match cancel_order(State(state), CurrentUser {
             id: user_id,
             tier_at_issue: 0,
             session_family: Uuid::new_v4(),
         }, Path(order_id))
         .await
-        .unwrap_err();
+        {
+            Ok(_) => panic!("expected supplier check failure to keep the order open"),
+            Err(error) => error,
+        };
         assert!(matches!(err, ApiError::ServiceUnavailable(_)));
         let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id = $1")
             .bind(order_id)
