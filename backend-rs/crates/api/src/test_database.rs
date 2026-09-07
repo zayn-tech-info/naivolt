@@ -27,6 +27,15 @@ impl IsolatedDatabase {
             .connect(&database_url)
             .await
             .expect("PostgreSQL integration test database must be reachable");
+        // pgcrypto must live in public. IsolatedDatabase sets search_path to a
+        // throwaway schema first, so a bare CREATE EXTENSION in 0001 would
+        // install digest() into that schema. Parallel tests then skip the
+        // extension (it already exists) and fail with digest(text, unknown)
+        // does not exist.
+        admin
+            .execute("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
+            .await
+            .expect("pgcrypto must be available in public for IsolatedDatabase migrations");
         let schema = format!("{prefix}_{}", Uuid::new_v4().simple());
         admin
             .execute(format!("CREATE SCHEMA {schema}").as_str())
