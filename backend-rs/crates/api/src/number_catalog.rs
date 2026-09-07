@@ -739,6 +739,9 @@ mod tests {
             numbers_margin: dec!(1.6),
             usd_ngn_mid: dec!(1530),
             spread_ngn_per_usd: dec!(20),
+            cors_allowed_origins: vec!["http://localhost:5173".into()],
+            trusted_proxy_loopback: false,
+            rate_limits: crate::config::RateLimitQuotas::defaults(),
         };
         let state = AppState {
             db: pool.clone(),
