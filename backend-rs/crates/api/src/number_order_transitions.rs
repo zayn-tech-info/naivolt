@@ -1,5 +1,5 @@
 use crate::error::{ApiError, ApiResult};
-use crate::number_provider::Sms;
+use crate::number_provider::{ActivationCheck, ActivationLifecycle, Sms};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use naivolt_core::Asset;
 use naivolt_ledger::journal::JournalBuilder;
@@ -77,14 +77,7 @@ pub(crate) async fn deliver(
     text: String,
     messages: &[Sms],
 ) -> ApiResult<TransitionOutcome> {
-    apply_inner(
-        db,
-        order_id,
-        OrderTransition::Deliver { code, text },
-        None,
-        messages,
-    )
-    .await
+    apply_check(db, order_id, None, check_from_legacy_deliver(code, text, messages)).await
 }
 
 pub(crate) async fn deliver_claimed(
@@ -95,14 +88,370 @@ pub(crate) async fn deliver_claimed(
     text: String,
     messages: &[Sms],
 ) -> ApiResult<TransitionOutcome> {
-    apply_inner(
+    apply_check(
         db,
         order_id,
-        OrderTransition::Deliver { code, text },
         Some(claim_token),
-        messages,
+        check_from_legacy_deliver(code, text, messages),
     )
     .await
+}
+
+fn check_from_legacy_deliver(code: String, text: String, messages: &[Sms]) -> ActivationCheck {
+    let messages = if messages.is_empty() && !code.is_empty() {
+        vec![Sms {
+            sender: None,
+            text,
+            code: Some(code),
+            received_at: None,
+            provider_message_id: None,
+        }]
+    } else {
+        messages.to_vec()
+    };
+    ActivationCheck::open().with_messages(messages)
+}
+
+pub(crate) async fn apply_check(
+    db: &PgPool,
+    order_id: Uuid,
+    claim_token: Option<Uuid>,
+    check: ActivationCheck,
+) -> ApiResult<TransitionOutcome> {
+    let mut tx = db.begin().await.map_err(anyhow::Error::from)?;
+    let row: Option<(
+        Uuid,
+        Decimal,
+        String,
+        String,
+        Option<Uuid>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        bool,
+        Option<chrono::DateTime<chrono::Utc>>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT user_id, price_ngn, reference, status, reconcile_claim_token, reconcile_claimed_until,
+                provider_order_id, activation_open, expires_at, created_at
+           FROM number_orders
+          WHERE id = $1
+          FOR UPDATE",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    let (
+        user_id,
+        price_ngn,
+        reference,
+        current_status,
+        stored_token,
+        claimed_until,
+        provider_order_id,
+        _activation_open,
+        mut expires_at,
+        created_at,
+    ) = row.ok_or(ApiError::NotFound)?;
+
+    if let Some(token) = claim_token {
+        if stored_token != Some(token)
+            || claimed_until.map_or(true, |until| until <= chrono::Utc::now())
+        {
+            return Err(ApiError::Conflict(
+                "The reconciliation claim is no longer current.".into(),
+            ));
+        }
+    }
+
+    if matches!(
+        current_status.as_str(),
+        "cancelled" | "expired" | "failed"
+    ) {
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        return Ok(TransitionOutcome::AlreadyTerminal(current_status));
+    }
+
+    if let Some(newer) = check.expires_at {
+        if expires_at.map_or(true, |current| newer > current) {
+            sqlx::query("UPDATE number_orders SET expires_at = $2, updated_at = now() WHERE id = $1")
+                .bind(order_id)
+                .bind(newer)
+                .execute(&mut *tx)
+                .await
+                .map_err(anyhow::Error::from)?;
+            expires_at = Some(newer);
+        }
+    }
+
+    let expired = expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now());
+
+    if !check.messages.is_empty() {
+        let provider_order_id = provider_order_id.as_deref().ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!("delivery has no provider order"))
+        })?;
+        insert_messages(&mut tx, order_id, provider_order_id, &check.messages).await?;
+    }
+
+    let qualifying: Option<(String, String)> = sqlx::query_as(
+        "SELECT code, text FROM number_messages
+          WHERE order_id = $1 AND code IS NOT NULL AND length(btrim(code)) > 0
+          ORDER BY received_at ASC, id ASC
+          LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    let money_open = matches!(
+        current_status.as_str(),
+        "reserved" | "awaiting_code" | "review_required"
+    );
+    let stay_open = check.lifecycle == ActivationLifecycle::Open && !expired;
+
+    if money_open {
+        if let Some((code, text)) = qualifying {
+            return settle_open(
+                tx,
+                order_id,
+                user_id,
+                price_ngn,
+                reference,
+                current_status,
+                code,
+                text,
+                stay_open,
+                created_at,
+            )
+            .await;
+        }
+        if check.lifecycle == ActivationLifecycle::Closed || expired {
+            let reason = if check.lifecycle == ActivationLifecycle::Closed {
+                "supplier_finished"
+            } else {
+                "expired"
+            };
+            return refund_open(
+                tx,
+                order_id,
+                user_id,
+                price_ngn,
+                reference,
+                RefundStatus::Expired,
+                reason,
+            )
+            .await;
+        }
+        schedule_open(&mut tx, order_id, created_at, true).await?;
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        return Ok(TransitionOutcome::Applied);
+    }
+
+    if current_status == "delivered" {
+        schedule_open(&mut tx, order_id, created_at, stay_open).await?;
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        return Ok(TransitionOutcome::Applied);
+    }
+
+    tx.commit().await.map_err(anyhow::Error::from)?;
+    Ok(TransitionOutcome::AlreadyTerminal(current_status))
+}
+
+async fn insert_messages(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    provider_order_id: &str,
+    messages: &[Sms],
+) -> ApiResult<()> {
+    for message in messages {
+        sqlx::query(
+            "INSERT INTO number_messages (order_id, sender, text, code, received_at, provider_message_key)
+             VALUES (
+                $1, $2, $3, $4, COALESCE($5, now()),
+                COALESCE(
+                    CASE WHEN $7::text IS NOT NULL AND length($7) > 0 THEN 'sid:' || $7 END,
+                    encode(digest(
+                        CASE WHEN $5::timestamptz IS NULL
+                             THEN jsonb_build_array($6::text, $2::text, $3::text, $4::text)::text
+                             ELSE jsonb_build_array($6::text, $2::text, $3::text, $4::text, $5::timestamptz)::text
+                        END,
+                    'sha256'), 'hex')
+                )
+             )
+             ON CONFLICT (order_id, provider_message_key) WHERE provider_message_key IS NOT NULL DO NOTHING",
+        )
+        .bind(order_id)
+        .bind(message.sender.as_deref())
+        .bind(&message.text)
+        .bind(message.code.as_deref())
+        .bind(message.received_at)
+        .bind(provider_order_id)
+        .bind(message.provider_message_id.as_deref())
+        .execute(&mut **tx)
+        .await
+        .map_err(anyhow::Error::from)?;
+    }
+    Ok(())
+}
+
+async fn schedule_open(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    created_at: chrono::DateTime<chrono::Utc>,
+    open: bool,
+) -> ApiResult<()> {
+    let delay = if chrono::Utc::now() - created_at < chrono::Duration::minutes(5) {
+        10_i64
+    } else {
+        30
+    };
+    sqlx::query(
+        "UPDATE number_orders
+            SET activation_open = $2,
+                reconcile_next_at = CASE WHEN $2 THEN LEAST(COALESCE(expires_at, now() + interval '15 minutes'), now() + ($3 * interval '1 second')) ELSE NULL END,
+                reconcile_claim_token = NULL,
+                reconcile_claimed_until = NULL,
+                reconcile_last_checked_at = now(),
+                reconcile_attempt_count = 0,
+                updated_at = now()
+          WHERE id = $1",
+    )
+    .bind(order_id)
+    .bind(open)
+    .bind(delay)
+    .execute(&mut **tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+async fn settle_open(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    _user_id: Uuid,
+    price_ngn: Decimal,
+    reference: String,
+    current_status: String,
+    code: String,
+    text: String,
+    stay_open: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> ApiResult<TransitionOutcome> {
+    if current_status == "delivered" {
+        schedule_open(&mut tx, order_id, created_at, stay_open).await?;
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        return Ok(TransitionOutcome::Applied);
+    }
+    let pending = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
+    let revenue = platform_account(&mut tx, AccountKind::NumberRevenue).await?;
+    let journal = JournalBuilder::new(
+        JournalKind::NumberSettle,
+        reference.clone(),
+        format!("{reference}:settle"),
+    )
+    .entry(
+        pending,
+        AccountKind::NumberPayablePending,
+        Asset::Ngn,
+        price_ngn,
+    )
+    .entry(revenue, AccountKind::NumberRevenue, Asset::Ngn, -price_ngn)
+    .build()
+    .map_err(|error| ApiError::Internal(anyhow::anyhow!(error)))?;
+    let posted = journal
+        .post(&mut tx)
+        .await
+        .map_err(|error| ApiError::Internal(anyhow::anyhow!(error)))?;
+    let delay = if chrono::Utc::now() - created_at < chrono::Duration::minutes(5) {
+        10_i64
+    } else {
+        30
+    };
+    sqlx::query(
+        "UPDATE number_orders
+            SET status = 'delivered',
+                sms_code = COALESCE(sms_code, $3),
+                sms_text = COALESCE(sms_text, $4),
+                received_at = COALESCE(received_at, now()),
+                settled_journal_id = $5,
+                activation_open = $2,
+                reconcile_next_at = CASE WHEN $2 THEN now() + ($6 * interval '1 second') ELSE NULL END,
+                reconcile_claim_token = NULL,
+                reconcile_claimed_until = NULL,
+                updated_at = now()
+          WHERE id = $1 AND status IN ('reserved', 'awaiting_code', 'review_required')",
+    )
+    .bind(order_id)
+    .bind(stay_open)
+    .bind(&code)
+    .bind(&text)
+    .bind(posted.journal_id())
+    .bind(delay)
+    .execute(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    tx.commit().await.map_err(anyhow::Error::from)?;
+    tracing::info!(order = %reference, transition = "deliver", status = "delivered", outcome = "applied", "number order transition completed");
+    Ok(TransitionOutcome::Applied)
+}
+
+async fn refund_open(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    user_id: Uuid,
+    price_ngn: Decimal,
+    reference: String,
+    status: RefundStatus,
+    reason: &str,
+) -> ApiResult<TransitionOutcome> {
+    if reason.trim().is_empty() {
+        return Err(ApiError::Internal(anyhow::anyhow!("refund reason is empty")));
+    }
+    let user_account = lock_user_ngn_account(&mut tx, user_id).await?;
+    let pending = platform_account(&mut tx, AccountKind::NumberPayablePending).await?;
+    let journal = JournalBuilder::new(
+        JournalKind::NumberRefund,
+        reference.clone(),
+        format!("{reference}:refund"),
+    )
+    .entry(
+        pending,
+        AccountKind::NumberPayablePending,
+        Asset::Ngn,
+        price_ngn,
+    )
+    .entry(user_account, AccountKind::UserNgn, Asset::Ngn, -price_ngn)
+    .metadata(serde_json::json!({ "reason": reason }))
+    .build()
+    .map_err(|error| ApiError::Internal(anyhow::anyhow!(error)))?;
+    let posted = journal
+        .post(&mut tx)
+        .await
+        .map_err(|error| ApiError::Internal(anyhow::anyhow!(error)))?;
+    sqlx::query(
+        "UPDATE number_orders
+            SET status = $2,
+                failure_reason = $3,
+                refunded_journal_id = $4,
+                activation_open = false,
+                reconcile_next_at = NULL,
+                reconcile_claim_token = NULL,
+                reconcile_claimed_until = NULL,
+                updated_at = now()
+          WHERE id = $1 AND status IN ('reserved', 'awaiting_code', 'review_required')",
+    )
+    .bind(order_id)
+    .bind(status.as_str())
+    .bind(reason)
+    .bind(posted.journal_id())
+    .execute(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    tx.commit().await.map_err(anyhow::Error::from)?;
+    tracing::info!(order = %reference, transition = status.as_str(), status = status.as_str(), outcome = "applied", "number order transition completed");
+    Ok(TransitionOutcome::Applied)
 }
 
 async fn apply_inner(
@@ -162,11 +511,22 @@ async fn apply_inner(
         for message in messages {
             sqlx::query(
                 "INSERT INTO number_messages (order_id, sender, text, code, received_at, provider_message_key)
-                 VALUES ($1, $2, $3, $4, COALESCE($5, now()),
-                    encode(digest(jsonb_build_array($6::text, $2::text, $3::text, $4::text, $5::timestamptz)::text, 'sha256'), 'hex'))
+                 VALUES (
+                    $1, $2, $3, $4, COALESCE($5, now()),
+                    COALESCE(
+                        CASE WHEN $7::text IS NOT NULL AND length($7) > 0 THEN 'sid:' || $7 END,
+                        encode(digest(
+                            CASE WHEN $5::timestamptz IS NULL
+                                 THEN jsonb_build_array($6::text, $2::text, $3::text, $4::text)::text
+                                 ELSE jsonb_build_array($6::text, $2::text, $3::text, $4::text, $5::timestamptz)::text
+                            END,
+                        'sha256'), 'hex')
+                    )
+                 )
                  ON CONFLICT (order_id, provider_message_key) WHERE provider_message_key IS NOT NULL DO NOTHING")
                 .bind(order_id).bind(message.sender.as_deref()).bind(&message.text)
                 .bind(message.code.as_deref()).bind(message.received_at).bind(provider_order_id)
+                .bind(message.provider_message_id.as_deref())
                 .execute(&mut *tx).await.map_err(anyhow::Error::from)?;
         }
     }
@@ -232,6 +592,7 @@ async fn apply_inner(
                 received_at = CASE WHEN $2 = 'delivered' THEN now() ELSE received_at END,
                 settled_journal_id = CASE WHEN $2 = 'delivered' THEN $6 ELSE settled_journal_id END,
                 refunded_journal_id = CASE WHEN $2 <> 'delivered' THEN $6 ELSE refunded_journal_id END,
+                activation_open = ($2 = 'delivered'),
                 reconcile_next_at = NULL,
                 reconcile_claim_token = NULL,
                 reconcile_claimed_until = NULL,
@@ -654,9 +1015,9 @@ mod tests {
         let first_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         let second_at = chrono::Utc::now();
         let messages = vec![
-            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(first_at) },
-            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(second_at) },
-            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(second_at) },
+            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(first_at), provider_message_id: None },
+            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(second_at), provider_message_id: None },
+            Sms { sender: Some("service".into()), text: "same text".into(), code: Some("123".into()), received_at: Some(second_at), provider_message_id: None },
         ];
         deliver_claimed(&pool, order_id, token, "123".into(), "same text".into(), &messages).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM number_messages WHERE order_id=$1")
@@ -686,12 +1047,14 @@ mod tests {
                 text: "same text".into(),
                 code: Some("123".into()),
                 received_at: Some(first_at),
+                provider_message_id: None,
             },
             Sms {
                 sender: Some("service".into()),
                 text: "same text".into(),
                 code: Some("123".into()),
                 received_at: Some(second_at),
+                provider_message_id: None,
             },
         ];
         deliver(
@@ -716,6 +1079,203 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "delivered");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn text_only_sms_does_not_settle_until_a_code_arrives() {
+        let database = IsolatedDatabase::new("number_text_only_settle_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "TEXTONLY").await;
+        sqlx::query("UPDATE number_orders SET provider_order_id='provider-text' WHERE id=$1")
+            .bind(order_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![Sms {
+                sender: Some("svc".into()),
+                text: "hello".into(),
+                code: None,
+                received_at: None,
+                provider_message_id: None,
+            }]),
+        )
+        .await
+        .unwrap();
+        let (status, settled): (String, bool) = sqlx::query_as(
+            "SELECT status, settled_journal_id IS NOT NULL FROM number_orders WHERE id=$1",
+        )
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "awaiting_code");
+        assert!(!settled);
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![Sms {
+                sender: Some("svc".into()),
+                text: "code 999".into(),
+                code: Some("999".into()),
+                received_at: None,
+                provider_message_id: None,
+            }]),
+        )
+        .await
+        .unwrap();
+        let (status, code, journals): (String, Option<String>, i64) = sqlx::query_as(
+            "SELECT o.status, o.sms_code,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle')
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "delivered");
+        assert_eq!(code.as_deref(), Some("999"));
+        assert_eq!(journals, 1);
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_messages WHERE order_id=$1")
+                .bind(order_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn delivered_order_appends_later_sms_without_a_second_settle() {
+        let database = IsolatedDatabase::new("number_append_after_deliver_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "APPEND").await;
+        sqlx::query("UPDATE number_orders SET provider_order_id='provider-append' WHERE id=$1")
+            .bind(order_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![Sms {
+                sender: None,
+                text: "111".into(),
+                code: Some("111".into()),
+                received_at: None,
+                provider_message_id: Some("a".into()),
+            }]),
+        )
+        .await
+        .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![
+                Sms {
+                    sender: None,
+                    text: "111".into(),
+                    code: Some("111".into()),
+                    received_at: None,
+                    provider_message_id: Some("a".into()),
+                },
+                Sms {
+                    sender: None,
+                    text: "222".into(),
+                    code: Some("222".into()),
+                    received_at: None,
+                    provider_message_id: Some("b".into()),
+                },
+            ]),
+        )
+        .await
+        .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::closed().with_messages(vec![Sms {
+                sender: None,
+                text: "222".into(),
+                code: Some("222".into()),
+                received_at: None,
+                provider_message_id: Some("b".into()),
+            }]),
+        )
+        .await
+        .unwrap();
+        let (status, open, settles, code): (String, bool, i64, Option<String>) = sqlx::query_as(
+            "SELECT o.status, o.activation_open,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle'),
+                    o.sms_code
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "delivered");
+        assert!(!open);
+        assert_eq!(settles, 1);
+        assert_eq!(code.as_deref(), Some("111"));
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_messages WHERE order_id=$1")
+                .bind(order_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn missing_supplier_time_does_not_duplicate_equal_content() {
+        let database = IsolatedDatabase::new("number_stable_key_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "NOTIME").await;
+        sqlx::query("UPDATE number_orders SET provider_order_id='provider-notime' WHERE id=$1")
+            .bind(order_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let sms = Sms {
+            sender: Some("svc".into()),
+            text: "same".into(),
+            code: Some("1".into()),
+            received_at: None,
+            provider_message_id: None,
+        };
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![sms.clone()]),
+        )
+        .await
+        .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::closed().with_messages(vec![sms]),
+        )
+        .await
+        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_messages WHERE order_id=$1")
+                .bind(order_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
         database.cleanup().await;
     }
 }

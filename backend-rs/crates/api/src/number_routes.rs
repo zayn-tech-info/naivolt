@@ -26,7 +26,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
-use crate::number_provider::{ActivationState, PurchaseError};
+use crate::number_provider::{ActivationLifecycle, PurchaseError};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -382,6 +382,8 @@ pub struct OrderResponse {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_id: Option<Uuid>,
+    pub activation_open: bool,
+    pub cancellable: bool,
     /// Everything the number received. Empty on the list endpoint, which would
     /// otherwise fetch an inbox per row to render a summary nobody reads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -768,6 +770,7 @@ async fn create_order(
             SET status = 'awaiting_code', provider_order_id = $2, phone_number = $3,
                 provider_cost = $4, provider_cost_currency = $5,
                 expires_at = COALESCE($6, now() + interval '15 minutes'),
+                activation_open = true,
                 reconcile_next_at = now() + interval '10 seconds',
                 reconcile_claim_token = NULL, reconcile_claimed_until = NULL,
                 updated_at = now()
@@ -838,66 +841,105 @@ async fn cancel_order(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<OrderResponse>> {
-    let row: Option<(String, Option<String>, Decimal, String, String)> = sqlx::query_as(
-        "SELECT status, provider_order_id, price_ngn, reference, provider
-           FROM number_orders WHERE id = $1 AND user_id = $2",
+    let row: Option<(String, Option<String>, Option<String>, i64, String)> = sqlx::query_as(
+        "SELECT o.status, o.provider_order_id, o.sms_code,
+                (SELECT count(*) FROM number_messages m WHERE m.order_id = o.id),
+                o.provider
+           FROM number_orders o WHERE o.id = $1 AND o.user_id = $2",
     )
     .bind(id)
     .bind(user.id)
     .fetch_optional(&state.db)
     .await?;
 
-    let (status, provider_order_id, _price_ngn, _reference, provider) = row.ok_or(ApiError::NotFound)?;
+    let (status, provider_order_id, sms_code, message_count, provider) =
+        row.ok_or(ApiError::NotFound)?;
+    let locally_cancellable = matches!(status.as_str(), "reserved" | "awaiting_code")
+        && sms_code.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && message_count == 0;
 
-    if !matches!(status.as_str(), "reserved" | "awaiting_code") {
-        return load_order(&state, user.id, id).await.map(Json);
+    if !locally_cancellable {
+        if matches!(status.as_str(), "reserved" | "awaiting_code") {
+            if let Some(provider_order_id) = provider_order_id.as_deref() {
+                if let Ok(check) = state.numbers.check_for(&provider, provider_order_id).await {
+                    let _ = number_order_transitions::apply_check(&state.db, id, None, check).await;
+                }
+            }
+        }
+        return Err(ApiError::Conflict(
+            "That number already received a message, so it can't be cancelled.".into(),
+        ));
     }
 
-    // Ask the supplier whether a code already exists before refunding. A cancel
-    // that wins after SMS arrived at 5SIM would refund the customer while we
-    // still paid for the number. Terminal transitions stay serialized; this
-    // chooses the right terminal.
-    if let Some(provider_order_id) = provider_order_id.as_deref() {
-        match state.numbers.check_for(&provider, provider_order_id).await {
-            Ok(ActivationState::Received {
-                code,
-                text,
-                messages,
-            }) => {
-                number_order_transitions::deliver(&state.db, id, code, text, &messages).await?;
-                return load_order(&state, user.id, id).await.map(Json);
-            }
-            Ok(ActivationState::Finished) => {}
-            Ok(ActivationState::Pending) => {
-                if state.numbers.is_live() {
-                    if let Err(error) = state.numbers.cancel_for(&provider, provider_order_id).await {
-                        tracing::warn!(order = %id, error = %error, "supplier refused cancel");
-                        let current = load_order(&state, user.id, id).await?;
-                        if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
-                            return Ok(Json(current));
-                        }
-                        return Err(ApiError::ServiceUnavailable(
-                            "That number can't be released just yet — try again in a moment."
-                                .into(),
-                        ));
-                    }
+    let Some(claim) = crate::number_reconciler::try_claim_order(&state.db, id).await? else {
+        return Err(ApiError::Conflict(
+            "That number is already being updated. Try again in a moment.".into(),
+        ));
+    };
+
+    let Some(provider_order_id) = provider_order_id else {
+        number_order_transitions::apply_claimed(
+            &state.db,
+            id,
+            claim,
+            OrderTransition::Refund {
+                status: RefundStatus::Cancelled,
+                reason: "cancelled".into(),
+            },
+        )
+        .await?;
+        return load_order(&state, user.id, id).await.map(Json);
+    };
+
+    match state.numbers.check_for(&provider, &provider_order_id).await {
+        Ok(check) if !check.messages.is_empty() => {
+            number_order_transitions::apply_check(&state.db, id, Some(claim), check).await?;
+            return Err(ApiError::Conflict(
+                "That number already received a message, so it can't be cancelled.".into(),
+            ));
+        }
+        Ok(check) if check.lifecycle == ActivationLifecycle::Closed => {
+            number_order_transitions::apply_check(&state.db, id, Some(claim), check).await?;
+            return load_order(&state, user.id, id).await.map(Json);
+        }
+        Ok(_) => {
+            if state.numbers.is_live() {
+                if let Err(error) = state.numbers.cancel_for(&provider, &provider_order_id).await
+                {
+                    tracing::warn!(order = %id, error = %error, "supplier refused cancel");
+                    sqlx::query(
+                        "UPDATE number_orders SET reconcile_claim_token=NULL, reconcile_claimed_until=NULL, updated_at=now()
+                          WHERE id=$1 AND reconcile_claim_token=$2",
+                    )
+                    .bind(id)
+                    .bind(claim)
+                    .execute(&state.db)
+                    .await?;
+                    return Err(ApiError::ServiceUnavailable(
+                        "That number can't be released just yet — try again in a moment.".into(),
+                    ));
                 }
             }
-            Err(_) => {
-                let current = load_order(&state, user.id, id).await?;
-                if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
-                    return Ok(Json(current));
-                }
-                return Err(ApiError::ServiceUnavailable(
-                    "We couldn't check that number just now.".into(),
-                ));
-            }
+        }
+        Err(_) => {
+            sqlx::query(
+                "UPDATE number_orders SET reconcile_claim_token=NULL, reconcile_claimed_until=NULL, updated_at=now()
+                  WHERE id=$1 AND reconcile_claim_token=$2",
+            )
+            .bind(id)
+            .bind(claim)
+            .execute(&state.db)
+            .await?;
+            return Err(ApiError::ServiceUnavailable(
+                "We couldn't check that number just now.".into(),
+            ));
         }
     }
 
-    number_order_transitions::apply(
+    number_order_transitions::apply_claimed(
         &state.db,
         id,
+        claim,
         OrderTransition::Refund {
             status: RefundStatus::Cancelled,
             reason: "cancelled".into(),
@@ -910,7 +952,8 @@ async fn cancel_order(
 /// The columns every order response is built from, and the joins they need.
 /// Shared so the list and the single read cannot drift apart.
 const ORDER_COLUMNS: &str = "o.id, o.reference, p.name, c.name, c.code, o.price_ngn, \
-                             o.status, o.phone_number, o.sms_code, o.expires_at, o.created_at, o.offer_id";
+                             o.status, o.phone_number, o.sms_code, o.expires_at, o.created_at, o.offer_id, \
+                             o.activation_open, EXISTS(SELECT 1 FROM number_messages m WHERE m.order_id = o.id)";
 
 const ORDER_FROM: &str = "FROM number_orders o \
                           JOIN number_products  p ON p.id = o.product_id \
@@ -929,6 +972,8 @@ type OrderRow = (
     Option<DateTime<Utc>>,
     DateTime<Utc>,
     Option<Uuid>,
+    bool,
+    bool,
 );
 
 fn into_response(row: OrderRow) -> OrderResponse {
@@ -945,7 +990,13 @@ fn into_response(row: OrderRow) -> OrderResponse {
         expires_at,
         created_at,
         offer_id,
+        activation_open,
+        has_messages,
     ) = row;
+
+    let cancellable = matches!(status.as_str(), "reserved" | "awaiting_code")
+        && code.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && !has_messages;
 
     OrderResponse {
         id,
@@ -960,6 +1011,8 @@ fn into_response(row: OrderRow) -> OrderResponse {
         expires_at: expires_at.map(|t| t.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
         offer_id,
+        activation_open,
+        cancellable,
         messages: Vec::new(),
     }
 }
@@ -978,7 +1031,7 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
     let messages: Vec<(Option<String>, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT sender, text, code, received_at
            FROM number_messages WHERE order_id = $1
-          ORDER BY received_at",
+          ORDER BY received_at, id",
     )
     .bind(id)
     .fetch_all(&state.db)
@@ -993,6 +1046,9 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
             received_at: received_at.to_rfc3339(),
         })
         .collect();
+    response.cancellable = matches!(response.status.as_str(), "reserved" | "awaiting_code")
+        && response.code.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && response.messages.is_empty();
 
     Ok(response)
 }
@@ -1403,25 +1459,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_delivers_when_the_supplier_already_has_sms() {
+    async fn cancel_conflicts_when_the_supplier_already_has_sms() {
         let database = IsolatedDatabase::new("number_cancel_received_test").await;
         let (user_id, order_id) = awaiting_code_order(&database.pool, "RECV").await;
         let state = test_state(
             database.pool.clone(),
             AnyNumberProvider::ScriptedStub(ScriptedStubProvider::received()),
         );
-        let response = cancel_order(State(state), CurrentUser {
+        let err = match cancel_order(State(state), CurrentUser {
             id: user_id,
             tier_at_issue: 0,
             session_family: Uuid::new_v4(),
         }, Path(order_id))
         .await
-        .unwrap()
-        .0;
-        assert_eq!(response.status, "delivered");
-        assert_eq!(response.code.as_deref(), Some("123456"));
-        let journals: (i64, i64) = sqlx::query_as(
-            "SELECT
+        {
+            Ok(_) => panic!("expected cancel to be blocked after SMS"),
+            Err(error) => error,
+        };
+        assert!(matches!(err, ApiError::Conflict(_)));
+        let journals: (String, i64, i64) = sqlx::query_as(
+            "SELECT status,
                 (CASE WHEN settled_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT,
                 (CASE WHEN refunded_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT
                FROM number_orders WHERE id = $1",
@@ -1430,7 +1487,7 @@ mod tests {
         .fetch_one(&database.pool)
         .await
         .unwrap();
-        assert_eq!(journals, (1, 0));
+        assert_eq!(journals, ("delivered".into(), 1, 0));
         database.cleanup().await;
     }
 
@@ -1484,6 +1541,46 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+        let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "awaiting_code");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_conflicts_when_reconcile_claim_is_held() {
+        let database = IsolatedDatabase::new("number_cancel_claim_held_test").await;
+        let (user_id, order_id) = awaiting_code_order(&database.pool, "HELD").await;
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1",
+        )
+        .bind(order_id)
+        .bind(Uuid::new_v4())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::pending()),
+        );
+        let err = match cancel_order(
+            State(state),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            Path(order_id),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected cancel to wait on the live claim"),
+            Err(error) => error,
+        };
+        assert!(matches!(err, ApiError::Conflict(_)));
         let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id = $1")
             .bind(order_id)
             .fetch_one(&database.pool)
