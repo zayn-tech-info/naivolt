@@ -10,6 +10,7 @@ mod activity_routes;
 mod admin_routes;
 mod auth_routes;
 mod bank_routes;
+mod boundary;
 mod config;
 mod error;
 mod funding_provider;
@@ -38,16 +39,15 @@ mod test_database;
 mod user_routes;
 
 use anyhow::{Context, Result};
-use axum::http::{HeaderName, Method};
 use axum::routing::get;
 use axum::Router;
 use config::{Config, Environment};
 use naivolt_auth::session::SessionKeys;
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -202,33 +202,40 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let number_workers = number_reconciler::spawn(state.clone(), shutdown_rx);
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .nest(
-            "/api/v1",
-            auth_routes::routes()
-                .merge(user_routes::routes())
-                .merge(rate_routes::routes())
-                .merge(bank_routes::routes())
-                .merge(payout_routes::routes())
-                .merge(activity_routes::routes())
-                .merge(giftcard_routes::routes())
-                .merge(giftcard_routes::push_routes())
-                .merge(number_routes::routes())
-                .merge(funding_routes::routes())
-                .merge(kyc_routes::routes())
-                .merge(admin_routes::routes()),
-        )
-        .layer(TraceLayer::new_for_http())
-        // A slow client must not hold a database connection open indefinitely.
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(30),
-        ))
-        // Nothing this API accepts is large; the cap stops a trivial memory DoS.
-        .layer(RequestBodyLimitLayer::new(64 * 1024))
-        .layer(cors(config.environment))
-        .with_state(state);
+    let boundary = boundary::BoundaryState::new(
+        config.cors_allowed_origins.clone(),
+        config.trusted_proxy_loopback,
+        config.rate_limits,
+        state.keys.clone(),
+    );
+
+    let app = boundary::apply(
+        Router::new()
+            .route("/health", get(health))
+            .nest(
+                "/api/v1",
+                auth_routes::routes()
+                    .merge(user_routes::routes())
+                    .merge(rate_routes::routes())
+                    .merge(bank_routes::routes())
+                    .merge(payout_routes::routes())
+                    .merge(activity_routes::routes())
+                    .merge(giftcard_routes::routes())
+                    .merge(giftcard_routes::push_routes())
+                    .merge(number_routes::routes())
+                    .merge(funding_routes::routes())
+                    .merge(kyc_routes::routes())
+                    .merge(admin_routes::routes()),
+            )
+            .layer(TraceLayer::new_for_http())
+            .layer(TimeoutLayer::with_status_code(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                Duration::from_secs(30),
+            ))
+            .layer(RequestBodyLimitLayer::new(64 * 1024)),
+        boundary,
+    )
+    .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
@@ -240,7 +247,10 @@ async fn main() -> Result<()> {
         "naivolt api listening"
     );
 
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             let _ = shutdown_tx.send(true);
@@ -255,31 +265,6 @@ async fn main() -> Result<()> {
 
 async fn health() -> &'static str {
     "ok"
-}
-
-fn cors(environment: Environment) -> CorsLayer {
-    let layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        .allow_headers([
-            HeaderName::from_static("authorization"),
-            HeaderName::from_static("content-type"),
-            // Every money-moving endpoint requires this header, and it is not a
-            // CORS-simple one — omitting it here fails the preflight, so a
-            // browser cannot buy or fund at all while curl works fine.
-            HeaderName::from_static("idempotency-key"),
-            // Same trap, second time: the admin page sends this and the
-            // preflight rejects it, which presents as "wrong token" rather than
-            // as a CORS failure.
-            HeaderName::from_static("x-admin-token"),
-        ]);
-
-    if environment.is_production() {
-        // The mobile app sends no Origin, so a permissive policy buys nothing in
-        // production and would let any website call the API with a stolen token.
-        layer.allow_origin(Any)
-    } else {
-        layer.allow_origin(Any)
-    }
 }
 
 fn init_tracing(environment: Environment) {

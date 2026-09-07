@@ -12,7 +12,7 @@
 //! * an error the client must branch on needs its own code. A bare 400 with
 //!   prose cannot be branched on, and each code below drives different UI.
 
-use axum::http::StatusCode;
+use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
@@ -68,6 +68,8 @@ pub enum ApiError {
     Conflict(String),
     #[error("not found")]
     NotFound,
+    #[error("too many requests, try again shortly")]
+    RateLimited { retry_after: i64 },
     /// Anything unexpected. The inner detail is logged, never sent.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -94,6 +96,7 @@ impl ApiError {
             ApiError::BadRequest(_) => "BAD_REQUEST",
             ApiError::Conflict(_) => "CONFLICT",
             ApiError::NotFound => "NOT_FOUND",
+            ApiError::RateLimited { .. } => "RATE_LIMITED",
             ApiError::Internal(_) => "INTERNAL",
         }
     }
@@ -104,7 +107,9 @@ impl ApiError {
                 StatusCode::UNAUTHORIZED
             }
             ApiError::OtpExpired => StatusCode::GONE,
-            ApiError::OtpThrottled { .. } => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::OtpThrottled { .. } | ApiError::RateLimited { .. } => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             ApiError::PinLocked { .. } => StatusCode::LOCKED,
             ApiError::InsufficientBalance
             | ApiError::LimitExceeded { .. }
@@ -133,7 +138,9 @@ impl ApiError {
             | ApiError::PinInvalid {
                 attempts_remaining,
             } => Some(json!({ "attemptsRemaining": attempts_remaining })),
-            ApiError::OtpThrottled { retry_after } | ApiError::PinLocked { retry_after } => {
+            ApiError::OtpThrottled { retry_after }
+            | ApiError::PinLocked { retry_after }
+            | ApiError::RateLimited { retry_after } => {
                 Some(json!({ "retryAfter": retry_after }))
             }
             ApiError::LimitExceeded { limit } => Some(json!({ "limit": limit })),
@@ -166,13 +173,23 @@ impl IntoResponse for ApiError {
             other => other.to_string(),
         };
 
+        let retry_after = match &self {
+            ApiError::RateLimited { retry_after } => Some(*retry_after),
+            _ => None,
+        };
         let body = ErrorBody {
             code: self.code(),
             message,
             meta: self.meta(),
         };
 
-        (self.status(), Json(body)).into_response()
+        let mut response = (self.status(), Json(body)).into_response();
+        if let Some(seconds) = retry_after {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -262,6 +279,20 @@ mod tests {
         let (status, body) = body_of(ApiError::OtpThrottled { retry_after: 42 }).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["meta"]["retryAfter"], 42);
+    }
+
+    #[tokio::test]
+    async fn http_rate_limits_use_a_distinct_code_and_retry_after() {
+        let response = ApiError::RateLimited { retry_after: 7 }.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "7");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "RATE_LIMITED");
+        assert_eq!(body["message"], "too many requests, try again shortly");
+        assert_eq!(body["meta"]["retryAfter"], 7);
     }
 
     #[tokio::test]

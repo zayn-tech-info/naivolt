@@ -88,6 +88,63 @@ pub struct Config {
     /// Our margin, in naira per dollar of value transacted. ~0.65% at a 1530
     /// mid; 20 gives the 1.3% target in ARCHITECTURE.md §9.
     pub spread_ngn_per_usd: Decimal,
+    /// Exact browser origins allowed to call this API. Never `*` in production.
+    pub cors_allowed_origins: Vec<String>,
+    /// When true, honor `X-Real-IP` only if the TCP peer is loopback.
+    pub trusted_proxy_loopback: bool,
+    pub rate_limits: RateLimitQuotas,
+}
+
+/// Per minute token bucket sizes for the HTTP limiter.
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitQuotas {
+    pub global_ip: u32,
+    pub auth_ip: u32,
+    pub public_read_ip: u32,
+    pub funding_ip: u32,
+    pub funding_user: u32,
+    pub purchase_ip: u32,
+    pub purchase_user: u32,
+    pub poll_ip: u32,
+    pub poll_user: u32,
+    pub cancel_ip: u32,
+    pub cancel_user: u32,
+}
+
+pub const PRODUCTION_WEB_ORIGIN: &str = "https://www.naivolt.com";
+
+impl RateLimitQuotas {
+    pub fn defaults() -> Self {
+        Self {
+            global_ip: 120,
+            auth_ip: 10,
+            public_read_ip: 60,
+            funding_ip: 20,
+            funding_user: 10,
+            purchase_ip: 20,
+            purchase_user: 15,
+            poll_ip: 60,
+            poll_user: 30,
+            cancel_ip: 20,
+            cancel_user: 10,
+        }
+    }
+
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            global_ip: u32_env("RATE_LIMIT_GLOBAL_IP", 120)?,
+            auth_ip: u32_env("RATE_LIMIT_AUTH_IP", 10)?,
+            public_read_ip: u32_env("RATE_LIMIT_PUBLIC_READ_IP", 60)?,
+            funding_ip: u32_env("RATE_LIMIT_FUNDING_IP", 20)?,
+            funding_user: u32_env("RATE_LIMIT_FUNDING_USER", 10)?,
+            purchase_ip: u32_env("RATE_LIMIT_PURCHASE_IP", 20)?,
+            purchase_user: u32_env("RATE_LIMIT_PURCHASE_USER", 15)?,
+            poll_ip: u32_env("RATE_LIMIT_POLL_IP", 60)?,
+            poll_user: u32_env("RATE_LIMIT_POLL_USER", 30)?,
+            cancel_ip: u32_env("RATE_LIMIT_CANCEL_IP", 20)?,
+            cancel_user: u32_env("RATE_LIMIT_CANCEL_USER", 10)?,
+        })
+    }
 }
 
 impl Config {
@@ -139,7 +196,7 @@ impl Config {
         let signer_url = env::var("SIGNER_URL").ok().filter(|s| !s.is_empty());
         let dev_mnemonic = env::var("DEV_MNEMONIC").ok().filter(|s| !s.is_empty());
 
-        let config = Self {
+        let mut config = Self {
             environment,
             bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:5000".into()),
             database_url: require("DATABASE_URL")?,
@@ -182,7 +239,19 @@ impl Config {
             numbers_margin: decimal_env("NUMBERS_MARGIN", Decimal::new(16, 1))?,
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
+            cors_allowed_origins: Vec::new(),
+            trusted_proxy_loopback: false,
+            rate_limits: RateLimitQuotas::defaults(),
         };
+
+        let cors_override = env::var("CORS_ALLOWED_ORIGINS").ok();
+        config.cors_allowed_origins = resolve_cors_origins(
+            config.environment,
+            &config.web_app_url,
+            cors_override.as_deref(),
+        )?;
+        config.trusted_proxy_loopback = trusted_proxy_loopback(config.environment)?;
+        config.rate_limits = RateLimitQuotas::from_env()?;
 
         // A margin at or below 1 sells every number for less than it costs.
         if config.numbers_margin <= Decimal::ONE {
@@ -282,6 +351,111 @@ impl Config {
     }
 }
 
+pub(crate) fn resolve_cors_origins(
+    environment: Environment,
+    web_app_url: &str,
+    cors_allowed_origins: Option<&str>,
+) -> Result<Vec<String>> {
+    let parsed = match cors_allowed_origins.map(str::trim) {
+        Some("") => bail!("CORS_ALLOWED_ORIGINS is empty"),
+        Some(raw) => parse_origin_list(raw)?,
+        None => match environment {
+            Environment::Production => vec![PRODUCTION_WEB_ORIGIN.to_owned()],
+            Environment::Staging => vec![web_app_url.trim_end_matches('/').to_owned()],
+            Environment::Development => vec![
+                "http://localhost:5173".to_owned(),
+                "http://127.0.0.1:5173".to_owned(),
+            ],
+        },
+    };
+
+    if matches!(
+        environment,
+        Environment::Production | Environment::Staging
+    ) {
+        reject_public_origins(&parsed)?;
+        if matches!(environment, Environment::Production)
+            && !parsed.iter().any(|origin| origin == PRODUCTION_WEB_ORIGIN)
+        {
+            bail!("production CORS_ALLOWED_ORIGINS must include {PRODUCTION_WEB_ORIGIN}");
+        }
+    }
+
+    if parsed.is_empty() {
+        bail!("CORS allow list is empty");
+    }
+    Ok(parsed)
+}
+
+fn parse_origin_list(raw: &str) -> Result<Vec<String>> {
+    let mut origins = Vec::new();
+    for part in raw.split(',') {
+        let origin = part.trim().trim_end_matches('/').to_owned();
+        if origin.is_empty() {
+            continue;
+        }
+        origins.push(origin);
+    }
+    if origins.is_empty() {
+        bail!("CORS_ALLOWED_ORIGINS is empty");
+    }
+    Ok(origins)
+}
+
+fn reject_public_origins(origins: &[String]) -> Result<()> {
+    if origins.is_empty() {
+        bail!("CORS allow list is empty");
+    }
+    for origin in origins {
+        let lower = origin.to_ascii_lowercase();
+        if origin == "*" || lower.contains('*') {
+            bail!("CORS origin {origin} is a wildcard; production and staging require exact origins");
+        }
+        if lower.contains("localhost") || lower.contains("127.0.0.1") || lower.contains("127.") {
+            bail!("CORS origin {origin} is local; production and staging cannot allow it");
+        }
+        if lower.contains("vercel.app") {
+            bail!("CORS origin {origin} is a Vercel preview host, which is not allowed");
+        }
+        if !lower.starts_with("https://") && !lower.starts_with("http://") {
+            bail!("CORS origin {origin} must include a scheme");
+        }
+        if origin[origin.find("://").map(|i| i + 3).unwrap_or(0)..].contains('/') {
+            bail!("CORS origin {origin} must not include a path");
+        }
+    }
+    Ok(())
+}
+
+fn trusted_proxy_loopback(environment: Environment) -> Result<bool> {
+    match env::var("TRUSTED_PROXY_LOOPBACK") {
+        Ok(raw) => {
+            let raw = raw.trim();
+            if raw == "true" || raw == "1" {
+                Ok(true)
+            } else if raw == "false" || raw == "0" {
+                Ok(false)
+            } else {
+                bail!("TRUSTED_PROXY_LOOPBACK must be true or false, got {raw:?}");
+            }
+        }
+        Err(_) => Ok(!matches!(environment, Environment::Development)),
+    }
+}
+
+fn u32_env(key: &str, fallback: u32) -> Result<u32> {
+    match env::var(key) {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let value: u32 = raw.trim().parse().with_context(|| format!("{key} is not a number"))?;
+            if value == 0 {
+                bail!("{key} must be at least 1");
+            }
+            Ok(value)
+        }
+        _ => Ok(fallback),
+    }
+}
+
 /// Reads a decimal from the environment, falling back to a default.
 ///
 /// A malformed value is fatal rather than silently defaulted: the difference
@@ -341,6 +515,9 @@ mod tests {
             numbers_margin: Decimal::new(16, 1),
             usd_ngn_mid: Decimal::from(1530),
             spread_ngn_per_usd: Decimal::from(10),
+            cors_allowed_origins: vec![PRODUCTION_WEB_ORIGIN.to_owned()],
+            trusted_proxy_loopback: true,
+            rate_limits: RateLimitQuotas::defaults(),
         }
     }
 
@@ -414,5 +591,56 @@ mod tests {
         let mut config = production_config();
         config.paystack_secret_key = None;
         assert!(config.validate_for_environment().is_err());
+    }
+
+    #[test]
+    fn production_cors_defaults_to_the_public_website() {
+        let origins = resolve_cors_origins(Environment::Production, "https://pay.example", None)
+            .expect("production default origin");
+        assert_eq!(origins, vec![PRODUCTION_WEB_ORIGIN]);
+    }
+
+    #[test]
+    fn production_and_staging_refuse_star_localhost_and_vercel() {
+        for env in [Environment::Production, Environment::Staging] {
+            assert!(resolve_cors_origins(env, "https://www.naivolt.com", Some("*")).is_err());
+            assert!(resolve_cors_origins(
+                env,
+                "https://www.naivolt.com",
+                Some("http://localhost:5173")
+            )
+            .is_err());
+            assert!(resolve_cors_origins(
+                env,
+                "https://www.naivolt.com",
+                Some("https://naivolt-website-murex.vercel.app")
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn production_cors_list_must_include_the_public_website() {
+        let err = resolve_cors_origins(
+            Environment::Production,
+            "https://www.naivolt.com",
+            Some("https://admin.naivolt.com"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("www.naivolt.com"), "{err}");
+    }
+
+    #[test]
+    fn development_allows_the_vite_origins() {
+        let origins = resolve_cors_origins(Environment::Development, "http://localhost:5173", None)
+            .expect("dev origins");
+        assert_eq!(
+            origins,
+            vec![
+                "http://localhost:5173".to_owned(),
+                "http://127.0.0.1:5173".to_owned()
+            ]
+        );
     }
 }
