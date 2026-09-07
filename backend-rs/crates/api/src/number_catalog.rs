@@ -297,6 +297,9 @@ async fn sync_offers(
             true,
         )
         .await?;
+    } else {
+        // Live keys are on: stub fixtures must not stay on the public list.
+        number_offers::apply_provider_skus(&state.db, pricing, "stub", &[], true).await?;
     }
     if !fivesim_skus.is_empty() {
         number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &fivesim_skus, false)

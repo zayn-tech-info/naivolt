@@ -158,23 +158,34 @@ pub async fn apply_provider_skus(
         written += 1;
     }
 
-    if zero_missing && !seen_product.is_empty() {
-        sqlx::query(
-            "UPDATE number_offer_sources s SET stock = 0, synced_at = now()
-              WHERE s.provider = $1
-                AND NOT EXISTS (
-                    SELECT 1 FROM UNNEST($2::text[], $3::text[], $4::text[]) AS t(p, c, o)
-                     WHERE t.p = s.provider_product
-                       AND t.c = s.provider_country
-                       AND t.o = s.provider_operator
-                )",
-        )
-        .bind(provider)
-        .bind(&seen_product)
-        .bind(&seen_country)
-        .bind(&seen_operator)
-        .execute(db)
-        .await?;
+    if zero_missing {
+        if seen_product.is_empty() {
+            sqlx::query(
+                "UPDATE number_offer_sources
+                    SET stock = 0, synced_at = now()
+                  WHERE provider = $1",
+            )
+            .bind(provider)
+            .execute(db)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE number_offer_sources s SET stock = 0, synced_at = now()
+                  WHERE s.provider = $1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM UNNEST($2::text[], $3::text[], $4::text[]) AS t(p, c, o)
+                         WHERE t.p = s.provider_product
+                           AND t.c = s.provider_country
+                           AND t.o = s.provider_operator
+                    )",
+            )
+            .bind(provider)
+            .bind(&seen_product)
+            .bind(&seen_country)
+            .bind(&seen_operator)
+            .execute(db)
+            .await?;
+        }
     }
 
     sqlx::query(
