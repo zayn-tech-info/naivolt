@@ -3,7 +3,7 @@
 use crate::funding_provider::AnyFundingProvider;
 use crate::google_keys::GoogleKeys;
 use crate::notify::AnyNotifier;
-use crate::number_provider::AnyNumberProvider;
+use crate::number_provider::NumberProviders;
 use crate::payout_provider::AnyPayoutProvider;
 use crate::pricing::Rates;
 use crate::signer::AnyAddressProvider;
@@ -19,7 +19,7 @@ pub struct AppState {
     pub addresses: Arc<AnyAddressProvider>,
     pub rates: Rates,
     pub payouts: Arc<AnyPayoutProvider>,
-    pub numbers: Arc<AnyNumberProvider>,
+    pub numbers: Arc<NumberProviders>,
     pub funding: Arc<AnyFundingProvider>,
     /// Google's signing keys, fetched once and refreshed on rotation.
     pub google_keys: Arc<GoogleKeys>,

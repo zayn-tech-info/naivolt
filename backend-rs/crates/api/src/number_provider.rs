@@ -29,6 +29,16 @@ pub enum PurchaseError {
     Ambiguous,
 }
 
+impl PurchaseError {
+    pub fn is_out_of_stock(&self) -> bool {
+        matches!(
+            self,
+            PurchaseError::Rejected(ApiError::ServiceUnavailable(message))
+                if message.contains("out of stock")
+        )
+    }
+}
+
 /// A number the supplier has assigned to one of our orders.
 /// One message a number received.
 #[derive(Debug, Clone)]
@@ -83,7 +93,7 @@ pub enum AnyNumberProvider {
 impl AnyNumberProvider {
     pub async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         match self {
-            AnyNumberProvider::FiveSim(p) => p.buy(country, product).await,
+            AnyNumberProvider::FiveSim(p) => p.buy(country, product, ANY_OPERATOR).await,
             AnyNumberProvider::Stub(p) => p.buy(country, product).await,
             #[cfg(test)]
             AnyNumberProvider::CountingStub(p) => p.buy(country, product).await,
@@ -118,6 +128,88 @@ impl AnyNumberProvider {
 
     pub fn is_live(&self) -> bool {
         matches!(self, AnyNumberProvider::FiveSim(_))
+    }
+
+    pub async fn buy_with(
+        &self,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
+        match self {
+            AnyNumberProvider::FiveSim(p) => p.buy(country, product, operator).await,
+            AnyNumberProvider::Stub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(p) => p.buy(country, product).await,
+        }
+    }
+}
+
+/// Primary supplier plus optional SMSPool. Old buy uses `primary`.
+pub struct NumberProviders {
+    pub primary: AnyNumberProvider,
+    pub smspool: Option<crate::number_smspool::SmsPoolProvider>,
+}
+
+impl From<AnyNumberProvider> for NumberProviders {
+    fn from(primary: AnyNumberProvider) -> Self {
+        Self {
+            primary,
+            smspool: None,
+        }
+    }
+}
+
+impl std::ops::Deref for NumberProviders {
+    type Target = AnyNumberProvider;
+    fn deref(&self) -> &Self::Target {
+        &self.primary
+    }
+}
+
+impl NumberProviders {
+    pub async fn buy_source(
+        &self,
+        provider: &str,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
+        match provider {
+            "smspool" => match &self.smspool {
+                Some(pool) => pool.buy(country, product).await,
+                None => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+                    "That number is out of stock right now. Try another country.".into(),
+                ))),
+            },
+            "fivesim" => self.primary.buy_with(country, product, operator).await,
+            "stub" => self.primary.buy(country, product).await,
+            _ => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+                "We couldn't get a number just now. Nothing was charged.".into(),
+            ))),
+        }
+    }
+
+    pub async fn check_for(&self, provider: &str, order_id: &str) -> ApiResult<ActivationState> {
+        match provider {
+            "smspool" => match &self.smspool {
+                Some(pool) => pool.check(order_id).await,
+                None => self.primary.check(order_id).await,
+            },
+            _ => self.primary.check(order_id).await,
+        }
+    }
+
+    pub async fn cancel_for(&self, provider: &str, order_id: &str) -> ApiResult<()> {
+        match provider {
+            "smspool" => match &self.smspool {
+                Some(pool) => pool.cancel(order_id).await,
+                None => self.primary.cancel(order_id).await,
+            },
+            _ => self.primary.cancel(order_id).await,
+        }
     }
 }
 
@@ -173,8 +265,18 @@ impl FiveSimProvider {
         }
     }
 
-    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
-        let url = format!("{FIVESIM_BASE}/buy/activation/{country}/{ANY_OPERATOR}/{product}");
+    async fn buy(
+        &self,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
+        let operator = if operator.trim().is_empty() {
+            ANY_OPERATOR
+        } else {
+            operator
+        };
+        let url = format!("{FIVESIM_BASE}/buy/activation/{country}/{operator}/{product}");
 
         let response = self
             .http

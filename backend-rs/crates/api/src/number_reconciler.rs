@@ -15,6 +15,7 @@ type ClaimedOrder = (
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
     DateTime<Utc>,
+    String,
 );
 
 pub(crate) struct Workers(Vec<tokio::task::JoinHandle<()>>);
@@ -65,7 +66,7 @@ async fn sweep(state: &AppState) -> ApiResult<()> {
                 reconcile_claimed_until = now() + interval '60 seconds', updated_at = now()
            FROM due WHERE o.id = due.id
          RETURNING o.id, o.reconcile_claim_token, o.status, o.provider_order_id,
-                   o.provider_purchase_started_at, o.expires_at, o.created_at",
+                   o.provider_purchase_started_at, o.expires_at, o.created_at, o.provider",
     )
     .fetch_all(&state.db)
     .await
@@ -85,7 +86,7 @@ async fn sweep(state: &AppState) -> ApiResult<()> {
 }
 
 async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
-    let (id, token, status, provider_id, started_at, expires_at, created_at) = row;
+    let (id, token, status, provider_id, started_at, expires_at, created_at, provider) = row;
     if status == "reserved" {
         if started_at.is_none() {
             number_order_transitions::apply_claimed(
@@ -111,7 +112,7 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
         release_order(&state.db, id, token, 1, None).await?;
         return Ok(());
     };
-    let checked = state.numbers.check(&provider_id).await;
+    let checked = state.numbers.check_for(&provider, &provider_id).await;
     release_slot(&state.db, slot, token).await?;
     match checked {
         Ok(ActivationState::Received {
@@ -123,7 +124,7 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
                 .await?;
         }
         Ok(ActivationState::Finished) => {
-            let _ = state.numbers.cancel(&provider_id).await;
+            let _ = state.numbers.cancel_for(&provider, &provider_id).await;
             number_order_transitions::apply_claimed(
                 &state.db,
                 id,
@@ -136,7 +137,7 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
             .await?;
         }
         Ok(ActivationState::Pending) if expired => {
-            let _ = state.numbers.cancel(&provider_id).await;
+            let _ = state.numbers.cancel_for(&provider, &provider_id).await;
             number_order_transitions::apply_claimed(
                 &state.db,
                 id,
@@ -309,6 +310,9 @@ mod tests {
             google_client_id: None,
             fivesim_api_key: None,
             fivesim_currency: Some("USD".into()),
+            smspool_api_key: None,
+            smspool_currency: Some("USD".into()),
+            smspool_base_url: "https://api.smspool.net".into(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "http://localhost".into(),
@@ -334,7 +338,7 @@ mod tests {
             payouts: Arc::new(payout_provider::AnyPayoutProvider::Stub(
                 payout_provider::StubProvider,
             )),
-            numbers: Arc::new(numbers),
+            numbers: Arc::new(numbers.into()),
             funding: Arc::new(AnyFundingProvider::Stub(StubFunding)),
             google_keys: Arc::new(GoogleKeys::new()),
             google_client_id: None,
@@ -476,6 +480,7 @@ mod tests {
                 None,
                 Some(Utc::now() - chrono::Duration::minutes(1)),
                 created_at,
+                "stub".into(),
             ),
         )
         .await
@@ -517,6 +522,7 @@ mod tests {
                 None,
                 Some(Utc::now() - chrono::Duration::minutes(1)),
                 created_at,
+                "stub".into(),
             ),
         )
         .await
@@ -558,6 +564,7 @@ mod tests {
                 None,
                 Some(Utc::now() - chrono::Duration::minutes(1)),
                 created_at,
+                "stub".into(),
             ),
         )
         .await

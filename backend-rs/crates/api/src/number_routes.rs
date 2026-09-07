@@ -44,6 +44,7 @@ use uuid::Uuid;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/numbers/catalog", get(catalog))
+        .route("/numbers/offers", get(list_offers))
         .route("/numbers/products", get(products))
         .route("/numbers/products/:slug/countries", get(product_countries))
         .route("/numbers/orders", post(create_order).get(list_orders))
@@ -117,6 +118,121 @@ async fn catalog(State(state): State<AppState>) -> ApiResult<Json<Vec<CatalogPro
     }
 
     Ok(Json(products))
+}
+
+const LOW_SUCCESS_WARNING: &str =
+    "This option currently has a low verification success rate. We recommend choosing an option with a higher success rate.";
+
+#[derive(Deserialize)]
+pub struct OfferQuery {
+    pub product: String,
+    pub country: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferResponse {
+    pub id: Uuid,
+    pub product_slug: String,
+    pub product_name: String,
+    pub country_code: String,
+    pub country_name: String,
+    pub dial_code: String,
+    pub price_ngn: String,
+    pub in_stock: bool,
+    pub quantity: i32,
+    pub success_rate: String,
+    pub success_fetched_at: String,
+    pub recommended: bool,
+    pub low_success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub low_success_warning: Option<String>,
+}
+
+async fn list_offers(
+    State(state): State<AppState>,
+    Query(query): Query<OfferQuery>,
+) -> ApiResult<Json<Vec<OfferResponse>>> {
+    let product = query.product.trim().to_lowercase();
+    if product.is_empty() {
+        return Err(ApiError::BadRequest("Pick a platform.".into()));
+    }
+    let exists: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM number_products WHERE slug = $1 AND active",
+    )
+    .bind(&product)
+    .fetch_optional(&state.db)
+    .await?;
+    if exists.is_none() {
+        return Err(ApiError::BadRequest("We don't sell numbers for that app.".into()));
+    }
+
+    let country = query
+        .country
+        .as_deref()
+        .map(|c| c.trim().to_uppercase())
+        .filter(|c| !c.is_empty());
+
+    let rows: Vec<(
+        Uuid,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Decimal,
+        i32,
+        Decimal,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        "SELECT o.id, p.slug, p.name, c.code, c.name, c.dial_code,
+                o.price_ngn, o.quantity, o.success_rate, o.success_fetched_at
+           FROM number_offers o
+           JOIN number_products p ON p.id = o.product_id
+           JOIN number_countries c ON c.id = o.country_id
+          WHERE p.slug = $1 AND o.active AND o.quantity > 0
+            AND ($2::text IS NULL OR c.code = $2)
+          ORDER BY o.success_rate DESC, o.price_ngn ASC, o.quantity DESC
+          LIMIT 200",
+    )
+    .bind(&product)
+    .bind(country.as_deref())
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.into_iter().enumerate() {
+        let (
+            id,
+            product_slug,
+            product_name,
+            country_code,
+            country_name,
+            dial_code,
+            price_ngn,
+            quantity,
+            success_rate,
+            success_fetched_at,
+        ) = row;
+        let low_success = success_rate < Decimal::from(40);
+        out.push(OfferResponse {
+            id,
+            product_slug,
+            product_name,
+            country_code,
+            country_name,
+            dial_code,
+            price_ngn: price_ngn.normalize().to_string(),
+            in_stock: true,
+            quantity,
+            success_rate: success_rate.normalize().to_string(),
+            success_fetched_at: success_fetched_at.to_rfc3339(),
+            recommended: i == 0,
+            low_success,
+            low_success_warning: low_success.then(|| LOW_SUCCESS_WARNING.to_owned()),
+        });
+    }
+    Ok(Json(out))
 }
 
 // ---------------------------------------------------------------------------
@@ -222,12 +338,13 @@ async fn product_countries(
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateOrderBody {
+    #[serde(default)]
+    pub offer_id: Option<Uuid>,
+    #[serde(default)]
     pub product_slug: String,
+    #[serde(default)]
     pub country_code: String,
-    /// What the client last showed the user. Optional, but when it is sent an
-    /// order that would cost more than that is refused rather than charged: the
-    /// catalogue tracks the supplier now, so a price can move between reading a
-    /// page and buying from it.
+    /// What the client last showed the user. Required on the offerId path.
     pub expected_price_ngn: Option<String>,
 }
 
@@ -254,6 +371,8 @@ pub struct OrderResponse {
     pub code: Option<String>,
     pub expires_at: Option<String>,
     pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_id: Option<Uuid>,
     /// Everything the number received. Empty on the list endpoint, which would
     /// otherwise fetch an inbox per row to render a summary nobody reads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -286,8 +405,8 @@ async fn create_order(
 
     let ngn_account_id = lock_user_ngn_account(&mut tx, user.id).await?;
 
-    let existing: Option<(Uuid, String, String, Option<Decimal>, bool)> = sqlx::query_as(
-        "SELECT o.id, p.slug, c.code, o.expected_price_ngn, o.idempotency_payload_complete
+    let existing: Option<(Uuid, String, String, Option<Decimal>, bool, Option<Uuid>)> = sqlx::query_as(
+        "SELECT o.id, p.slug, c.code, o.expected_price_ngn, o.idempotency_payload_complete, o.offer_id
            FROM number_orders o
            JOIN number_products p ON p.id = o.product_id
            JOIN number_countries c ON c.id = o.country_id
@@ -304,11 +423,18 @@ async fn create_order(
     .await
     .map_err(anyhow::Error::from)?;
 
-    if let Some((id, stored_product, stored_country, stored_expected, complete)) = existing {
-        if stored_product != body.product_slug.trim().to_lowercase()
-            || stored_country != body.country_code.trim().to_uppercase()
-            || (complete && stored_expected != expected_price_ngn)
-        {
+    if let Some((id, stored_product, stored_country, stored_expected, complete, stored_offer)) =
+        existing
+    {
+        let same = if let Some(offer_id) = body.offer_id {
+            stored_offer == Some(offer_id)
+                && (!complete || stored_expected == expected_price_ngn)
+        } else {
+            stored_product == body.product_slug.trim().to_lowercase()
+                && stored_country == body.country_code.trim().to_uppercase()
+                && (!complete || stored_expected == expected_price_ngn)
+        };
+        if !same {
             return Err(ApiError::Conflict(
                 "That Idempotency-Key belongs to a different number purchase.".into(),
             ));
@@ -317,48 +443,111 @@ async fn create_order(
         return load_order(&state, user.id, id).await.map(Json);
     }
 
-    let (product_id, _product_name, provider_product): (Uuid, String, String) = sqlx::query_as(
-        "SELECT id, name, provider_product FROM number_products WHERE slug = $1 AND active",
-    )
-    .bind(body.product_slug.trim().to_lowercase())
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| ApiError::BadRequest("We don't sell numbers for that app.".into()))?;
+    let mut offer_sources: Vec<(String, String, String, String)> = Vec::new();
+    let (product_id, country_id, price_ngn, provider_product, provider_country, provider_label, offer_id) =
+        if let Some(offer_id) = body.offer_id {
+            let expected = expected_price_ngn.ok_or_else(|| {
+                ApiError::BadRequest("Send the price you were shown.".into())
+            })?;
+            let row: Option<(Uuid, Uuid, Decimal, i32, bool)> = sqlx::query_as(
+                "SELECT product_id, country_id, price_ngn, quantity, active
+                   FROM number_offers WHERE id = $1",
+            )
+            .bind(offer_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some((product_id, country_id, price_ngn, quantity, active)) = row else {
+                return Err(ApiError::NotFound);
+            };
+            if !active || quantity <= 0 {
+                return Err(ApiError::Conflict(
+                    "That option is no longer available. Refresh and pick again.".into(),
+                ));
+            }
+            if price_ngn > expected {
+                return Err(ApiError::PriceMoved {
+                    price_ngn: price_ngn.normalize().to_string(),
+                });
+            }
+            offer_sources = sqlx::query_as(
+                "SELECT provider, provider_country, provider_product, provider_operator
+                   FROM number_offer_sources
+                  WHERE offer_id = $1 AND stock > 0
+                  ORDER BY provider_cost ASC, stock DESC",
+            )
+            .bind(offer_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if offer_sources.is_empty() {
+                return Err(ApiError::Conflict(
+                    "That option is no longer available. Refresh and pick again.".into(),
+                ));
+            }
+            let (provider, provider_country, provider_product, _) = offer_sources[0].clone();
+            (
+                product_id,
+                country_id,
+                price_ngn,
+                provider_product,
+                provider_country,
+                provider,
+                Some(offer_id),
+            )
+        } else {
+            let (product_id, _product_name, provider_product): (Uuid, String, String) = sqlx::query_as(
+                "SELECT id, name, provider_product FROM number_products WHERE slug = $1 AND active",
+            )
+            .bind(body.product_slug.trim().to_lowercase())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("We don't sell numbers for that app.".into()))?;
 
-    let (country_id, _country_name, provider_country): (Uuid, String, String) = sqlx::query_as(
-        "SELECT id, name, provider_country FROM number_countries WHERE code = $1 AND active",
-    )
-    .bind(body.country_code.trim().to_uppercase())
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| ApiError::BadRequest("We don't sell numbers in that country.".into()))?;
+            let (country_id, _country_name, provider_country): (Uuid, String, String) = sqlx::query_as(
+                "SELECT id, name, provider_country FROM number_countries WHERE code = $1 AND active",
+            )
+            .bind(body.country_code.trim().to_uppercase())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| ApiError::BadRequest("We don't sell numbers in that country.".into()))?;
 
-    let price_ngn: Decimal = sqlx::query_scalar(
-        "SELECT price_ngn FROM number_prices
-          WHERE product_id = $1 AND country_id = $2 AND active",
-    )
-    .bind(product_id)
-    .bind(country_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| ApiError::BadRequest("That app isn't available in that country yet.".into()))?;
+            let price_ngn: Decimal = sqlx::query_scalar(
+                "SELECT price_ngn FROM number_prices
+                  WHERE product_id = $1 AND country_id = $2 AND active",
+            )
+            .bind(product_id)
+            .bind(country_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                ApiError::BadRequest("That app isn't available in that country yet.".into())
+            })?;
+            if let Some(expected) = expected_price_ngn {
+                if price_ngn > expected {
+                    return Err(ApiError::PriceMoved {
+                        price_ngn: price_ngn.normalize().to_string(),
+                    });
+                }
+            }
+            let provider_label = if state.numbers.is_live() {
+                "5sim"
+            } else {
+                "stub"
+            };
+            (
+                product_id,
+                country_id,
+                price_ngn,
+                provider_product,
+                provider_country,
+                provider_label.to_string(),
+                None,
+            )
+        };
 
-    // This availability gate applies only to a new purchase. Replays return
-    // their stored result even when provider configuration changes later.
-    if !state.numbers.is_live() && state.funding.is_live() {
+    if !state.numbers.is_live() && state.funding.is_live() && offer_id.is_none() {
         return Err(ApiError::ServiceUnavailable(
             "Numbers aren't on sale yet. Nothing has been charged.".into(),
         ));
-    }
-
-    if let Some(expected) = expected_price_ngn {
-        // Only a new purchase is price checked. A replay returns its stored
-        // order even when the live catalogue price has moved since the commit.
-        if price_ngn > expected {
-            return Err(ApiError::PriceMoved {
-                price_ngn: price_ngn.normalize().to_string(),
-            });
-        }
     }
 
     let raw_balance: Decimal = sqlx::query_scalar(
@@ -426,19 +615,20 @@ async fn create_order(
         "INSERT INTO number_orders
            (user_id, product_id, country_id, price_ngn, provider, status, reference,
             reserved_journal_id, idempotency_key, expected_price_ngn,
-            idempotency_payload_complete, reconciliation_payload_complete, reconcile_next_at)
-         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, true, true, now() + interval '5 seconds')
+            idempotency_payload_complete, reconciliation_payload_complete, reconcile_next_at, offer_id)
+         VALUES ($1, $2, $3, $4, $5, 'reserved', $6, $7, $8, $9, true, true, now() + interval '5 seconds', $10)
          RETURNING id, created_at",
     )
     .bind(user.id)
     .bind(product_id)
     .bind(country_id)
     .bind(price_ngn)
-    .bind(if state.numbers.is_live() { "5sim" } else { "stub" })
+    .bind(&provider_label)
     .bind(&reference)
     .bind(outcome.journal_id())
     .bind(idempotency_key)
     .bind(expected_price_ngn)
+    .bind(offer_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(anyhow::Error::from)?;
@@ -456,34 +646,103 @@ async fn create_order(
         return load_order(&state, user.id, order_id).await.map(Json);
     }
 
-    let activation = match state
-        .numbers
-        .buy(&provider_country, &provider_product)
-        .await
-    {
-        Ok(activation) => activation,
-        Err(PurchaseError::Rejected(err)) => {
-            number_order_transitions::apply_claimed(
-                &state.db,
-                order_id,
-                claim_token,
-                OrderTransition::Refund {
-                    status: RefundStatus::Failed,
-                    reason: "supplier_rejected".into(),
-                },
-            )
-            .await?;
-            return Err(err);
+    let activation = if offer_id.is_some() {
+        let mut last_reject: Option<ApiError> = None;
+        let mut won = None;
+        for (provider, country, product, operator) in &offer_sources {
+            match state
+                .numbers
+                .buy_source(provider, country, product, operator)
+                .await
+            {
+                Ok(activation) => {
+                    sqlx::query("UPDATE number_orders SET provider = $2 WHERE id = $1")
+                        .bind(order_id)
+                        .bind(provider)
+                        .execute(&state.db)
+                        .await?;
+                    won = Some(activation);
+                    break;
+                }
+                Err(PurchaseError::Rejected(err)) => {
+                    if err.to_string().contains("out of stock") {
+                        last_reject = Some(err);
+                        continue;
+                    }
+                    number_order_transitions::apply_claimed(
+                        &state.db,
+                        order_id,
+                        claim_token,
+                        OrderTransition::Refund {
+                            status: RefundStatus::Failed,
+                            reason: "supplier_rejected".into(),
+                        },
+                    )
+                    .await?;
+                    return Err(err);
+                }
+                Err(PurchaseError::Ambiguous) => {
+                    crate::number_reconciler::mark_review_required(
+                        &state.db,
+                        order_id,
+                        claim_token,
+                        "purchase_outcome_unknown",
+                    )
+                    .await?;
+                    return load_order(&state, user.id, order_id).await.map(Json);
+                }
+            }
         }
-        Err(PurchaseError::Ambiguous) => {
-            crate::number_reconciler::mark_review_required(
-                &state.db,
-                order_id,
-                claim_token,
-                "purchase_outcome_unknown",
-            )
-            .await?;
-            return load_order(&state, user.id, order_id).await.map(Json);
+        match won {
+            Some(activation) => activation,
+            None => {
+                number_order_transitions::apply_claimed(
+                    &state.db,
+                    order_id,
+                    claim_token,
+                    OrderTransition::Refund {
+                        status: RefundStatus::Failed,
+                        reason: "supplier_rejected".into(),
+                    },
+                )
+                .await?;
+                return Err(last_reject.unwrap_or_else(|| {
+                    ApiError::Conflict(
+                        "That option is no longer available. Refresh and pick again.".into(),
+                    )
+                }));
+            }
+        }
+    } else {
+        match state
+            .numbers
+            .buy(&provider_country, &provider_product)
+            .await
+        {
+            Ok(activation) => activation,
+            Err(PurchaseError::Rejected(err)) => {
+                number_order_transitions::apply_claimed(
+                    &state.db,
+                    order_id,
+                    claim_token,
+                    OrderTransition::Refund {
+                        status: RefundStatus::Failed,
+                        reason: "supplier_rejected".into(),
+                    },
+                )
+                .await?;
+                return Err(err);
+            }
+            Err(PurchaseError::Ambiguous) => {
+                crate::number_reconciler::mark_review_required(
+                    &state.db,
+                    order_id,
+                    claim_token,
+                    "purchase_outcome_unknown",
+                )
+                .await?;
+                return load_order(&state, user.id, order_id).await.map(Json);
+            }
         }
     };
 
@@ -509,7 +768,7 @@ async fn create_order(
 
     if assigned.rows_affected() != 1 {
         if state.numbers.is_live() {
-            let _ = state.numbers.cancel(&activation.provider_order_id).await;
+            let _ = state.numbers.cancel_for(&provider_label, &activation.provider_order_id).await;
         }
         return load_order(&state, user.id, order_id).await.map(Json);
     }
@@ -559,8 +818,8 @@ async fn cancel_order(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<OrderResponse>> {
-    let row: Option<(String, Option<String>, Decimal, String)> = sqlx::query_as(
-        "SELECT status, provider_order_id, price_ngn, reference
+    let row: Option<(String, Option<String>, Decimal, String, String)> = sqlx::query_as(
+        "SELECT status, provider_order_id, price_ngn, reference, provider
            FROM number_orders WHERE id = $1 AND user_id = $2",
     )
     .bind(id)
@@ -568,7 +827,7 @@ async fn cancel_order(
     .fetch_optional(&state.db)
     .await?;
 
-    let (status, provider_order_id, _price_ngn, _reference) = row.ok_or(ApiError::NotFound)?;
+    let (status, provider_order_id, _price_ngn, _reference, provider) = row.ok_or(ApiError::NotFound)?;
 
     if !matches!(status.as_str(), "reserved" | "awaiting_code") {
         return load_order(&state, user.id, id).await.map(Json);
@@ -579,7 +838,7 @@ async fn cancel_order(
     // still paid for the number. Terminal transitions stay serialized; this
     // chooses the right terminal.
     if let Some(provider_order_id) = provider_order_id.as_deref() {
-        match state.numbers.check(provider_order_id).await {
+        match state.numbers.check_for(&provider, provider_order_id).await {
             Ok(ActivationState::Received {
                 code,
                 text,
@@ -591,7 +850,7 @@ async fn cancel_order(
             Ok(ActivationState::Finished) => {}
             Ok(ActivationState::Pending) => {
                 if state.numbers.is_live() {
-                    if let Err(error) = state.numbers.cancel(provider_order_id).await {
+                    if let Err(error) = state.numbers.cancel_for(&provider, provider_order_id).await {
                         tracing::warn!(order = %id, error = %error, "supplier refused cancel");
                         let current = load_order(&state, user.id, id).await?;
                         if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
@@ -631,7 +890,7 @@ async fn cancel_order(
 /// The columns every order response is built from, and the joins they need.
 /// Shared so the list and the single read cannot drift apart.
 const ORDER_COLUMNS: &str = "o.id, o.reference, p.name, c.name, c.code, o.price_ngn, \
-                             o.status, o.phone_number, o.sms_code, o.expires_at, o.created_at";
+                             o.status, o.phone_number, o.sms_code, o.expires_at, o.created_at, o.offer_id";
 
 const ORDER_FROM: &str = "FROM number_orders o \
                           JOIN number_products  p ON p.id = o.product_id \
@@ -649,6 +908,7 @@ type OrderRow = (
     Option<String>,
     Option<DateTime<Utc>>,
     DateTime<Utc>,
+    Option<Uuid>,
 );
 
 fn into_response(row: OrderRow) -> OrderResponse {
@@ -664,6 +924,7 @@ fn into_response(row: OrderRow) -> OrderResponse {
         code,
         expires_at,
         created_at,
+        offer_id,
     ) = row;
 
     OrderResponse {
@@ -678,6 +939,7 @@ fn into_response(row: OrderRow) -> OrderResponse {
         code,
         expires_at: expires_at.map(|t| t.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
+        offer_id,
         messages: Vec::new(),
     }
 }
@@ -750,6 +1012,9 @@ mod tests {
             google_client_id: None,
             fivesim_api_key: None,
             fivesim_currency: Some("USD".into()),
+            smspool_api_key: None,
+            smspool_currency: Some("USD".into()),
+            smspool_base_url: "https://api.smspool.net".into(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "http://localhost".into(),
@@ -820,7 +1085,7 @@ mod tests {
             payouts: Arc::new(payout_provider::AnyPayoutProvider::Stub(
                 payout_provider::StubProvider,
             )),
-            numbers: Arc::new(AnyNumberProvider::CountingStub(provider.clone())),
+            numbers: Arc::new(AnyNumberProvider::CountingStub(provider.clone()).into()),
             funding: Arc::new(AnyFundingProvider::Stub(StubFunding)),
             google_keys: Arc::new(GoogleKeys::new()),
             google_client_id: None,
@@ -842,6 +1107,7 @@ mod tests {
         .unwrap();
         let key = Uuid::new_v4().to_string();
         let request = CreateOrderBody {
+            offer_id: None,
             product_slug,
             country_code,
             expected_price_ngn: Some(price.normalize().to_string()),
@@ -1032,7 +1298,7 @@ mod tests {
             payouts: Arc::new(payout_provider::AnyPayoutProvider::Stub(
                 payout_provider::StubProvider,
             )),
-            numbers: Arc::new(numbers),
+            numbers: Arc::new(numbers.into()),
             funding: Arc::new(AnyFundingProvider::Stub(StubFunding)),
             google_keys: Arc::new(GoogleKeys::new()),
             google_client_id: None,
@@ -1204,6 +1470,214 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "awaiting_code");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn offers_list_ranks_and_warns_and_buy_pins_id() {
+        let database = IsolatedDatabase::new("number_offers_api").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "stub",
+            &crate::number_offers::stub_skus(),
+            true,
+        )
+        .await
+        .unwrap();
+        let listed = list_offers(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            Query(OfferQuery {
+                product: "whatsapp".into(),
+                country: Some("NG".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].recommended);
+        assert!(!listed[0].low_success);
+        assert!(listed[1].low_success);
+        assert_eq!(
+            listed[1].low_success_warning.as_deref(),
+            Some(LOW_SUCCESS_WARNING)
+        );
+        let blob = serde_json::to_string(&listed).unwrap().to_ascii_lowercase();
+        assert!(!blob.contains("smspool"));
+        assert!(!blob.contains("5sim"));
+        assert!(!blob.contains("fivesim"));
+        assert!(!blob.contains("\"provider\""));
+
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email) VALUES ('offers-buy@example.test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, user_id, asset)
+             VALUES ('user_ngn', $1, 'NGN') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let float_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, asset)
+             VALUES ('naira_bank_float', 'NGN') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let funding_journal: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('ngn_funding', 'offers-buy-funding', 'offers-buy-funding') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', -100000), ($1, $3, 'NGN', 100000)",
+        )
+        .bind(funding_journal)
+        .bind(user_account)
+        .bind(float_account)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
+        let bought = create_order(
+            State(state.clone()),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            headers,
+            Json(CreateOrderBody {
+                offer_id: Some(listed[0].id),
+                product_slug: String::new(),
+                country_code: String::new(),
+                expected_price_ngn: Some(listed[0].price_ngn.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(bought.offer_id, Some(listed[0].id));
+
+        sqlx::query("UPDATE number_offers SET price_ngn = price_ngn + 50 WHERE id = $1")
+            .bind(listed[1].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut stale = HeaderMap::new();
+        stale.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
+        let err = match create_order(
+            State(state.clone()),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            stale,
+            Json(CreateOrderBody {
+                offer_id: Some(listed[1].id),
+                product_slug: String::new(),
+                country_code: String::new(),
+                expected_price_ngn: Some(listed[1].price_ngn.clone()),
+            }),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("expected a price move"),
+        };
+        assert!(matches!(err, ApiError::PriceMoved { .. }));
+
+        sqlx::query("UPDATE number_offers SET quantity = 0, active = false WHERE id = $1")
+            .bind(listed[0].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let listed_after = list_offers(
+            State(state),
+            Query(OfferQuery {
+                product: "whatsapp".into(),
+                country: Some("NG".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(listed_after.iter().all(|row| row.id != listed[0].id));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn offers_merge_same_success_and_skip_missing_rate() {
+        let database = IsolatedDatabase::new("number_offers_merge").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        let high = crate::number_offers::stub_skus().into_iter().next().unwrap();
+        let twin = crate::number_offers::OfferSku {
+            provider: "fivesim",
+            product_slug: high.product_slug.clone(),
+            country_code: high.country_code.clone(),
+            provider_product: "whatsapp".into(),
+            provider_country: "nigeria".into(),
+            provider_operator: Some("any".into()),
+            cost: high.cost,
+            currency: "USD".into(),
+            success_rate: high.success_rate,
+            stock: 3,
+        };
+        crate::number_offers::apply_provider_skus(&pool, &pricing, "stub", std::slice::from_ref(&high), true)
+            .await
+            .unwrap();
+        crate::number_offers::apply_provider_skus(&pool, &pricing, "fivesim", std::slice::from_ref(&twin), false)
+            .await
+            .unwrap();
+        let sources: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM number_offer_sources s
+             JOIN number_offers o ON o.id = s.offer_id
+             JOIN number_products p ON p.id = o.product_id
+             WHERE p.slug = 'whatsapp' AND o.success_rate = 82",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sources, 2);
+        let offers: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM number_offers o
+             JOIN number_products p ON p.id = o.product_id
+             WHERE p.slug = 'whatsapp' AND o.success_rate = 82",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(offers, 1);
         database.cleanup().await;
     }
 }

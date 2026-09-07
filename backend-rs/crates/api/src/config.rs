@@ -62,6 +62,9 @@ pub struct Config {
     /// names the currency, so it is stated here rather than guessed at — a wrong
     /// guess would put a mislabelled cost on every order.
     pub fivesim_currency: Option<String>,
+    pub smspool_api_key: Option<String>,
+    pub smspool_currency: Option<String>,
+    pub smspool_base_url: String,
     /// Who may sign in with Google. Empty means anyone with a Google account,
     /// which is the right default for a public product and the wrong one for a
     /// deployment taking real card payments before it has opened to anybody.
@@ -159,6 +162,12 @@ impl Config {
             google_client_id: env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
             fivesim_api_key: env::var("FIVESIM_API_KEY").ok().filter(|s| !s.is_empty()),
             fivesim_currency: env::var("FIVESIM_CURRENCY").ok().filter(|s| !s.is_empty()),
+            smspool_api_key: env::var("SMSPOOL_API_KEY").ok().filter(|s| !s.is_empty()),
+            smspool_currency: env::var("SMSPOOL_CURRENCY").ok().filter(|s| !s.is_empty()),
+            smspool_base_url: env::var("SMSPOOL_BASE_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.smspool.net".into()),
             google_allowed_emails: env::var("GOOGLE_ALLOWED_EMAILS")
                 .unwrap_or_default()
                 .split(',')
@@ -323,6 +332,9 @@ mod tests {
             google_client_id: Some("naivolt-web.apps.googleusercontent.com".into()),
             fivesim_api_key: Some("5sim_live".into()),
             fivesim_currency: Some("USD".into()),
+            smspool_api_key: None,
+            smspool_currency: Some("USD".into()),
+            smspool_base_url: "https://api.smspool.net".into(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "https://naivolt.com".into(),

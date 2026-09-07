@@ -21,10 +21,12 @@ mod kyc_routes;
 mod middleware;
 mod notify;
 mod number_catalog;
+mod number_offers;
 mod number_order_transitions;
 mod number_provider;
 mod number_reconciler;
 mod number_routes;
+mod number_smspool;
 mod payout_provider;
 mod payout_routes;
 mod pricing;
@@ -132,13 +134,28 @@ async fn main() -> Result<()> {
         }),
         google_keys: Arc::new(google_keys::GoogleKeys::new()),
         google_client_id: config.google_client_id.clone(),
-        numbers: Arc::new(match &config.fivesim_api_key {
-            Some(key) => number_provider::AnyNumberProvider::FiveSim(
-                number_provider::FiveSimProvider::new(key.clone(), config.fivesim_currency.clone()),
-            ),
-            None => {
-                tracing::warn!("no number provider configured — numbers will be stubbed");
-                number_provider::AnyNumberProvider::Stub(number_provider::StubProvider)
+        numbers: Arc::new({
+            let primary = match &config.fivesim_api_key {
+                Some(key) => number_provider::AnyNumberProvider::FiveSim(
+                    number_provider::FiveSimProvider::new(
+                        key.clone(),
+                        config.fivesim_currency.clone(),
+                    ),
+                ),
+                None => {
+                    tracing::warn!("no number provider configured — numbers will be stubbed");
+                    number_provider::AnyNumberProvider::Stub(number_provider::StubProvider)
+                }
+            };
+            number_provider::NumberProviders {
+                primary,
+                smspool: config.smspool_api_key.as_ref().map(|key| {
+                    number_smspool::SmsPoolProvider::new(
+                        key.clone(),
+                        config.smspool_currency.clone(),
+                        Some(config.smspool_base_url.clone()),
+                    )
+                }),
             }
         }),
         payouts: Arc::new(match &config.paystack_secret_key {
@@ -162,6 +179,24 @@ async fn main() -> Result<()> {
             usd_ngn: config.usd_ngn_mid,
             margin: config.numbers_margin,
             supplier_currency: config.fivesim_currency.clone(),
+        },
+        number_catalog::OfferSync {
+            write_stub: config.fivesim_api_key.is_none(),
+            smspool: config.smspool_api_key.as_ref().map(|key| {
+                number_smspool::SmsPoolProvider::new(
+                    key.clone(),
+                    config.smspool_currency.clone(),
+                    Some(config.smspool_base_url.clone()),
+                )
+            }),
+            smspool_pricing: number_catalog::Pricing {
+                usd_ngn: config.usd_ngn_mid,
+                margin: config.numbers_margin,
+                supplier_currency: config
+                    .smspool_currency
+                    .clone()
+                    .or_else(|| Some("USD".into())),
+            },
         },
     );
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
