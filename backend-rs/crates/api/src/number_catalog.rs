@@ -201,7 +201,7 @@ pub async fn sync(
     let mut fivesim_skus = Vec::new();
 
     for (key, country) in &countries {
-        let Some(country_id) = upsert_country(state, key, country).await? else {
+        let Some(country_id) = upsert_country(&state.db, key, country).await? else {
             continue;
         };
         report.countries += 1;
@@ -324,8 +324,12 @@ async fn sync_offers(
 ///
 /// `iso` and `prefix` are keyed by their own value, so a missing key means the
 /// supplier gave us a country we cannot address — skipped rather than guessed.
+///
+/// Naivolt identity is ISO `code`. Two 5SIM guest keys that share one ISO must
+/// reuse one row; upserting only on `provider_country` used to abort the sweep
+/// on `number_countries_code_key`.
 async fn upsert_country(
-    state: &AppState,
+    db: &sqlx::PgPool,
     key: &str,
     country: &GuestCountry,
 ) -> anyhow::Result<Option<Uuid>> {
@@ -336,23 +340,54 @@ async fn upsert_country(
         return Ok(None);
     };
 
+    let code = iso.to_uppercase();
     let name = country
         .text_en
         .clone()
         .unwrap_or_else(|| humanise(key));
 
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE number_countries
+            SET name = $2, dial_code = $3
+          WHERE provider_country = $1
+      RETURNING id",
+    )
+    .bind(key)
+    .bind(&name)
+    .bind(&prefix)
+    .fetch_optional(db)
+    .await?
+    {
+        return Ok(Some(id));
+    }
+
+    // Same ISO, different supplier key: keep the existing provider_country so
+    // buy paths that still read the country row stay stable.
+    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE number_countries
+            SET name = $2, dial_code = $3
+          WHERE code = $1
+      RETURNING id",
+    )
+    .bind(&code)
+    .bind(&name)
+    .bind(&prefix)
+    .fetch_optional(db)
+    .await?
+    {
+        return Ok(Some(id));
+    }
+
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO number_countries (code, name, dial_code, provider_country)
          VALUES ($1, $2, $3, $4)
-         ON CONFLICT (provider_country) DO UPDATE
-            SET name = EXCLUDED.name, dial_code = EXCLUDED.dial_code
          RETURNING id",
     )
-    .bind(iso.to_uppercase())
-    .bind(name)
-    .bind(prefix)
+    .bind(&code)
+    .bind(&name)
+    .bind(&prefix)
     .bind(key)
-    .fetch_one(&state.db)
+    .fetch_one(db)
     .await?;
 
     Ok(Some(id))
@@ -580,5 +615,49 @@ mod tests {
         assert_eq!(humanise("bolt-food"), "Bolt Food");
         assert_eq!(humanise("yandex_go"), "Yandex Go");
         assert_eq!(humanise("1688"), "1688");
+    }
+
+    #[tokio::test]
+    async fn upsert_country_reuses_iso_when_provider_keys_differ() {
+        use crate::test_database::IsolatedDatabase;
+
+        let database = IsolatedDatabase::new("country_iso_upsert").await;
+
+        let first = GuestCountry {
+            iso: HashMap::from([("zz".into(), serde_json::json!(1))]),
+            prefix: HashMap::from([("+999".into(), serde_json::json!(1))]),
+            text_en: Some("Testland".into()),
+        };
+        let second = GuestCountry {
+            iso: HashMap::from([("zz".into(), serde_json::json!(1))]),
+            prefix: HashMap::from([("+999".into(), serde_json::json!(1))]),
+            text_en: Some("Testland Alt".into()),
+        };
+
+        let id1 = upsert_country(&database.pool, "testland", &first)
+            .await
+            .unwrap()
+            .expect("first insert");
+        let id2 = upsert_country(&database.pool, "testland-alt", &second)
+            .await
+            .unwrap()
+            .expect("second insert must reuse ISO");
+        assert_eq!(id1, id2);
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_countries WHERE code = 'ZZ'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+
+        let provider: String =
+            sqlx::query_scalar("SELECT provider_country FROM number_countries WHERE code = 'ZZ'")
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(provider, "testland");
+
+        database.cleanup().await;
     }
 }

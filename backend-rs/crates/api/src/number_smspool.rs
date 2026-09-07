@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 const DEFAULT_BASE: &str = "https://api.smspool.net";
+const REQUEST_SPACING: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct SmsPoolProvider {
@@ -42,91 +43,36 @@ impl SmsPoolProvider {
         &self.currency
     }
 
+    /// Build offer SKUs from the live catalogue.
+    ///
+    /// SMSPool's success endpoint requires a `service` parameter and returns
+    /// per-country `short_name`, `price`, `stock`, and `success_rate` in one
+    /// payload. Stock is read from that response; `/sms/stock` alone refuses
+    /// without a country.
     pub async fn fetch_skus(&self) -> anyhow::Result<Vec<OfferSku>> {
-        let success = self.fetch_success_index().await?;
-        let stock_url = format!("{}/sms/stock", self.base.trim_end_matches('/'));
-        let response = self
-            .http
-            .get(&stock_url)
-            .query(&[("key", self.api_key.as_str())])
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            anyhow::bail!("smspool stock refused");
+        let services = self.fetch_mapped_services().await?;
+        if services.is_empty() {
+            anyhow::bail!("smspool service list had no mapped platforms");
         }
-        let body: Value = response.json().await?;
-        let rows = body.as_array().cloned().unwrap_or_default();
+
         let mut skus = Vec::new();
-        for row in rows {
-            let service = row
-                .get("service")
-                .or_else(|| row.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let Some(slug) = map_service(service) else {
-                continue;
-            };
-            let country_code = row
-                .get("country_code")
-                .or_else(|| row.get("iso"))
-                .and_then(Value::as_str)
-                .map(|s| s.to_uppercase())
-                .or_else(|| {
-                    row.get("country")
-                        .and_then(Value::as_str)
-                        .and_then(map_country)
-                });
-            let Some(country_code) = country_code else {
-                continue;
-            };
-            let provider_country = row
-                .get("country")
-                .and_then(Value::as_str)
-                .unwrap_or(&country_code)
-                .to_string();
-            let provider_product = row
-                .get("service_id")
-                .or_else(|| row.get("id"))
-                .map(|v| value_key(v))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| service.to_string());
-            let stock = row
-                .get("stock")
-                .or_else(|| row.get("amount"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            if stock <= 0 {
-                continue;
+        for (index, service) in services.iter().enumerate() {
+            if index > 0 {
+                tokio::time::sleep(REQUEST_SPACING).await;
             }
-            let cost = row
-                .get("price")
-                .or_else(|| row.get("cost"))
-                .and_then(json_decimal);
-            let Some(cost) = cost else {
-                continue;
-            };
-            let success_key = format!("{slug}:{country_code}");
-            let Some(success_rate) = success.get(&success_key).copied() else {
-                continue;
-            };
-            skus.push(OfferSku {
-                provider: "smspool",
-                product_slug: slug.to_string(),
-                country_code,
-                provider_product,
-                provider_country,
-                provider_operator: None,
-                cost,
-                currency: self.currency.clone(),
-                success_rate,
-                stock: i32::try_from(stock).unwrap_or(i32::MAX),
-            });
+            let rows = self.fetch_success_rows(&service.provider_id).await?;
+            skus.extend(skus_from_success_rows(
+                &service.slug,
+                &service.provider_id,
+                &rows,
+                &self.currency,
+            ));
         }
         Ok(skus)
     }
 
-    async fn fetch_success_index(&self) -> anyhow::Result<HashMap<String, Decimal>> {
-        let url = format!("{}/request/success_rate", self.base.trim_end_matches('/'));
+    async fn fetch_mapped_services(&self) -> anyhow::Result<Vec<MappedService>> {
+        let url = format!("{}/service/retrieve_all", self.base.trim_end_matches('/'));
         let response = self
             .http
             .post(&url)
@@ -134,51 +80,39 @@ impl SmsPoolProvider {
             .send()
             .await?;
         if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "smspool service list refused");
+            anyhow::bail!("smspool service list refused");
+        }
+        let body: Value = response.json().await?;
+        let rows = body.as_array().cloned().unwrap_or_default();
+        Ok(select_mapped_services(&rows))
+    }
+
+    async fn fetch_success_rows(&self, service: &str) -> anyhow::Result<Vec<Value>> {
+        let url = format!("{}/request/success_rate", self.base.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(&url)
+            .form(&[
+                ("key", self.api_key.as_str()),
+                ("service", service),
+            ])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            tracing::warn!(
+                status = %response.status(),
+                service,
+                "smspool success_rate refused"
+            );
             anyhow::bail!("smspool success_rate refused");
         }
         let body: Value = response.json().await?;
-        let rows = body
+        Ok(body
             .as_array()
             .cloned()
             .or_else(|| body.get("data").and_then(Value::as_array).cloned())
-            .unwrap_or_default();
-        let mut index = HashMap::new();
-        for row in rows {
-            let service = row
-                .get("service")
-                .or_else(|| row.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let Some(slug) = map_service(service) else {
-                continue;
-            };
-            let country_code = row
-                .get("country_code")
-                .or_else(|| row.get("iso"))
-                .and_then(Value::as_str)
-                .map(|s| s.to_uppercase())
-                .or_else(|| {
-                    row.get("country")
-                        .and_then(Value::as_str)
-                        .and_then(map_country)
-                });
-            let Some(country_code) = country_code else {
-                continue;
-            };
-            let Some(raw) = row
-                .get("success_rate")
-                .or_else(|| row.get("rate"))
-                .or_else(|| row.get("success"))
-                .and_then(json_decimal)
-            else {
-                continue;
-            };
-            let Some(rate) = crate::number_offers::parse_success_rate(raw) else {
-                continue;
-            };
-            index.insert(format!("{slug}:{country_code}"), rate);
-        }
-        Ok(index)
+            .unwrap_or_default())
     }
 
     pub async fn buy(
@@ -312,6 +246,12 @@ impl SmsPoolProvider {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MappedService {
+    slug: String,
+    provider_id: String,
+}
+
 #[derive(Deserialize)]
 struct SmsPoolOrder {
     #[serde(default)]
@@ -369,6 +309,134 @@ fn map_service(name: &str) -> Option<&'static str> {
         .map(|(_, slug)| *slug)
 }
 
+fn map_service_score(name: &str, slug: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    let needle = match slug {
+        "x" => "twitter",
+        other => other,
+    };
+    if n == needle {
+        0
+    } else if n.starts_with(needle) {
+        1
+    } else {
+        2
+    }
+}
+
+/// One SMSPool service id per Naivolt slug. Prefer an exact or prefix name match
+/// so "Google/Gmail" wins over "Google Voice" / "Google Play". Equal scores break
+/// ties toward the lower provider id (earlier catalogue entries).
+fn select_mapped_services(rows: &[Value]) -> Vec<MappedService> {
+    let mut best: HashMap<&'static str, (u8, u64, MappedService)> = HashMap::new();
+    for row in rows {
+        let name = row
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Some(slug) = map_service(name) else {
+            continue;
+        };
+        let id = row
+            .get("ID")
+            .or_else(|| row.get("id"))
+            .map(value_key)
+            .filter(|s| !s.is_empty());
+        let Some(provider_id) = id else {
+            continue;
+        };
+        let id_num = provider_id.parse::<u64>().unwrap_or(u64::MAX);
+        let score = map_service_score(name, slug);
+        let candidate = MappedService {
+            slug: slug.to_string(),
+            provider_id,
+        };
+        match best.get(slug) {
+            Some((best_score, best_id, _))
+                if score > *best_score || (score == *best_score && id_num >= *best_id) => {}
+            _ => {
+                best.insert(slug, (score, id_num, candidate));
+            }
+        }
+    }
+    let mut out: Vec<_> = best.into_values().map(|(_, _, service)| service).collect();
+    out.sort_by(|a, b| a.slug.cmp(&b.slug));
+    out
+}
+
+fn country_code_from_success_row(row: &Value) -> Option<String> {
+    row.get("short_name")
+        .or_else(|| row.get("country_code"))
+        .or_else(|| row.get("iso"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_uppercase())
+        .or_else(|| {
+            row.get("name")
+                .and_then(Value::as_str)
+                .and_then(map_country)
+        })
+}
+
+fn skus_from_success_rows(
+    slug: &str,
+    provider_product: &str,
+    rows: &[Value],
+    currency: &str,
+) -> Vec<OfferSku> {
+    let mut skus = Vec::new();
+    for row in rows {
+        let Some(country_code) = country_code_from_success_row(row) else {
+            continue;
+        };
+        let provider_country = row
+            .get("country_id")
+            .or_else(|| row.get("country"))
+            .map(value_key)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| country_code.clone());
+        let stock = row
+            .get("stock")
+            .or_else(|| row.get("amount"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        if stock <= 0 {
+            continue;
+        }
+        let cost = row
+            .get("price")
+            .or_else(|| row.get("low_price"))
+            .or_else(|| row.get("cost"))
+            .and_then(json_decimal);
+        let Some(cost) = cost else {
+            continue;
+        };
+        let Some(raw) = row
+            .get("success_rate")
+            .or_else(|| row.get("rate"))
+            .or_else(|| row.get("success"))
+            .and_then(json_decimal)
+        else {
+            continue;
+        };
+        let Some(success_rate) = crate::number_offers::parse_success_rate(raw) else {
+            continue;
+        };
+        skus.push(OfferSku {
+            provider: "smspool",
+            product_slug: slug.to_string(),
+            country_code,
+            provider_product: provider_product.to_string(),
+            provider_country,
+            provider_operator: None,
+            cost,
+            currency: currency.to_string(),
+            success_rate,
+            stock: i32::try_from(stock).unwrap_or(i32::MAX),
+        });
+    }
+    skus
+}
+
 fn map_country(name: &str) -> Option<String> {
     let n = name.to_ascii_lowercase();
     let code = match n.as_str() {
@@ -381,4 +449,66 @@ fn map_country(name: &str) -> Option<String> {
         _ => return None,
     };
     Some(code.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use serde_json::json;
+
+    #[test]
+    fn success_rows_parse_short_name_and_one_vs_hundred() {
+        let rows = vec![
+            json!({
+                "country_id": 1,
+                "name": "United States",
+                "short_name": "US",
+                "price": "0.80",
+                "success_rate": "100",
+                "stock": 12
+            }),
+            json!({
+                "country_id": 2,
+                "name": "United Kingdom",
+                "short_name": "GB",
+                "price": "0.10",
+                "success_rate": "1",
+                "stock": 4
+            }),
+            json!({
+                "country_id": 14,
+                "name": "Nigeria",
+                "short_name": "NG",
+                "price": "0.81",
+                "success_rate": 30,
+                "stock": 0
+            }),
+        ];
+        let skus = skus_from_success_rows("whatsapp", "1012", &rows, "USD");
+        assert_eq!(skus.len(), 2);
+        assert_eq!(skus[0].country_code, "US");
+        assert_eq!(skus[0].provider_country, "1");
+        assert_eq!(skus[0].provider_product, "1012");
+        assert_eq!(skus[0].success_rate, dec!(100));
+        assert_eq!(skus[1].country_code, "GB");
+        assert_eq!(skus[1].success_rate, dec!(100));
+        assert_eq!(skus[1].provider_country, "2");
+    }
+
+    #[test]
+    fn mapped_services_prefer_primary_google() {
+        let rows = vec![
+            json!({"ID": 396, "name": "Google Voice"}),
+            json!({"ID": 395, "name": "Google/Gmail"}),
+            json!({"ID": 1012, "name": "WhatsApp"}),
+            json!({"ID": 9999, "name": "Unknown Service"}),
+        ];
+        let mapped = select_mapped_services(&rows);
+        assert_eq!(mapped.len(), 2);
+        let google = mapped.iter().find(|s| s.slug == "google").unwrap();
+        assert_eq!(google.provider_id, "395");
+        let whatsapp = mapped.iter().find(|s| s.slug == "whatsapp").unwrap();
+        assert_eq!(whatsapp.provider_id, "1012");
+    }
 }
