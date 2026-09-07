@@ -1,6 +1,6 @@
 use crate::error::{ApiError, ApiResult};
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
-use crate::number_provider::ActivationState;
+use crate::number_provider::{ActivationCheck, ActivationLifecycle};
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -57,7 +57,10 @@ async fn sweep(state: &AppState) -> ApiResult<()> {
         "WITH due AS (
              SELECT id FROM number_orders
               WHERE reconciliation_payload_complete
-                AND status IN ('reserved','awaiting_code')
+                AND (
+                      status IN ('reserved','awaiting_code')
+                   OR (status = 'delivered' AND activation_open)
+                )
                 AND reconcile_next_at <= now()
                 AND (reconcile_claimed_until IS NULL OR reconcile_claimed_until < now())
               ORDER BY reconcile_next_at FOR UPDATE SKIP LOCKED LIMIT 50
@@ -86,7 +89,7 @@ async fn sweep(state: &AppState) -> ApiResult<()> {
 }
 
 async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
-    let (id, token, status, provider_id, started_at, expires_at, created_at, provider) = row;
+    let (id, token, status, provider_id, started_at, expires_at, _created_at, provider) = row;
     if status == "reserved" {
         if started_at.is_none() {
             number_order_transitions::apply_claimed(
@@ -115,47 +118,22 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
     let checked = state.numbers.check_for(&provider, &provider_id).await;
     release_slot(&state.db, slot, token).await?;
     match checked {
-        Ok(ActivationState::Received {
-            code,
-            text,
-            messages,
-        }) => {
-            number_order_transitions::deliver_claimed(&state.db, id, token, code, text, &messages)
-                .await?;
+        Ok(check) => {
+            if check.messages.is_empty()
+                && (check.lifecycle == ActivationLifecycle::Closed || expired)
+            {
+                let _ = state.numbers.cancel_for(&provider, &provider_id).await;
+            }
+            number_order_transitions::apply_check(&state.db, id, Some(token), check).await?;
         }
-        Ok(ActivationState::Finished) => {
-            let _ = state.numbers.cancel_for(&provider, &provider_id).await;
-            number_order_transitions::apply_claimed(
+        Err(_) if status == "delivered" && expired => {
+            number_order_transitions::apply_check(
                 &state.db,
                 id,
-                token,
-                OrderTransition::Refund {
-                    status: RefundStatus::Expired,
-                    reason: "supplier_finished".into(),
-                },
+                Some(token),
+                ActivationCheck::closed(),
             )
             .await?;
-        }
-        Ok(ActivationState::Pending) if expired => {
-            let _ = state.numbers.cancel_for(&provider, &provider_id).await;
-            number_order_transitions::apply_claimed(
-                &state.db,
-                id,
-                token,
-                OrderTransition::Refund {
-                    status: RefundStatus::Expired,
-                    reason: "expired".into(),
-                },
-            )
-            .await?;
-        }
-        Ok(ActivationState::Pending) => {
-            let delay = if Utc::now() - created_at < chrono::Duration::minutes(5) {
-                10
-            } else {
-                30
-            };
-            release_order(&state.db, id, token, delay, None).await?;
         }
         Err(_) => {
             let attempts: i32 =
@@ -168,6 +146,24 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+pub(crate) async fn try_claim_order(db: &PgPool, id: Uuid) -> ApiResult<Option<Uuid>> {
+    sqlx::query_scalar(
+        "UPDATE number_orders
+            SET reconcile_claim_token = gen_random_uuid(),
+                reconcile_claimed_until = now() + interval '60 seconds',
+                updated_at = now()
+          WHERE id = $1
+            AND status IN ('reserved', 'awaiting_code')
+            AND (reconcile_claimed_until IS NULL OR reconcile_claimed_until < now())
+          RETURNING reconcile_claim_token",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    .map_err(anyhow::Error::from)
+    .map_err(ApiError::Internal)
 }
 
 async fn claim_slot(db: &PgPool, token: Uuid) -> ApiResult<Option<i16>> {
@@ -585,6 +581,260 @@ mod tests {
                 Some("provider_unavailable".into())
             )
         );
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn complete_check_settles_once_and_closes() {
+        let database = IsolatedDatabase::new("reconcile_complete_closes_test").await;
+        let token = Uuid::new_v4();
+        let id = expired_awaiting_order(&database.pool, token, "DONE").await;
+        sqlx::query("UPDATE number_orders SET expires_at = now() + interval '20 minutes' WHERE id=$1")
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let created_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT created_at FROM number_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::complete()),
+        );
+        process(
+            &state,
+            (
+                id,
+                token,
+                "awaiting_code".into(),
+                Some("provider-expiry-DONE".into()),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(20)),
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let row: (String, bool, bool, bool) = sqlx::query_as(
+            "SELECT status, activation_open, settled_journal_id IS NOT NULL, refunded_journal_id IS NOT NULL
+               FROM number_orders WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("delivered".into(), false, true, false));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn delivered_open_closes_without_refund() {
+        let database = IsolatedDatabase::new("reconcile_delivered_close_test").await;
+        let token = Uuid::new_v4();
+        let id = expired_awaiting_order(&database.pool, token, "LIVE").await;
+        sqlx::query("UPDATE number_orders SET expires_at = now() + interval '20 minutes' WHERE id=$1")
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let created_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT created_at FROM number_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        let expiry = Some(Utc::now() + chrono::Duration::minutes(20));
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::received()),
+        );
+        process(
+            &state,
+            (
+                id,
+                token,
+                "awaiting_code".into(),
+                Some("provider-expiry-LIVE".into()),
+                None,
+                expiry,
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let open: bool =
+            sqlx::query_scalar("SELECT activation_open FROM number_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert!(open);
+        let token2 = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1",
+        )
+        .bind(id)
+        .bind(token2)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::closed()),
+        );
+        process(
+            &state,
+            (
+                id,
+                token2,
+                "delivered".into(),
+                Some("provider-expiry-LIVE".into()),
+                None,
+                expiry,
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let row: (String, bool, i64) = sqlx::query_as(
+            "SELECT o.status, o.activation_open,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle')
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("delivered".into(), false, 1));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_retries_then_settles_once() {
+        // covers: AC-1 retry then one settle
+        let database = IsolatedDatabase::new("reconcile_retry_then_settle_test").await;
+        let token = Uuid::new_v4();
+        let id = expired_awaiting_order(&database.pool, token, "RETRY").await;
+        sqlx::query("UPDATE number_orders SET expires_at = now() + interval '20 minutes' WHERE id=$1")
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let created_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT created_at FROM number_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        let stub = ScriptedStubProvider::failing();
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(stub.clone()),
+        );
+        process(
+            &state,
+            (
+                id,
+                token,
+                "awaiting_code".into(),
+                Some("provider-expiry-RETRY".into()),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(20)),
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (status, settles): (String, i64) = sqlx::query_as(
+            "SELECT o.status,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle')
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "awaiting_code");
+        assert_eq!(settles, 0);
+
+        stub.set_check(Ok(crate::number_provider::ActivationCheck::open().with_messages(
+            vec![crate::number_provider::Sms {
+                sender: None,
+                text: "999111".into(),
+                code: Some("999111".into()),
+                received_at: None,
+                provider_message_id: None,
+            }],
+        ).with_closed_lifecycle()));
+        let token2 = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1",
+        )
+        .bind(id)
+        .bind(token2)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        process(
+            &state,
+            (
+                id,
+                token2,
+                "awaiting_code".into(),
+                Some("provider-expiry-RETRY".into()),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(20)),
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (status, settles, refunds): (String, i64, i64) = sqlx::query_as(
+            "SELECT o.status,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle'),
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_refund')
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "delivered");
+        assert_eq!(settles, 1);
+        assert_eq!(refunds, 0);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn two_workers_cannot_claim_the_same_order() {
+        // covers: two instances, one claim wins
+        let database = IsolatedDatabase::new("reconcile_two_worker_claim_test").await;
+        let token = Uuid::new_v4();
+        let id = expired_awaiting_order(&database.pool, token, "RACE").await;
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=NULL, reconcile_claimed_until=NULL, expires_at=now()+interval '20 minutes' WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let (left, right) = tokio::join!(
+            try_claim_order(&database.pool, id),
+            try_claim_order(&database.pool, id)
+        );
+        let claims = [left.unwrap(), right.unwrap()];
+        let won = claims.iter().filter(|c| c.is_some()).count();
+        let lost = claims.iter().filter(|c| c.is_none()).count();
+        assert_eq!(won, 1);
+        assert_eq!(lost, 1);
         database.cleanup().await;
     }
 }

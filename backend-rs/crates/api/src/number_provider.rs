@@ -47,6 +47,50 @@ pub struct Sms {
     pub text: String,
     pub code: Option<String>,
     pub received_at: Option<DateTime<Utc>>,
+    pub provider_message_id: Option<String>,
+}
+
+/// Whether the supplier still says this activation can receive SMS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationLifecycle {
+    Open,
+    Closed,
+}
+
+/// One provider check: messages plus whether the activation stays live.
+#[derive(Clone, Debug)]
+pub struct ActivationCheck {
+    pub messages: Vec<Sms>,
+    pub lifecycle: ActivationLifecycle,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl ActivationCheck {
+    pub fn open() -> Self {
+        Self {
+            messages: Vec::new(),
+            lifecycle: ActivationLifecycle::Open,
+            expires_at: None,
+        }
+    }
+
+    pub fn closed() -> Self {
+        Self {
+            messages: Vec::new(),
+            lifecycle: ActivationLifecycle::Closed,
+            expires_at: None,
+        }
+    }
+
+    pub fn with_messages(mut self, messages: Vec<Sms>) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    pub fn with_closed_lifecycle(mut self) -> Self {
+        self.lifecycle = ActivationLifecycle::Closed;
+        self
+    }
 }
 
 pub struct Activation {
@@ -60,23 +104,6 @@ pub struct Activation {
     pub cost_currency: Option<String>,
     /// When the supplier releases the number back to its pool.
     pub expires_at: Option<DateTime<Utc>>,
-}
-
-/// Where an order has got to, as the supplier sees it.
-#[derive(Clone)]
-pub enum ActivationState {
-    /// Bought, no SMS yet.
-    Pending,
-    Received {
-        code: String,
-        text: String,
-        /// Everything the number received, newest last. A number is live for
-        /// twenty minutes and can take several messages in that window; the
-        /// order settles on the first, and the rest still belong to the buyer.
-        messages: Vec<Sms>,
-    },
-    /// Cancelled, timed out, or banned — all of which mean no code is coming.
-    Finished,
 }
 
 #[derive(Clone)]
@@ -102,12 +129,12 @@ impl AnyNumberProvider {
         }
     }
 
-    pub async fn check(&self, order_id: &str) -> ApiResult<ActivationState> {
+    pub async fn check(&self, order_id: &str) -> ApiResult<ActivationCheck> {
         match self {
             AnyNumberProvider::FiveSim(p) => p.check(order_id).await,
             AnyNumberProvider::Stub(p) => p.check(order_id).await,
             #[cfg(test)]
-            AnyNumberProvider::CountingStub(_) => Ok(ActivationState::Pending),
+            AnyNumberProvider::CountingStub(_) => Ok(ActivationCheck::open()),
             #[cfg(test)]
             AnyNumberProvider::ScriptedStub(p) => p.check(order_id).await,
         }
@@ -198,7 +225,7 @@ impl NumberProviders {
         }
     }
 
-    pub async fn check_for(&self, provider: &str, order_id: &str) -> ApiResult<ActivationState> {
+    pub async fn check_for(&self, provider: &str, order_id: &str) -> ApiResult<ActivationCheck> {
         match provider {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.check(order_id).await,
@@ -257,6 +284,8 @@ struct FiveSimSms {
     /// 5SIM sends `date` on some routes and `created_at` on others.
     #[serde(default, alias = "created_at")]
     date: Option<DateTime<Utc>>,
+    #[serde(default)]
+    id: Option<serde_json::Value>,
 }
 
 impl FiveSimProvider {
@@ -333,7 +362,7 @@ impl FiveSimProvider {
         })
     }
 
-    async fn check(&self, order_id: &str) -> ApiResult<ActivationState> {
+    async fn check(&self, order_id: &str) -> ApiResult<ActivationCheck> {
         let response = self
             .http
             .get(format!("{FIVESIM_BASE}/check/{order_id}"))
@@ -358,35 +387,7 @@ impl FiveSimProvider {
             ApiError::ServiceUnavailable("We couldn't check that number just now.".into())
         })?;
 
-        // The SMS list is authoritative over status: a code that arrived is a
-        // code we owe the user, whatever the order's label says.
-        if !order.sms.is_empty() {
-            let messages: Vec<Sms> = order
-                .sms
-                .into_iter()
-                .map(|sms| Sms {
-                    sender: sms.sender,
-                    text: sms.text,
-                    code: sms.code,
-                    received_at: sms.date,
-                })
-                .collect();
-
-            // The order settles on the first message, which is the one the buyer
-            // was waiting for. `messages` carries the rest.
-            let first = &messages[0];
-            return Ok(ActivationState::Received {
-                code: first.code.clone().unwrap_or_else(|| first.text.clone()),
-                text: first.text.clone(),
-                messages,
-            });
-        }
-
-        match order.status.as_str() {
-            "PENDING" | "RECEIVED" => Ok(ActivationState::Pending),
-            // CANCELED, TIMEOUT, BANNED, FINISHED — no code is coming.
-            _ => Ok(ActivationState::Finished),
-        }
+        Ok(fivesim_activation_check(order))
     }
 
     async fn cancel(&self, order_id: &str) -> ApiResult<()> {
@@ -437,56 +438,137 @@ impl CountingStubProvider {
     }
 }
 
-fn stub_received() -> ActivationState {
-    ActivationState::Received {
-        code: "123456".into(),
-        text: "Your code is 123456".into(),
-        messages: vec![Sms {
-            sender: Some("Naivolt".into()),
-            text: "Your code is 123456".into(),
-            code: Some("123456".into()),
-            received_at: None,
-        }],
+fn fivesim_activation_check(order: FiveSimOrder) -> ActivationCheck {
+    let status = order.status.to_ascii_uppercase();
+    let waiting = matches!(status.as_str(), "PENDING" | "RECEIVED");
+    let closed = matches!(
+        status.as_str(),
+        "FINISHED" | "TIMEOUT" | "CANCELED" | "CANCELLED" | "BANNED"
+    );
+    let messages: Vec<Sms> = order
+        .sms
+        .into_iter()
+        .map(|sms| Sms {
+            sender: sms.sender,
+            text: sms.text,
+            code: sms.code,
+            received_at: sms.date,
+            provider_message_id: sms.id.and_then(|value| match value {
+                serde_json::Value::String(text) if !text.is_empty() => Some(text),
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                _ => None,
+            }),
+        })
+        .collect();
+    let lifecycle = if waiting && !closed {
+        ActivationLifecycle::Open
+    } else if closed || !waiting {
+        ActivationLifecycle::Closed
+    } else {
+        ActivationLifecycle::Open
+    };
+    ActivationCheck {
+        messages,
+        lifecycle,
+        expires_at: order.expires,
     }
+}
+
+fn stub_received() -> ActivationCheck {
+    ActivationCheck::open().with_messages(vec![Sms {
+        sender: Some("Naivolt".into()),
+        text: "Your code is 123456".into(),
+        code: Some("123456".into()),
+        received_at: None,
+        provider_message_id: None,
+    }])
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ScriptedBuy {
+    Succeed,
+    OutOfStock,
+    Ambiguous,
 }
 
 /// Test helper: `check()` returns a scripted supplier view, including failures.
 #[cfg(test)]
 #[derive(Clone)]
 pub struct ScriptedStubProvider {
-    check: std::sync::Arc<std::sync::Mutex<Result<ActivationState, String>>>,
+    check: std::sync::Arc<std::sync::Mutex<Result<ActivationCheck, String>>>,
+    buy: std::sync::Arc<std::sync::Mutex<ScriptedBuy>>,
 }
 
 #[cfg(test)]
 impl ScriptedStubProvider {
-    pub fn received() -> Self {
+    fn with_check(check: Result<ActivationCheck, String>) -> Self {
         Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(stub_received()))),
+            check: std::sync::Arc::new(std::sync::Mutex::new(check)),
+            buy: std::sync::Arc::new(std::sync::Mutex::new(ScriptedBuy::Succeed)),
         }
+    }
+
+    pub fn received() -> Self {
+        Self::with_check(Ok(stub_received()))
     }
 
     pub fn pending() -> Self {
-        Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(ActivationState::Pending))),
-        }
+        Self::with_check(Ok(ActivationCheck::open()))
+    }
+
+    pub fn closed() -> Self {
+        Self::with_check(Ok(ActivationCheck::closed()))
+    }
+
+    pub fn timeout() -> Self {
+        Self::closed()
+    }
+
+    pub fn complete() -> Self {
+        Self::with_check(Ok(stub_received().with_closed_lifecycle()))
     }
 
     pub fn failing() -> Self {
-        Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Err(
-                "supplier check unavailable".into(),
-            ))),
-        }
+        Self::with_check(Err("supplier check unavailable".into()))
+    }
+
+    pub fn malformed() -> Self {
+        Self::failing()
+    }
+
+    pub fn out_of_stock() -> Self {
+        let provider = Self::pending();
+        *provider.buy.lock().unwrap() = ScriptedBuy::OutOfStock;
+        provider
+    }
+
+    pub fn ambiguous() -> Self {
+        let provider = Self::pending();
+        *provider.buy.lock().unwrap() = ScriptedBuy::Ambiguous;
+        provider
+    }
+
+    pub fn set_check(&self, next: Result<ActivationCheck, String>) {
+        *self.check.lock().unwrap() = next;
     }
 
     async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
-        StubProvider.buy(country, product).await
+        let action = *self.buy.lock().unwrap();
+        match action {
+            ScriptedBuy::Succeed => StubProvider.buy(country, product).await,
+            ScriptedBuy::OutOfStock => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+                "That number is out of stock right now. Try another country.".into(),
+            ))),
+            ScriptedBuy::Ambiguous => Err(PurchaseError::Ambiguous),
+        }
     }
 
-    async fn check(&self, _order_id: &str) -> ApiResult<ActivationState> {
-        match &*self.check.lock().unwrap() {
-            Ok(state) => Ok(state.clone()),
-            Err(message) => Err(ApiError::ServiceUnavailable(message.clone())),
+    async fn check(&self, _order_id: &str) -> ApiResult<ActivationCheck> {
+        let snapshot = self.check.lock().unwrap().clone();
+        match snapshot {
+            Ok(state) => Ok(state),
+            Err(message) => Err(ApiError::ServiceUnavailable(message)),
         }
     }
 }
@@ -506,7 +588,7 @@ impl StubProvider {
         .inspect(|_| tracing::debug!(%country, %product, "stub number issued"))
     }
 
-    async fn check(&self, _order_id: &str) -> ApiResult<ActivationState> {
+    async fn check(&self, _order_id: &str) -> ApiResult<ActivationCheck> {
         Ok(stub_received())
     }
 }
@@ -554,5 +636,111 @@ mod tests {
         assert!(activation.phone.starts_with("+000"));
         assert!(activation.provider_order_id.starts_with("stub-"));
         assert!(activation.cost.is_none(), "a stub must not invent a cost");
+    }
+
+    fn fivesim_order(body: serde_json::Value) -> FiveSimOrder {
+        serde_json::from_value(body).expect("fixture must match the 5SIM check body")
+    }
+
+    #[test]
+    fn pending_and_received_stay_open_and_keep_sms() {
+        for status in ["PENDING", "pending", "RECEIVED", "Received"] {
+            let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+                "id": 1,
+                "phone": "+000",
+                "status": status,
+                "sms": [{
+                    "text": "Your code is 111111",
+                    "code": "111111",
+                    "sender": "WhatsApp",
+                    "id": 77
+                }]
+            })));
+            assert_eq!(
+                check.lifecycle,
+                ActivationLifecycle::Open,
+                "status {status} must stay open"
+            );
+            assert_eq!(check.messages.len(), 1);
+            assert_eq!(check.messages[0].code.as_deref(), Some("111111"));
+            assert_eq!(check.messages[0].provider_message_id.as_deref(), Some("77"));
+        }
+    }
+
+    #[test]
+    fn terminal_status_stores_final_sms_then_closes() {
+        for status in ["FINISHED", "finished", "TIMEOUT", "CANCELED", "CANCELLED", "BANNED"] {
+            let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+                "id": 2,
+                "phone": "+000",
+                "status": status,
+                "sms": [{
+                    "text": "final 999999",
+                    "code": "999999",
+                    "id": "sms-9"
+                }]
+            })));
+            assert_eq!(
+                check.lifecycle,
+                ActivationLifecycle::Closed,
+                "status {status} must close"
+            );
+            assert_eq!(check.messages.len(), 1);
+            assert_eq!(check.messages[0].code.as_deref(), Some("999999"));
+        }
+    }
+
+    #[test]
+    fn five_sim_http_paths_never_include_finish() {
+        let source = include_str!("number_provider.rs");
+        let finish_path = ["{FIVESIM_BASE}", "/finish"].concat();
+        assert!(
+            !source.contains(&finish_path),
+            "this slice must not call 5SIM finish"
+        );
+        assert!(source.contains("{FIVESIM_BASE}/check/{order_id}"));
+        assert!(source.contains("{FIVESIM_BASE}/cancel/{order_id}"));
+    }
+
+    #[tokio::test]
+    async fn timeout_and_malformed_checks_are_closed_or_errors() {
+        // covers: AC-6 scripted timeout (closed, no SMS) and malformed check Err
+        let timeout = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::timeout())
+            .check("any")
+            .await
+            .unwrap();
+        assert_eq!(timeout.lifecycle, ActivationLifecycle::Closed);
+        assert!(timeout.messages.is_empty());
+        assert!(
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::malformed())
+                .check("any")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_stock_buy_is_a_rejected_purchase() {
+        let err = match AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock())
+            .buy("nigeria", "whatsapp")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("out of stock must refuse the buy"),
+        };
+        assert!(err.is_out_of_stock());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_buy_is_not_a_refusal() {
+        let err = match AnyNumberProvider::ScriptedStub(ScriptedStubProvider::ambiguous())
+            .buy("nigeria", "whatsapp")
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an ambiguous buy must not look like success"),
+        };
+        assert!(matches!(err, PurchaseError::Ambiguous));
+        assert!(!err.is_out_of_stock());
     }
 }

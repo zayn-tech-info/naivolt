@@ -26,7 +26,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
-use crate::number_provider::{ActivationState, PurchaseError};
+use crate::number_provider::{ActivationLifecycle, PurchaseError};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -382,6 +382,8 @@ pub struct OrderResponse {
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offer_id: Option<Uuid>,
+    pub activation_open: bool,
+    pub cancellable: bool,
     /// Everything the number received. Empty on the list endpoint, which would
     /// otherwise fetch an inbox per row to render a summary nobody reads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -768,6 +770,7 @@ async fn create_order(
             SET status = 'awaiting_code', provider_order_id = $2, phone_number = $3,
                 provider_cost = $4, provider_cost_currency = $5,
                 expires_at = COALESCE($6, now() + interval '15 minutes'),
+                activation_open = true,
                 reconcile_next_at = now() + interval '10 seconds',
                 reconcile_claim_token = NULL, reconcile_claimed_until = NULL,
                 updated_at = now()
@@ -838,66 +841,105 @@ async fn cancel_order(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<OrderResponse>> {
-    let row: Option<(String, Option<String>, Decimal, String, String)> = sqlx::query_as(
-        "SELECT status, provider_order_id, price_ngn, reference, provider
-           FROM number_orders WHERE id = $1 AND user_id = $2",
+    let row: Option<(String, Option<String>, Option<String>, i64, String)> = sqlx::query_as(
+        "SELECT o.status, o.provider_order_id, o.sms_code,
+                (SELECT count(*) FROM number_messages m WHERE m.order_id = o.id),
+                o.provider
+           FROM number_orders o WHERE o.id = $1 AND o.user_id = $2",
     )
     .bind(id)
     .bind(user.id)
     .fetch_optional(&state.db)
     .await?;
 
-    let (status, provider_order_id, _price_ngn, _reference, provider) = row.ok_or(ApiError::NotFound)?;
+    let (status, provider_order_id, sms_code, message_count, provider) =
+        row.ok_or(ApiError::NotFound)?;
+    let locally_cancellable = matches!(status.as_str(), "reserved" | "awaiting_code")
+        && sms_code.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && message_count == 0;
 
-    if !matches!(status.as_str(), "reserved" | "awaiting_code") {
-        return load_order(&state, user.id, id).await.map(Json);
+    if !locally_cancellable {
+        if matches!(status.as_str(), "reserved" | "awaiting_code") {
+            if let Some(provider_order_id) = provider_order_id.as_deref() {
+                if let Ok(check) = state.numbers.check_for(&provider, provider_order_id).await {
+                    let _ = number_order_transitions::apply_check(&state.db, id, None, check).await;
+                }
+            }
+        }
+        return Err(ApiError::Conflict(
+            "That number already received a message, so it can't be cancelled.".into(),
+        ));
     }
 
-    // Ask the supplier whether a code already exists before refunding. A cancel
-    // that wins after SMS arrived at 5SIM would refund the customer while we
-    // still paid for the number. Terminal transitions stay serialized; this
-    // chooses the right terminal.
-    if let Some(provider_order_id) = provider_order_id.as_deref() {
-        match state.numbers.check_for(&provider, provider_order_id).await {
-            Ok(ActivationState::Received {
-                code,
-                text,
-                messages,
-            }) => {
-                number_order_transitions::deliver(&state.db, id, code, text, &messages).await?;
-                return load_order(&state, user.id, id).await.map(Json);
-            }
-            Ok(ActivationState::Finished) => {}
-            Ok(ActivationState::Pending) => {
-                if state.numbers.is_live() {
-                    if let Err(error) = state.numbers.cancel_for(&provider, provider_order_id).await {
-                        tracing::warn!(order = %id, error = %error, "supplier refused cancel");
-                        let current = load_order(&state, user.id, id).await?;
-                        if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
-                            return Ok(Json(current));
-                        }
-                        return Err(ApiError::ServiceUnavailable(
-                            "That number can't be released just yet — try again in a moment."
-                                .into(),
-                        ));
-                    }
+    let Some(claim) = crate::number_reconciler::try_claim_order(&state.db, id).await? else {
+        return Err(ApiError::Conflict(
+            "That number is already being updated. Try again in a moment.".into(),
+        ));
+    };
+
+    let Some(provider_order_id) = provider_order_id else {
+        number_order_transitions::apply_claimed(
+            &state.db,
+            id,
+            claim,
+            OrderTransition::Refund {
+                status: RefundStatus::Cancelled,
+                reason: "cancelled".into(),
+            },
+        )
+        .await?;
+        return load_order(&state, user.id, id).await.map(Json);
+    };
+
+    match state.numbers.check_for(&provider, &provider_order_id).await {
+        Ok(check) if !check.messages.is_empty() => {
+            number_order_transitions::apply_check(&state.db, id, Some(claim), check).await?;
+            return Err(ApiError::Conflict(
+                "That number already received a message, so it can't be cancelled.".into(),
+            ));
+        }
+        Ok(check) if check.lifecycle == ActivationLifecycle::Closed => {
+            number_order_transitions::apply_check(&state.db, id, Some(claim), check).await?;
+            return load_order(&state, user.id, id).await.map(Json);
+        }
+        Ok(_) => {
+            if state.numbers.is_live() {
+                if let Err(error) = state.numbers.cancel_for(&provider, &provider_order_id).await
+                {
+                    tracing::warn!(order = %id, error = %error, "supplier refused cancel");
+                    sqlx::query(
+                        "UPDATE number_orders SET reconcile_claim_token=NULL, reconcile_claimed_until=NULL, updated_at=now()
+                          WHERE id=$1 AND reconcile_claim_token=$2",
+                    )
+                    .bind(id)
+                    .bind(claim)
+                    .execute(&state.db)
+                    .await?;
+                    return Err(ApiError::ServiceUnavailable(
+                        "That number can't be released just yet — try again in a moment.".into(),
+                    ));
                 }
             }
-            Err(_) => {
-                let current = load_order(&state, user.id, id).await?;
-                if !matches!(current.status.as_str(), "reserved" | "awaiting_code") {
-                    return Ok(Json(current));
-                }
-                return Err(ApiError::ServiceUnavailable(
-                    "We couldn't check that number just now.".into(),
-                ));
-            }
+        }
+        Err(_) => {
+            sqlx::query(
+                "UPDATE number_orders SET reconcile_claim_token=NULL, reconcile_claimed_until=NULL, updated_at=now()
+                  WHERE id=$1 AND reconcile_claim_token=$2",
+            )
+            .bind(id)
+            .bind(claim)
+            .execute(&state.db)
+            .await?;
+            return Err(ApiError::ServiceUnavailable(
+                "We couldn't check that number just now.".into(),
+            ));
         }
     }
 
-    number_order_transitions::apply(
+    number_order_transitions::apply_claimed(
         &state.db,
         id,
+        claim,
         OrderTransition::Refund {
             status: RefundStatus::Cancelled,
             reason: "cancelled".into(),
@@ -910,7 +952,8 @@ async fn cancel_order(
 /// The columns every order response is built from, and the joins they need.
 /// Shared so the list and the single read cannot drift apart.
 const ORDER_COLUMNS: &str = "o.id, o.reference, p.name, c.name, c.code, o.price_ngn, \
-                             o.status, o.phone_number, o.sms_code, o.expires_at, o.created_at, o.offer_id";
+                             o.status, o.phone_number, o.sms_code, o.expires_at, o.created_at, o.offer_id, \
+                             o.activation_open, EXISTS(SELECT 1 FROM number_messages m WHERE m.order_id = o.id)";
 
 const ORDER_FROM: &str = "FROM number_orders o \
                           JOIN number_products  p ON p.id = o.product_id \
@@ -929,6 +972,8 @@ type OrderRow = (
     Option<DateTime<Utc>>,
     DateTime<Utc>,
     Option<Uuid>,
+    bool,
+    bool,
 );
 
 fn into_response(row: OrderRow) -> OrderResponse {
@@ -945,7 +990,13 @@ fn into_response(row: OrderRow) -> OrderResponse {
         expires_at,
         created_at,
         offer_id,
+        activation_open,
+        has_messages,
     ) = row;
+
+    let cancellable = matches!(status.as_str(), "reserved" | "awaiting_code")
+        && code.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && !has_messages;
 
     OrderResponse {
         id,
@@ -960,6 +1011,8 @@ fn into_response(row: OrderRow) -> OrderResponse {
         expires_at: expires_at.map(|t| t.to_rfc3339()),
         created_at: created_at.to_rfc3339(),
         offer_id,
+        activation_open,
+        cancellable,
         messages: Vec::new(),
     }
 }
@@ -978,7 +1031,7 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
     let messages: Vec<(Option<String>, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT sender, text, code, received_at
            FROM number_messages WHERE order_id = $1
-          ORDER BY received_at",
+          ORDER BY received_at, id",
     )
     .bind(id)
     .fetch_all(&state.db)
@@ -993,6 +1046,9 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
             received_at: received_at.to_rfc3339(),
         })
         .collect();
+    response.cancellable = matches!(response.status.as_str(), "reserved" | "awaiting_code")
+        && response.code.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && response.messages.is_empty();
 
     Ok(response)
 }
@@ -1001,6 +1057,9 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
 mod tests {
     use super::*;
     use crate::config::{Config, Environment};
+    use axum::extract::FromRequestParts;
+    use axum::response::IntoResponse;
+    use serde::Serialize;
     use crate::funding_provider::{AnyFundingProvider, StubFunding};
     use crate::google_keys::GoogleKeys;
     use crate::notify::{AnyNotifier, LogNotifier};
@@ -1403,25 +1462,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_delivers_when_the_supplier_already_has_sms() {
+    async fn cancel_conflicts_when_the_supplier_already_has_sms() {
         let database = IsolatedDatabase::new("number_cancel_received_test").await;
         let (user_id, order_id) = awaiting_code_order(&database.pool, "RECV").await;
         let state = test_state(
             database.pool.clone(),
             AnyNumberProvider::ScriptedStub(ScriptedStubProvider::received()),
         );
-        let response = cancel_order(State(state), CurrentUser {
+        let err = match cancel_order(State(state), CurrentUser {
             id: user_id,
             tier_at_issue: 0,
             session_family: Uuid::new_v4(),
         }, Path(order_id))
         .await
-        .unwrap()
-        .0;
-        assert_eq!(response.status, "delivered");
-        assert_eq!(response.code.as_deref(), Some("123456"));
-        let journals: (i64, i64) = sqlx::query_as(
-            "SELECT
+        {
+            Ok(_) => panic!("expected cancel to be blocked after SMS"),
+            Err(error) => error,
+        };
+        assert!(matches!(err, ApiError::Conflict(_)));
+        let journals: (String, i64, i64) = sqlx::query_as(
+            "SELECT status,
                 (CASE WHEN settled_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT,
                 (CASE WHEN refunded_journal_id IS NOT NULL THEN 1 ELSE 0 END)::BIGINT
                FROM number_orders WHERE id = $1",
@@ -1430,7 +1490,7 @@ mod tests {
         .fetch_one(&database.pool)
         .await
         .unwrap();
-        assert_eq!(journals, (1, 0));
+        assert_eq!(journals, ("delivered".into(), 1, 0));
         database.cleanup().await;
     }
 
@@ -1484,6 +1544,46 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+        let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id = $1")
+            .bind(order_id)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "awaiting_code");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_conflicts_when_reconcile_claim_is_held() {
+        let database = IsolatedDatabase::new("number_cancel_claim_held_test").await;
+        let (user_id, order_id) = awaiting_code_order(&database.pool, "HELD").await;
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1",
+        )
+        .bind(order_id)
+        .bind(Uuid::new_v4())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::pending()),
+        );
+        let err = match cancel_order(
+            State(state),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            Path(order_id),
+        )
+        .await
+        {
+            Ok(_) => panic!("expected cancel to wait on the live claim"),
+            Err(error) => error,
+        };
+        assert!(matches!(err, ApiError::Conflict(_)));
         let status: String = sqlx::query_scalar("SELECT status FROM number_orders WHERE id = $1")
             .bind(order_id)
             .fetch_one(&database.pool)
@@ -1829,6 +1929,582 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(orders, 0);
+        database.cleanup().await;
+    }
+
+    fn owner(id: Uuid) -> CurrentUser {
+        CurrentUser {
+            id,
+            tier_at_issue: 0,
+            session_family: Uuid::new_v4(),
+        }
+    }
+
+    fn expect_err<T>(result: ApiResult<T>) -> ApiError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected the handler to fail"),
+        }
+    }
+
+    fn json_hides_suppliers<T: Serialize>(value: &T) {
+        let blob = serde_json::to_string(value).unwrap().to_ascii_lowercase();
+        assert!(!blob.contains("smspool"));
+        assert!(!blob.contains("5sim"));
+        assert!(!blob.contains("fivesim"));
+        assert!(!blob.contains("\"provider\""));
+    }
+
+    fn wire_json<T: Serialize>(value: &T) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    async fn error_body(error: ApiError) -> serde_json::Value {
+        let response = error.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn idempotency_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn catalog_products_and_countries_honour_stock_and_search_limits() {
+        // covers: AC-1 AC-3 (0004) public catalogue, no supplier names, empty stock
+        let database = IsolatedDatabase::new("number_catalog_limits").await;
+        let pool = database.pool.clone();
+        let (slug, _country, _price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        sqlx::query("UPDATE number_prices SET stock = 8")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE number_prices SET stock = 0
+              WHERE product_id = (SELECT id FROM number_products WHERE slug = $1)",
+        )
+        .bind(&slug)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let featured = catalog(State(state.clone())).await.unwrap().0;
+        json_hides_suppliers(&featured);
+        let featured_json = wire_json(&featured);
+        let matching = featured.iter().find(|product| product.slug == slug);
+        if let Some(product) = matching {
+            assert!(product.countries.iter().all(|country| !country.in_stock));
+            assert!(product.countries.iter().all(|country| {
+                country.price_ngn.parse::<rust_decimal::Decimal>().is_ok()
+            }));
+            let json_product = featured_json
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["slug"] == slug)
+                .unwrap();
+            assert_eq!(json_product["countries"][0]["inStock"], false);
+            assert!(json_product["countries"][0]["priceNgn"].is_string());
+        }
+
+        let page = products(
+            State(state.clone()),
+            Query(ProductQuery {
+                q: None,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(page.len(), 1);
+        assert_ne!(page[0].slug, slug);
+        json_hides_suppliers(&page);
+
+        let search = products(
+            State(state.clone()),
+            Query(ProductQuery {
+                q: Some("zzzz-no-such-product".into()),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(search.is_empty());
+
+        sqlx::query("UPDATE number_products SET sort_order = 900 WHERE slug = $1")
+            .bind(&slug)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let featured_after = catalog(State(state.clone())).await.unwrap().0;
+        assert!(featured_after.iter().all(|product| product.slug != slug));
+
+        let unknown = expect_err(
+            list_offers(
+                State(state.clone()),
+                Query(OfferQuery {
+                    product: "not-a-real-product".into(),
+                    country: None,
+                }),
+            )
+            .await,
+        );
+        assert!(matches!(unknown, ApiError::BadRequest(_)));
+
+        let empty_country = list_offers(
+            State(state.clone()),
+            Query(OfferQuery {
+                product: slug.clone(),
+                country: Some("ZZ".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(empty_country.is_empty());
+        json_hides_suppliers(&empty_country);
+
+        let countries = product_countries(State(state), Path(slug.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert!(countries.is_empty());
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn private_number_routes_reject_a_missing_bearer_token() {
+        // covers: AC-4 private number routes require a bearer token
+        use tower::ServiceExt;
+        let database = IsolatedDatabase::new("number_auth_missing").await;
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let request = axum::http::Request::builder()
+            .uri("/numbers/orders")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let rejected = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(error) => error,
+            Ok(_) => panic!("a missing bearer token must not authenticate"),
+        };
+        assert!(matches!(rejected, ApiError::Unauthorized));
+
+        let bad = axum::http::Request::builder()
+            .uri("/numbers/orders")
+            .header(axum::http::header::AUTHORIZATION, "Bearer not-a-token")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = bad.into_parts();
+        let rejected = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(error) => error,
+            Ok(_) => panic!("a forged bearer token must not authenticate"),
+        };
+        assert!(matches!(rejected, ApiError::Unauthorized));
+
+        let app = routes().with_state(state);
+        for uri in [
+            "/numbers/orders",
+            "/numbers/orders/00000000-0000-0000-0000-000000000001",
+            "/numbers/orders/00000000-0000-0000-0000-000000000001/cancel",
+        ] {
+            let method = if uri.ends_with("/cancel") {
+                axum::http::Method::POST
+            } else {
+                axum::http::Method::GET
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], "UNAUTHORIZED");
+            json_hides_suppliers(&body);
+        }
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn another_user_cannot_read_or_cancel_an_order() {
+        // covers: AC-4 ownership, no inbox leak to another user
+        let database = IsolatedDatabase::new("number_ownership").await;
+        let pool = database.pool.clone();
+        let owner_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "owner@example.test",
+            dec!(100000),
+        )
+        .await;
+        let stranger_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "stranger@example.test",
+            dec!(100000),
+        )
+        .await;
+        let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        let created = create_order(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            owner(owner_id),
+            idempotency_headers(),
+            Json(CreateOrderBody {
+                offer_id: None,
+                product_slug,
+                country_code,
+                expected_price_ngn: Some(price.normalize().to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let read = expect_err(
+            get_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(stranger_id),
+                Path(created.id),
+            )
+            .await,
+        );
+        assert!(matches!(read, ApiError::NotFound));
+
+        let cancel = expect_err(
+            cancel_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(stranger_id),
+                Path(created.id),
+            )
+            .await,
+        );
+        assert!(matches!(cancel, ApiError::NotFound));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn list_and_detail_include_lifecycle_fields_without_supplier_names() {
+        // covers: AC-3 (0004) AC-7 AC-9 (0005) activationOpen, cancellable, camelCase
+        let database = IsolatedDatabase::new("number_lifecycle_json").await;
+        let pool = database.pool.clone();
+        let user_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "lifecycle@example.test",
+            dec!(100000),
+        )
+        .await;
+        let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        let created = create_order(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            owner(user_id),
+            idempotency_headers(),
+            Json(CreateOrderBody {
+                offer_id: None,
+                product_slug,
+                country_code,
+                expected_price_ngn: Some(price.normalize().to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        sqlx::query(
+            "INSERT INTO number_messages (order_id, sender, text, received_at)
+             VALUES ($1, 'A', 'first', NOW() - INTERVAL '2 minutes'),
+                    ($1, 'B', 'second', NOW() - INTERVAL '1 minute')",
+        )
+        .bind(created.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let listed = list_orders(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            owner(user_id),
+        )
+        .await
+        .unwrap()
+        .0;
+        json_hides_suppliers(&listed);
+        let listed_json = wire_json(&listed);
+        assert_eq!(listed[0].id, created.id);
+        assert!(listed[0].activation_open);
+        assert!(!listed[0].cancellable);
+        assert!(listed[0].messages.is_empty());
+        assert_eq!(listed[0].price_ngn, price.normalize().to_string());
+        assert_eq!(listed_json[0]["activationOpen"], true);
+        assert_eq!(listed_json[0]["cancellable"], false);
+        assert_eq!(listed_json[0]["priceNgn"], price.normalize().to_string());
+        assert!(listed_json[0].get("expiresAt").is_some());
+        assert!(listed_json[0].get("messages").is_none());
+
+        let detail = get_order(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            owner(user_id),
+            Path(created.id),
+        )
+        .await
+        .unwrap()
+        .0;
+        json_hides_suppliers(&detail);
+        let detail_json = wire_json(&detail);
+        assert!(detail.activation_open);
+        assert!(!detail.cancellable);
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].text, "first");
+        assert_eq!(detail.messages[1].text, "second");
+        assert_eq!(detail_json["activationOpen"], true);
+        assert_eq!(detail_json["priceNgn"], price.normalize().to_string());
+        assert_eq!(detail_json["messages"][0]["receivedAt"].as_str().is_some(), true);
+        assert_eq!(detail_json["messages"][0]["text"], "first");
+        assert_eq!(detail_json["messages"][1]["text"], "second");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn create_order_rejects_a_stale_price_and_insufficient_balance() {
+        // covers: AC-7 (0004) PriceMoved; insufficient balance leaves no order
+        let database = IsolatedDatabase::new("number_price_balance").await;
+        let pool = database.pool.clone();
+        let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        let broke_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "broke@example.test",
+            dec!(1),
+        )
+        .await;
+        let funded_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "priced@example.test",
+            dec!(100000),
+        )
+        .await;
+
+        let stale = expect_err(
+            create_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(funded_id),
+                idempotency_headers(),
+                Json(CreateOrderBody {
+                    offer_id: None,
+                    product_slug: product_slug.clone(),
+                    country_code: country_code.clone(),
+                    expected_price_ngn: Some((price - dec!(1)).normalize().to_string()),
+                }),
+            )
+            .await,
+        );
+        let stale_body = error_body(stale).await;
+        assert_eq!(stale_body["code"], "PRICE_MOVED");
+        assert_eq!(stale_body["meta"]["priceNgn"], price.normalize().to_string());
+        json_hides_suppliers(&stale_body);
+
+        let broke = expect_err(
+            create_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(broke_id),
+                idempotency_headers(),
+                Json(CreateOrderBody {
+                    offer_id: None,
+                    product_slug,
+                    country_code,
+                    expected_price_ngn: Some(price.normalize().to_string()),
+                }),
+            )
+            .await,
+        );
+        assert!(matches!(broke, ApiError::InsufficientBalance));
+        let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM number_orders")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(orders, 0);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn funding_then_a_stub_buy_reserves_once() {
+        // covers: funding credit then spend; one number_reserve, no settle yet
+        let database = IsolatedDatabase::new("number_fund_spend").await;
+        let pool = database.pool.clone();
+        let user_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "fund-spend@example.test",
+            dec!(100000),
+        )
+        .await;
+        let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        let created = create_order(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            owner(user_id),
+            idempotency_headers(),
+            Json(CreateOrderBody {
+                offer_id: None,
+                product_slug,
+                country_code,
+                expected_price_ngn: Some(price.normalize().to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(created.status, "awaiting_code");
+        assert!(created
+            .phone_number
+            .as_deref()
+            .unwrap()
+            .starts_with("+000"));
+        json_hides_suppliers(&created);
+
+        let (reserves, settlements, refunds): (i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                COUNT(*) FILTER (WHERE kind = 'number_reserve'),
+                COUNT(*) FILTER (WHERE kind = 'number_settle'),
+                COUNT(*) FILTER (WHERE kind = 'number_refund')
+               FROM ledger_journals
+              WHERE reference = $1",
+        )
+        .bind(&created.reference)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reserves, 1);
+        assert_eq!(settlements, 0);
+        assert_eq!(refunds, 0);
+
+        let remaining: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(e.amount), 0)
+               FROM ledger_entries e
+               JOIN ledger_accounts a ON a.id = e.account_id
+              WHERE a.user_id = $1 AND a.kind = 'user_ngn'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            AccountKind::UserNgn.user_facing_balance(remaining),
+            dec!(100000) - price
+        );
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn out_of_stock_buy_refunds_the_reservation() {
+        // covers: refused buy refunds; user NGN restored
+        let database = IsolatedDatabase::new("number_oos_refund").await;
+        let pool = database.pool.clone();
+        let user_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "oos@example.test",
+            dec!(100000),
+        )
+        .await;
+        let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        let err = expect_err(
+            create_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock()),
+                )),
+                owner(user_id),
+                idempotency_headers(),
+                Json(CreateOrderBody {
+                    offer_id: None,
+                    product_slug,
+                    country_code,
+                    expected_price_ngn: Some(price.normalize().to_string()),
+                }),
+            )
+            .await,
+        );
+        match &err {
+            ApiError::ServiceUnavailable(message) => {
+                assert!(message.contains("out of stock"));
+            }
+            other => panic!("expected out of stock, got {other:?}"),
+        }
+        json_hides_suppliers(&err.to_string());
+
+        let (status, reason, reserves, refunds): (String, Option<String>, i64, i64) =
+            sqlx::query_as(
+                "SELECT o.status, o.failure_reason,
+                        (SELECT count(*) FROM ledger_journals j
+                          WHERE j.reference = o.reference AND j.kind = 'number_reserve'),
+                        (SELECT count(*) FROM ledger_journals j
+                          WHERE j.reference = o.reference AND j.kind = 'number_refund')
+                   FROM number_orders o WHERE o.user_id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(reason.as_deref(), Some("supplier_rejected"));
+        assert_eq!(reserves, 1);
+        assert_eq!(refunds, 1);
+
+        let remaining: Decimal = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(e.amount), 0)
+               FROM ledger_entries e
+               JOIN ledger_accounts a ON a.id = e.account_id
+              WHERE a.user_id = $1 AND a.kind = 'user_ngn'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            AccountKind::UserNgn.user_facing_balance(remaining),
+            dec!(100000)
+        );
         database.cleanup().await;
     }
 }

@@ -1,3 +1,4 @@
+use rust_decimal::Decimal;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use std::str::FromStr;
@@ -26,6 +27,30 @@ impl IsolatedDatabase {
             .connect(&database_url)
             .await
             .expect("PostgreSQL integration test database must be reachable");
+        // pgcrypto must live in public. IsolatedDatabase sets search_path to a
+        // throwaway schema first, so a bare CREATE EXTENSION in 0001 would
+        // install digest() into that schema. Parallel tests then skip the
+        // extension (it already exists) and fail with digest(text, unknown)
+        // does not exist. CREATE EXTENSION IF NOT EXISTS still races, so lock.
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(872_514_001_i64)
+            .execute(&admin)
+            .await
+            .expect("pgcrypto install lock must be taken");
+        let pgcrypto = admin
+            .execute("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
+            .await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(872_514_001_i64)
+            .execute(&admin)
+            .await;
+        match pgcrypto {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {}
+            Err(err) => panic!(
+                "pgcrypto must be available in public for IsolatedDatabase migrations: {err}"
+            ),
+        }
         let schema = format!("{prefix}_{}", Uuid::new_v4().simple());
         admin
             .execute(format!("CREATE SCHEMA {schema}").as_str())
@@ -65,6 +90,80 @@ impl IsolatedDatabase {
             schema,
             cleaned: false,
         }
+    }
+
+    /// A user whose Naira liability already shows a spendable credit.
+    pub(crate) async fn insert_funded_user(
+        pool: &PgPool,
+        email: &str,
+        balance_ngn: Decimal,
+    ) -> Uuid {
+        let user_id: Uuid = sqlx::query_scalar("INSERT INTO users (email) VALUES ($1) RETURNING id")
+            .bind(email)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let user_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, user_id, asset)
+             VALUES ('user_ngn', $1, 'NGN') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let float_account: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM ledger_accounts
+              WHERE kind = 'ngn_float' AND user_id IS NULL AND asset = 'NGN'",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        let float_account = match float_account {
+            Some(id) => id,
+            None => sqlx::query_scalar(
+                "INSERT INTO ledger_accounts (kind, asset)
+                 VALUES ('ngn_float', 'NGN') RETURNING id",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+        };
+        let funding_journal: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('ngn_funding', $1, $1) RETURNING id",
+        )
+        .bind(format!("fund-{user_id}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', $4), ($1, $3, 'NGN', $5)",
+        )
+        .bind(funding_journal)
+        .bind(user_account)
+        .bind(float_account)
+        .bind(-balance_ngn)
+        .bind(balance_ngn)
+        .execute(pool)
+        .await
+        .unwrap();
+        user_id
+    }
+
+    pub(crate) async fn first_listed_sku(pool: &PgPool) -> (String, String, Decimal) {
+        sqlx::query_as(
+            "SELECT p.slug, c.code, pr.price_ngn
+               FROM number_prices pr
+               JOIN number_products p ON p.id = pr.product_id
+               JOIN number_countries c ON c.id = pr.country_id
+              WHERE pr.active AND p.active AND c.active
+              ORDER BY p.sort_order, c.sort_order, p.slug, c.code
+              LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     pub(crate) async fn cleanup(mut self) {

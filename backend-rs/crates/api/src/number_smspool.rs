@@ -2,7 +2,7 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::number_offers::OfferSku;
-use crate::number_provider::{Activation, ActivationState, PurchaseError, Sms};
+use crate::number_provider::{Activation, ActivationCheck, ActivationLifecycle, PurchaseError, Sms};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -175,7 +175,7 @@ impl SmsPoolProvider {
         })
     }
 
-    pub async fn check(&self, order_id: &str) -> ApiResult<ActivationState> {
+    pub async fn check(&self, order_id: &str) -> ApiResult<ActivationCheck> {
         let url = format!("{}/sms/check", self.base.trim_end_matches('/'));
         let response = self
             .http
@@ -196,33 +196,7 @@ impl SmsPoolProvider {
         let body: Value = response.json().await.map_err(|_| {
             ApiError::ServiceUnavailable("We couldn't check that number just now.".into())
         })?;
-        let status = body
-            .get("status")
-            .and_then(|v| v.as_i64())
-            .or_else(|| body.get("status").and_then(Value::as_str).and_then(|s| s.parse().ok()));
-        let code = body
-            .get("sms")
-            .or_else(|| body.get("code"))
-            .and_then(Value::as_str)
-            .map(|s| s.to_string());
-        if let Some(code) = code.filter(|s| !s.is_empty()) {
-            return Ok(ActivationState::Received {
-                code: code.clone(),
-                text: code.clone(),
-                messages: vec![Sms {
-                    sender: None,
-                    text: code.clone(),
-                    code: Some(code.clone()),
-                    received_at: Some(Utc::now()),
-                }],
-            });
-        }
-        match status {
-            Some(1) | Some(8) => Ok(ActivationState::Pending),
-            Some(3) | Some(4) => Ok(ActivationState::Pending),
-            Some(5) | Some(6) => Ok(ActivationState::Finished),
-            _ => Ok(ActivationState::Pending),
-        }
+        Ok(parse_smspool_check(&body))
     }
 
     pub async fn cancel(&self, order_id: &str) -> ApiResult<()> {
@@ -437,6 +411,56 @@ fn skus_from_success_rows(
     skus
 }
 
+fn parse_smspool_check(body: &Value) -> ActivationCheck {
+    let status = body
+        .get("status")
+        .and_then(|v| v.as_i64())
+        .or_else(|| {
+            body.get("status")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok())
+        });
+    let code = body
+        .get("sms")
+        .or_else(|| body.get("code"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    let full = body
+        .get("full_sms")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+    let messages = match (&code, &full) {
+        (None, None) => Vec::new(),
+        (Some(code), text) => vec![Sms {
+            sender: None,
+            text: text.clone().unwrap_or_else(|| code.clone()),
+            code: Some(code.clone()),
+            received_at: None,
+            provider_message_id: None,
+        }],
+        (None, Some(text)) => vec![Sms {
+            sender: None,
+            text: text.clone(),
+            code: None,
+            received_at: None,
+            provider_message_id: None,
+        }],
+    };
+    let lifecycle = match status {
+        Some(3) | Some(5) | Some(6) => ActivationLifecycle::Closed,
+        _ => ActivationLifecycle::Open,
+    };
+    ActivationCheck {
+        messages,
+        lifecycle,
+        expires_at: None,
+    }
+}
+
 fn map_country(name: &str) -> Option<String> {
     let n = name.to_ascii_lowercase();
     let code = match n.as_str() {
@@ -510,5 +534,32 @@ mod tests {
         assert_eq!(google.provider_id, "395");
         let whatsapp = mapped.iter().find(|s| s.slug == "whatsapp").unwrap();
         assert_eq!(whatsapp.provider_id, "1012");
+    }
+
+    #[test]
+    fn check_status_three_with_code_is_closed() {
+        let check = parse_smspool_check(&json!({
+            "status": 3,
+            "sms": "12345",
+            "full_sms": "Full code: 12345"
+        }));
+        assert_eq!(check.lifecycle, ActivationLifecycle::Closed);
+        assert_eq!(check.messages.len(), 1);
+        assert_eq!(check.messages[0].code.as_deref(), Some("12345"));
+        assert!(check.messages[0].received_at.is_none());
+    }
+
+    #[test]
+    fn check_status_three_without_code_is_closed() {
+        let check = parse_smspool_check(&json!({ "status": 3 }));
+        assert_eq!(check.lifecycle, ActivationLifecycle::Closed);
+        assert!(check.messages.is_empty());
+    }
+
+    #[test]
+    fn check_unknown_status_stays_open() {
+        let check = parse_smspool_check(&json!({ "status": 99 }));
+        assert_eq!(check.lifecycle, ActivationLifecycle::Open);
+        assert!(check.messages.is_empty());
     }
 }
