@@ -484,51 +484,83 @@ fn stub_received() -> ActivationCheck {
     }])
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ScriptedBuy {
+    Succeed,
+    OutOfStock,
+    Ambiguous,
+}
+
 /// Test helper: `check()` returns a scripted supplier view, including failures.
 #[cfg(test)]
 #[derive(Clone)]
 pub struct ScriptedStubProvider {
     check: std::sync::Arc<std::sync::Mutex<Result<ActivationCheck, String>>>,
+    buy: std::sync::Arc<std::sync::Mutex<ScriptedBuy>>,
 }
 
 #[cfg(test)]
 impl ScriptedStubProvider {
-    pub fn received() -> Self {
+    fn with_check(check: Result<ActivationCheck, String>) -> Self {
         Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(stub_received()))),
+            check: std::sync::Arc::new(std::sync::Mutex::new(check)),
+            buy: std::sync::Arc::new(std::sync::Mutex::new(ScriptedBuy::Succeed)),
         }
+    }
+
+    pub fn received() -> Self {
+        Self::with_check(Ok(stub_received()))
     }
 
     pub fn pending() -> Self {
-        Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(ActivationCheck::open()))),
-        }
+        Self::with_check(Ok(ActivationCheck::open()))
     }
 
     pub fn closed() -> Self {
-        Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(ActivationCheck::closed()))),
-        }
+        Self::with_check(Ok(ActivationCheck::closed()))
+    }
+
+    pub fn timeout() -> Self {
+        Self::closed()
     }
 
     pub fn complete() -> Self {
-        Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(
-                stub_received().with_closed_lifecycle(),
-            ))),
-        }
+        Self::with_check(Ok(stub_received().with_closed_lifecycle()))
     }
 
     pub fn failing() -> Self {
-        Self {
-            check: std::sync::Arc::new(std::sync::Mutex::new(Err(
-                "supplier check unavailable".into(),
-            ))),
-        }
+        Self::with_check(Err("supplier check unavailable".into()))
+    }
+
+    pub fn malformed() -> Self {
+        Self::failing()
+    }
+
+    pub fn out_of_stock() -> Self {
+        let provider = Self::pending();
+        *provider.buy.lock().unwrap() = ScriptedBuy::OutOfStock;
+        provider
+    }
+
+    pub fn ambiguous() -> Self {
+        let provider = Self::pending();
+        *provider.buy.lock().unwrap() = ScriptedBuy::Ambiguous;
+        provider
+    }
+
+    pub fn set_check(&self, next: Result<ActivationCheck, String>) {
+        *self.check.lock().unwrap() = next;
     }
 
     async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
-        StubProvider.buy(country, product).await
+        match *self.buy.lock().unwrap() {
+            ScriptedBuy::Succeed => StubProvider.buy(country, product).await,
+            ScriptedBuy::OutOfStock => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+                "That number is out of stock right now. Try another country.".into(),
+            ))),
+            ScriptedBuy::Ambiguous => Err(PurchaseError::Ambiguous),
+        }
     }
 
     async fn check(&self, _order_id: &str) -> ApiResult<ActivationCheck> {
@@ -666,5 +698,40 @@ mod tests {
         );
         assert!(source.contains("{FIVESIM_BASE}/check/{order_id}"));
         assert!(source.contains("{FIVESIM_BASE}/cancel/{order_id}"));
+    }
+
+    #[tokio::test]
+    async fn timeout_and_malformed_checks_are_closed_or_errors() {
+        let timeout = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::timeout())
+            .check("any")
+            .await
+            .unwrap();
+        assert_eq!(timeout.lifecycle, ActivationLifecycle::Closed);
+        assert!(timeout.messages.is_empty());
+        assert!(
+            AnyNumberProvider::ScriptedStub(ScriptedStubProvider::malformed())
+                .check("any")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_stock_buy_is_a_rejected_purchase() {
+        let err = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock())
+            .buy("nigeria", "whatsapp")
+            .await
+            .unwrap_err();
+        assert!(err.is_out_of_stock());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_buy_is_not_a_refusal() {
+        let err = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::ambiguous())
+            .buy("nigeria", "whatsapp")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PurchaseError::Ambiguous));
+        assert!(!err.is_out_of_stock());
     }
 }

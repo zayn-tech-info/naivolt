@@ -714,4 +714,125 @@ mod tests {
         assert_eq!(row, ("delivered".into(), false, 1));
         database.cleanup().await;
     }
+
+    #[tokio::test]
+    async fn a_failed_check_retries_then_settles_once() {
+        let database = IsolatedDatabase::new("reconcile_retry_then_settle_test").await;
+        let token = Uuid::new_v4();
+        let id = expired_awaiting_order(&database.pool, token, "RETRY").await;
+        sqlx::query("UPDATE number_orders SET expires_at = now() + interval '20 minutes' WHERE id=$1")
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let created_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT created_at FROM number_orders WHERE id=$1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        let stub = ScriptedStubProvider::failing();
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::ScriptedStub(stub.clone()),
+        );
+        process(
+            &state,
+            (
+                id,
+                token,
+                "awaiting_code".into(),
+                Some("provider-expiry-RETRY".into()),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(20)),
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (status, settles): (String, i64) = sqlx::query_as(
+            "SELECT o.status,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle')
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "awaiting_code");
+        assert_eq!(settles, 0);
+
+        stub.set_check(Ok(crate::number_provider::ActivationCheck::open().with_messages(
+            vec![crate::number_provider::Sms {
+                sender: None,
+                text: "999111".into(),
+                code: Some("999111".into()),
+                received_at: None,
+                provider_message_id: None,
+            }],
+        ).with_closed_lifecycle()));
+        let token2 = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=$2, reconcile_claimed_until=now()+interval '60 seconds' WHERE id=$1",
+        )
+        .bind(id)
+        .bind(token2)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        process(
+            &state,
+            (
+                id,
+                token2,
+                "awaiting_code".into(),
+                Some("provider-expiry-RETRY".into()),
+                None,
+                Some(Utc::now() + chrono::Duration::minutes(20)),
+                created_at,
+                "stub".into(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (status, settles, refunds): (String, i64, i64) = sqlx::query_as(
+            "SELECT o.status,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_settle'),
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_refund')
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "delivered");
+        assert_eq!(settles, 1);
+        assert_eq!(refunds, 0);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn two_workers_cannot_claim_the_same_order() {
+        let database = IsolatedDatabase::new("reconcile_two_worker_claim_test").await;
+        let token = Uuid::new_v4();
+        let id = expired_awaiting_order(&database.pool, token, "RACE").await;
+        sqlx::query(
+            "UPDATE number_orders SET reconcile_claim_token=NULL, reconcile_claimed_until=NULL, expires_at=now()+interval '20 minutes' WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let (left, right) = tokio::join!(
+            try_claim_order(&database.pool, id),
+            try_claim_order(&database.pool, id)
+        );
+        let claims = [left.unwrap(), right.unwrap()];
+        let won = claims.iter().filter(|c| c.is_some()).count();
+        let lost = claims.iter().filter(|c| c.is_none()).count();
+        assert_eq!(won, 1);
+        assert_eq!(lost, 1);
+        database.cleanup().await;
+    }
 }
