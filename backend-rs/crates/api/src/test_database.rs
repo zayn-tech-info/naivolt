@@ -31,11 +31,26 @@ impl IsolatedDatabase {
         // throwaway schema first, so a bare CREATE EXTENSION in 0001 would
         // install digest() into that schema. Parallel tests then skip the
         // extension (it already exists) and fail with digest(text, unknown)
-        // does not exist.
-        admin
-            .execute("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
+        // does not exist. CREATE EXTENSION IF NOT EXISTS still races, so lock.
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(872_514_001_i64)
+            .execute(&admin)
             .await
-            .expect("pgcrypto must be available in public for IsolatedDatabase migrations");
+            .expect("pgcrypto install lock must be taken");
+        let pgcrypto = admin
+            .execute("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
+            .await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(872_514_001_i64)
+            .execute(&admin)
+            .await;
+        match pgcrypto {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {}
+            Err(err) => panic!(
+                "pgcrypto must be available in public for IsolatedDatabase migrations: {err}"
+            ),
+        }
         let schema = format!("{prefix}_{}", Uuid::new_v4().simple());
         admin
             .execute(format!("CREATE SCHEMA {schema}").as_str())
