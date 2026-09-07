@@ -603,4 +603,68 @@ mod tests {
         assert!(activation.provider_order_id.starts_with("stub-"));
         assert!(activation.cost.is_none(), "a stub must not invent a cost");
     }
+
+    fn fivesim_order(body: serde_json::Value) -> FiveSimOrder {
+        serde_json::from_value(body).expect("fixture must match the 5SIM check body")
+    }
+
+    #[test]
+    fn pending_and_received_stay_open_and_keep_sms() {
+        for status in ["PENDING", "pending", "RECEIVED", "Received"] {
+            let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+                "id": 1,
+                "phone": "+000",
+                "status": status,
+                "sms": [{
+                    "text": "Your code is 111111",
+                    "code": "111111",
+                    "sender": "WhatsApp",
+                    "id": 77
+                }]
+            })));
+            assert_eq!(
+                check.lifecycle,
+                ActivationLifecycle::Open,
+                "status {status} must stay open"
+            );
+            assert_eq!(check.messages.len(), 1);
+            assert_eq!(check.messages[0].code.as_deref(), Some("111111"));
+            assert_eq!(check.messages[0].provider_message_id.as_deref(), Some("77"));
+        }
+    }
+
+    #[test]
+    fn terminal_status_stores_final_sms_then_closes() {
+        for status in ["FINISHED", "finished", "TIMEOUT", "CANCELED", "CANCELLED", "BANNED"] {
+            let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+                "id": 2,
+                "phone": "+000",
+                "status": status,
+                "sms": [{
+                    "text": "final 999999",
+                    "code": "999999",
+                    "id": "sms-9"
+                }]
+            })));
+            assert_eq!(
+                check.lifecycle,
+                ActivationLifecycle::Closed,
+                "status {status} must close"
+            );
+            assert_eq!(check.messages.len(), 1);
+            assert_eq!(check.messages[0].code.as_deref(), Some("999999"));
+        }
+    }
+
+    #[test]
+    fn five_sim_http_paths_never_include_finish() {
+        let source = include_str!("number_provider.rs");
+        let finish_path = ["{FIVESIM_BASE}", "/finish"].concat();
+        assert!(
+            !source.contains(&finish_path),
+            "this slice must not call 5SIM finish"
+        );
+        assert!(source.contains("{FIVESIM_BASE}/check/{order_id}"));
+        assert!(source.contains("{FIVESIM_BASE}/cancel/{order_id}"));
+    }
 }
