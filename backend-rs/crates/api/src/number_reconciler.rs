@@ -330,7 +330,7 @@ mod tests {
             notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
             addresses: Arc::new(AnyAddressProvider::Local(
                 LocalSigner::from_mnemonic(
-                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                    crate::signer::tests::TEST_MNEMONIC,
                 )
                 .unwrap(),
             )),

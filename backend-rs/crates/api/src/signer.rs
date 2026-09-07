@@ -112,10 +112,10 @@ impl AddressProvider for AnyAddressProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon \
+    pub(crate) const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon \
                                  abandon abandon abandon abandon about";
 
     #[tokio::test]

@@ -38,6 +38,15 @@ use naivolt_core::Asset;
 use naivolt_ledger::{AccountKind, JournalKind};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+/// After offer failover, cancel the supplier that owns the activation — not the
+/// cheapest source we tried first.
+pub(crate) fn assignment_cancel_provider<'a>(
+    winning_offer_provider: Option<&'a str>,
+    initial_provider_label: &'a str,
+) -> &'a str {
+    winning_offer_provider.unwrap_or(initial_provider_label)
+}
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -528,7 +537,7 @@ async fn create_order(
                     });
                 }
             }
-            let provider_label = if state.numbers.is_live() {
+            let provider_label = if state.numbers.primary.is_live() {
                 "5sim"
             } else {
                 "stub"
@@ -544,10 +553,18 @@ async fn create_order(
             )
         };
 
-    if !state.numbers.is_live() && state.funding.is_live() && offer_id.is_none() {
+    if !state.numbers.is_live() && state.funding.is_live() {
         return Err(ApiError::ServiceUnavailable(
             "Numbers aren't on sale yet. Nothing has been charged.".into(),
         ));
+    }
+    if state.funding.is_live() {
+        offer_sources.retain(|(provider, ..)| provider.as_str() != "stub");
+        if offer_id.is_some() && offer_sources.is_empty() {
+            return Err(ApiError::ServiceUnavailable(
+                "Numbers aren't on sale yet. Nothing has been charged.".into(),
+            ));
+        }
     }
 
     let raw_balance: Decimal = sqlx::query_scalar(
@@ -646,7 +663,7 @@ async fn create_order(
         return load_order(&state, user.id, order_id).await.map(Json);
     }
 
-    let activation = if offer_id.is_some() {
+    let (activation, purchase_provider) = if offer_id.is_some() {
         let mut last_reject: Option<ApiError> = None;
         let mut won = None;
         for (provider, country, product, operator) in &offer_sources {
@@ -661,7 +678,7 @@ async fn create_order(
                         .bind(provider)
                         .execute(&state.db)
                         .await?;
-                    won = Some(activation);
+                    won = Some((provider.clone(), activation));
                     break;
                 }
                 Err(PurchaseError::Rejected(err)) => {
@@ -694,7 +711,7 @@ async fn create_order(
             }
         }
         match won {
-            Some(activation) => activation,
+            Some((provider, activation)) => (activation, provider),
             None => {
                 number_order_transitions::apply_claimed(
                     &state.db,
@@ -719,7 +736,7 @@ async fn create_order(
             .buy(&provider_country, &provider_product)
             .await
         {
-            Ok(activation) => activation,
+            Ok(activation) => (activation, provider_label.clone()),
             Err(PurchaseError::Rejected(err)) => {
                 number_order_transitions::apply_claimed(
                     &state.db,
@@ -768,7 +785,10 @@ async fn create_order(
 
     if assigned.rows_affected() != 1 {
         if state.numbers.is_live() {
-            let _ = state.numbers.cancel_for(&provider_label, &activation.provider_order_id).await;
+            let _ = state
+                .numbers
+                .cancel_for(&purchase_provider, &activation.provider_order_id)
+                .await;
         }
         return load_order(&state, user.id, order_id).await.map(Json);
     }
@@ -1077,7 +1097,7 @@ mod tests {
             notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
             addresses: Arc::new(AnyAddressProvider::Local(
                 LocalSigner::from_mnemonic(
-                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                    crate::signer::tests::TEST_MNEMONIC,
                 )
                 .unwrap(),
             )),
@@ -1290,7 +1310,7 @@ mod tests {
             notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
             addresses: Arc::new(AnyAddressProvider::Local(
                 LocalSigner::from_mnemonic(
-                    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+                    crate::signer::tests::TEST_MNEMONIC,
                 )
                 .unwrap(),
             )),
@@ -1678,6 +1698,137 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(offers, 1);
+        database.cleanup().await;
+    }
+
+    #[test]
+    fn assignment_cancel_uses_winning_offer_provider_not_initial() {
+        // Failover: cheapest fivesim OOS, smspool wins. Cleanup must cancel smspool.
+        assert_eq!(
+            assignment_cancel_provider(Some("smspool"), "fivesim"),
+            "smspool"
+        );
+        assert_eq!(
+            assignment_cancel_provider(Some("fivesim"), "fivesim"),
+            "fivesim"
+        );
+        // Legacy non-offer path has no winning override.
+        assert_eq!(assignment_cancel_provider(None, "5sim"), "5sim");
+        assert_eq!(assignment_cancel_provider(None, "stub"), "stub");
+    }
+
+    #[tokio::test]
+    async fn offer_buy_blocked_when_funding_is_live_and_numbers_are_stub() {
+        let database = IsolatedDatabase::new("offer_stub_live_funding").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "stub",
+            &crate::number_offers::stub_skus(),
+            true,
+        )
+        .await
+        .unwrap();
+        let offer_id: Uuid = sqlx::query_scalar(
+            "SELECT o.id FROM number_offers o
+             JOIN number_products p ON p.id = o.product_id
+             WHERE p.slug = 'whatsapp' AND o.active
+             ORDER BY o.success_rate DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let price: Decimal =
+            sqlx::query_scalar("SELECT price_ngn FROM number_offers WHERE id = $1")
+                .bind(offer_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email) VALUES ('offer-live-fund@example.test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, user_id, asset)
+             VALUES ('user_ngn', $1, 'NGN') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let float_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, asset)
+             VALUES ('naira_bank_float', 'NGN') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let funding_journal: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('ngn_funding', 'offer-live-fund', 'offer-live-fund') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', -100000), ($1, $3, 'NGN', 100000)",
+        )
+        .bind(funding_journal)
+        .bind(user_account)
+        .bind(float_account)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        // Live Paystack with stub numbers: offer path must refuse before charging.
+        state.funding = Arc::new(AnyFundingProvider::Paystack(
+            crate::funding_provider::PaystackFunding::new("sk_test_not_used".into()),
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
+        let err = match create_order(
+            State(state),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            headers,
+            Json(CreateOrderBody {
+                offer_id: Some(offer_id),
+                product_slug: String::new(),
+                country_code: String::new(),
+                expected_price_ngn: Some(price.normalize().to_string()),
+            }),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("stub offer must not buy when funding is live"),
+        };
+        assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+        let orders: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_orders WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(orders, 0);
         database.cleanup().await;
     }
 }

@@ -157,7 +157,9 @@ pub fn spawn(state: AppState, pricing: Pricing, offers: OfferSync) {
                         in_stock = report.in_stock,
                         "number catalogue synced"
                     );
-                    if let Err(err) = sync_offers(&state, &pricing, &offers, fivesim_skus).await {
+                    if let Err(err) =
+                        sync_offers(&state, &pricing, &offers, Some(fivesim_skus)).await
+                    {
                         tracing::warn!(error = ?err, "number offers sync failed");
                     }
                 }
@@ -166,7 +168,7 @@ pub fn spawn(state: AppState, pricing: Pricing, offers: OfferSync) {
                 // table on a failed fetch would empty the shop.
                 Err(err) => {
                     tracing::warn!(error = ?err, "number catalogue sync failed");
-                    if let Err(err) = sync_offers(&state, &pricing, &offers, Vec::new()).await {
+                    if let Err(err) = sync_offers(&state, &pricing, &offers, None).await {
                         tracing::warn!(error = ?err, "number offers sync failed");
                     }
                 }
@@ -282,11 +284,14 @@ pub async fn sync(
     Ok((report, fivesim_skus))
 }
 
+/// `fivesim_skus` is `Some` only after a successful guest catalogue sweep.
+/// On success, missing fivesim sources are zeroed (including an empty list).
+/// On failure (`None`), last fivesim rows stay until the next good sweep.
 async fn sync_offers(
     state: &AppState,
     pricing: &Pricing,
     offers: &OfferSync,
-    fivesim_skus: Vec<OfferSku>,
+    fivesim_skus: Option<Vec<OfferSku>>,
 ) -> anyhow::Result<()> {
     if offers.write_stub {
         number_offers::apply_provider_skus(
@@ -301,9 +306,8 @@ async fn sync_offers(
         // Live keys are on: stub fixtures must not stay on the public list.
         number_offers::apply_provider_skus(&state.db, pricing, "stub", &[], true).await?;
     }
-    if !fivesim_skus.is_empty() {
-        number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &fivesim_skus, false)
-            .await?;
+    if let Some(skus) = fivesim_skus {
+        number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &skus, true).await?;
     }
     if let Some(pool) = &offers.smspool {
         match pool.fetch_skus().await {
@@ -660,6 +664,156 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(provider, "testland");
+
+        database.cleanup().await;
+    }
+
+    /// Successful 5SIM catalogue sync must zero fivesim sources that disappeared,
+    /// matching SMSPool. A failed sync must leave last rows alone.
+    #[tokio::test]
+    async fn successful_fivesim_offer_sync_zeros_missing_sources() {
+        use crate::config::{Config, Environment};
+        use crate::funding_provider::{AnyFundingProvider, StubFunding};
+        use crate::google_keys::GoogleKeys;
+        use crate::notify::{AnyNotifier, LogNotifier};
+        use crate::number_provider::{AnyNumberProvider, StubProvider};
+        use crate::payout_provider;
+        use crate::pricing::Rates;
+        use crate::signer::{AnyAddressProvider, LocalSigner};
+        use crate::test_database::IsolatedDatabase;
+        use naivolt_auth::session::SessionKeys;
+        use std::sync::Arc;
+
+        let database = IsolatedDatabase::new("fivesim_zero_missing").await;
+        let pool = database.pool.clone();
+        let pricing = pricing();
+
+        let stale = OfferSku {
+            provider: "fivesim",
+            product_slug: "whatsapp".into(),
+            country_code: "NG".into(),
+            provider_product: "whatsapp".into(),
+            provider_country: "nigeria".into(),
+            provider_operator: Some("any".into()),
+            cost: dec!(0.28),
+            currency: "USD".into(),
+            success_rate: Decimal::from(80),
+            stock: 9,
+        };
+        number_offers::apply_provider_skus(&pool, &pricing, "fivesim", &[stale], false)
+            .await
+            .unwrap();
+        let before: i32 = sqlx::query_scalar(
+            "SELECT stock FROM number_offer_sources
+              WHERE provider = 'fivesim' AND provider_product = 'whatsapp'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, 9);
+
+        let config = Config {
+            environment: Environment::Development,
+            bind_addr: "127.0.0.1:0".into(),
+            database_url: String::new(),
+            jwt_secret: "01234567890123456789012345678901".into(),
+            termii_api_key: None,
+            termii_sender_id: "Naivolt".into(),
+            resend_api_key: None,
+            operations_alert_email: None,
+            email_from: "test@example.test".into(),
+            signer_url: None,
+            dev_mnemonic: None,
+            auto_approve_kyc: false,
+            dev_otp_code: None,
+            paystack_secret_key: None,
+            google_client_id: None,
+            fivesim_api_key: None,
+            fivesim_currency: Some("USD".into()),
+            smspool_api_key: None,
+            smspool_currency: Some("USD".into()),
+            smspool_base_url: "https://api.smspool.net".into(),
+            google_allowed_emails: Vec::new(),
+            admin_token: None,
+            web_app_url: "http://localhost".into(),
+            numbers_margin: dec!(1.6),
+            usd_ngn_mid: dec!(1530),
+            spread_ngn_per_usd: dec!(20),
+        };
+        let state = AppState {
+            db: pool.clone(),
+            keys: Arc::new(SessionKeys::from_secret(config.jwt_secret.as_bytes()).unwrap()),
+            notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
+            addresses: Arc::new(AnyAddressProvider::Local(
+                LocalSigner::from_mnemonic(
+                    crate::signer::tests::TEST_MNEMONIC,
+                )
+                .unwrap(),
+            )),
+            rates: Rates::new(&config),
+            payouts: Arc::new(payout_provider::AnyPayoutProvider::Stub(
+                payout_provider::StubProvider,
+            )),
+            numbers: Arc::new(AnyNumberProvider::Stub(StubProvider).into()),
+            funding: Arc::new(AnyFundingProvider::Stub(StubFunding)),
+            google_keys: Arc::new(GoogleKeys::new()),
+            google_client_id: None,
+            dev_otp_code: None,
+            auto_approve_kyc: false,
+            google_allowed_emails: Arc::new(Vec::new()),
+            admin_token: None,
+            operations_alert_email: None,
+            web_app_url: "http://localhost".into(),
+        };
+        let offers = OfferSync {
+            write_stub: false,
+            smspool: None,
+            smspool_pricing: pricing.clone(),
+        };
+
+        // Catalogue sync succeeded but no public fivesim SKU remained → zero missing.
+        sync_offers(&state, &pricing, &offers, Some(Vec::new()))
+            .await
+            .unwrap();
+        let after_ok: i32 = sqlx::query_scalar(
+            "SELECT stock FROM number_offer_sources
+              WHERE provider = 'fivesim' AND provider_product = 'whatsapp'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after_ok, 0, "successful empty fivesim sweep must zero stale stock");
+
+        // Put stock back, then a failed catalogue sync must not wipe it.
+        number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "fivesim",
+            &[OfferSku {
+                provider: "fivesim",
+                product_slug: "whatsapp".into(),
+                country_code: "NG".into(),
+                provider_product: "whatsapp".into(),
+                provider_country: "nigeria".into(),
+                provider_operator: Some("any".into()),
+                cost: dec!(0.28),
+                currency: "USD".into(),
+                success_rate: Decimal::from(80),
+                stock: 5,
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+        sync_offers(&state, &pricing, &offers, None).await.unwrap();
+        let after_fail: i32 = sqlx::query_scalar(
+            "SELECT stock FROM number_offer_sources
+              WHERE provider = 'fivesim' AND provider_product = 'whatsapp'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after_fail, 5, "failed catalogue sync must keep last fivesim rows");
 
         database.cleanup().await;
     }

@@ -170,6 +170,12 @@ impl std::ops::Deref for NumberProviders {
 }
 
 impl NumberProviders {
+    /// Real supplier money can move. FiveSim primary or a configured SMSPool
+    /// both count; stub-only must never pair with live funding.
+    pub fn is_live(&self) -> bool {
+        self.primary.is_live() || self.smspool.is_some()
+    }
+
     pub async fn buy_source(
         &self,
         provider: &str,
@@ -519,6 +525,25 @@ mod tests {
                 .is_live()
         );
         assert!(!AnyNumberProvider::Stub(StubProvider).is_live());
+        assert!(
+            !NumberProviders {
+                primary: AnyNumberProvider::Stub(StubProvider),
+                smspool: None,
+            }
+            .is_live()
+        );
+        assert!(
+            NumberProviders {
+                primary: AnyNumberProvider::Stub(StubProvider),
+                smspool: Some(crate::number_smspool::SmsPoolProvider::new(
+                    "key".into(),
+                    Some("USD".into()),
+                    None,
+                )),
+            }
+            .is_live(),
+            "SMSPool alone is enough for live number sales"
+        );
     }
 
     #[tokio::test]
