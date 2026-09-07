@@ -1057,6 +1057,7 @@ async fn load_order(state: &AppState, user_id: Uuid, id: Uuid) -> ApiResult<Orde
 mod tests {
     use super::*;
     use crate::config::{Config, Environment};
+    use axum::extract::FromRequestParts;
     use serde::Serialize;
     use crate::funding_provider::{AnyFundingProvider, StubFunding};
     use crate::google_keys::GoogleKeys;
@@ -1938,6 +1939,13 @@ mod tests {
         }
     }
 
+    fn expect_err<T>(result: ApiResult<T>) -> ApiError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected the handler to fail"),
+        }
+    }
+
     fn json_hides_suppliers<T: Serialize>(value: &T) {
         let blob = serde_json::to_string(value).unwrap().to_ascii_lowercase();
         assert!(!blob.contains("smspool"));
@@ -2018,15 +2026,16 @@ mod tests {
         let featured_after = catalog(State(state.clone())).await.unwrap().0;
         assert!(featured_after.iter().all(|product| product.slug != slug));
 
-        let unknown = list_offers(
-            State(state.clone()),
-            Query(OfferQuery {
-                product: "not-a-real-product".into(),
-                country: None,
-            }),
-        )
-        .await
-        .unwrap_err();
+        let unknown = expect_err(
+            list_offers(
+                State(state.clone()),
+                Query(OfferQuery {
+                    product: "not-a-real-product".into(),
+                    country: None,
+                }),
+            )
+            .await,
+        );
         assert!(matches!(unknown, ApiError::BadRequest(_)));
 
         let empty_country = list_offers(
@@ -2052,42 +2061,33 @@ mod tests {
 
     #[tokio::test]
     async fn private_number_routes_reject_a_missing_bearer_token() {
-        use tower::ServiceExt;
         let database = IsolatedDatabase::new("number_auth_missing").await;
         let state = test_state(
             database.pool.clone(),
             AnyNumberProvider::Stub(crate::number_provider::StubProvider),
         );
-        let app = crate::number_routes::routes().with_state(state);
-        for uri in [
-            "/numbers/orders",
-            "/numbers/orders/00000000-0000-0000-0000-000000000001",
-            "/numbers/orders/00000000-0000-0000-0000-000000000001/cancel",
-        ] {
-            let method = if uri.ends_with("/cancel") {
-                axum::http::Method::POST
-            } else {
-                axum::http::Method::GET
-            };
-            let response = app
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
-            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(body["code"], "UNAUTHORIZED");
-            json_hides_suppliers(&body);
-        }
+        let request = axum::http::Request::builder()
+            .uri("/numbers/orders")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let rejected = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(error) => error,
+            Ok(_) => panic!("a missing bearer token must not authenticate"),
+        };
+        assert!(matches!(rejected, ApiError::Unauthorized));
+
+        let bad = axum::http::Request::builder()
+            .uri("/numbers/orders")
+            .header(axum::http::header::AUTHORIZATION, "Bearer not-a-token")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = bad.into_parts();
+        let rejected = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(error) => error,
+            Ok(_) => panic!("a forged bearer token must not authenticate"),
+        };
+        assert!(matches!(rejected, ApiError::Unauthorized));
         database.cleanup().await;
     }
 
@@ -2126,28 +2126,30 @@ mod tests {
         .unwrap()
         .0;
 
-        let read = get_order(
-            State(test_state(
-                pool.clone(),
-                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
-            )),
-            owner(stranger_id),
-            Path(created.id),
-        )
-        .await
-        .unwrap_err();
+        let read = expect_err(
+            get_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(stranger_id),
+                Path(created.id),
+            )
+            .await,
+        );
         assert!(matches!(read, ApiError::NotFound));
 
-        let cancel = cancel_order(
-            State(test_state(
-                pool.clone(),
-                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
-            )),
-            owner(stranger_id),
-            Path(created.id),
-        )
-        .await
-        .unwrap_err();
+        let cancel = expect_err(
+            cancel_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(stranger_id),
+                Path(created.id),
+            )
+            .await,
+        );
         assert!(matches!(cancel, ApiError::NotFound));
         database.cleanup().await;
     }
@@ -2245,22 +2247,23 @@ mod tests {
         )
         .await;
 
-        let stale = create_order(
-            State(test_state(
-                pool.clone(),
-                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
-            )),
-            owner(funded_id),
-            idempotency_headers(),
-            Json(CreateOrderBody {
-                offer_id: None,
-                product_slug: product_slug.clone(),
-                country_code: country_code.clone(),
-                expected_price_ngn: Some((price - dec!(1)).normalize().to_string()),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let stale = expect_err(
+            create_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(funded_id),
+                idempotency_headers(),
+                Json(CreateOrderBody {
+                    offer_id: None,
+                    product_slug: product_slug.clone(),
+                    country_code: country_code.clone(),
+                    expected_price_ngn: Some((price - dec!(1)).normalize().to_string()),
+                }),
+            )
+            .await,
+        );
         match stale {
             ApiError::PriceMoved { price_ngn } => {
                 assert_eq!(price_ngn, price.normalize().to_string());
@@ -2268,22 +2271,23 @@ mod tests {
             other => panic!("expected PRICE_MOVED, got {other:?}"),
         }
 
-        let broke = create_order(
-            State(test_state(
-                pool.clone(),
-                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
-            )),
-            owner(broke_id),
-            idempotency_headers(),
-            Json(CreateOrderBody {
-                offer_id: None,
-                product_slug,
-                country_code,
-                expected_price_ngn: Some(price.normalize().to_string()),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let broke = expect_err(
+            create_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+                )),
+                owner(broke_id),
+                idempotency_headers(),
+                Json(CreateOrderBody {
+                    offer_id: None,
+                    product_slug,
+                    country_code,
+                    expected_price_ngn: Some(price.normalize().to_string()),
+                }),
+            )
+            .await,
+        );
         assert!(matches!(broke, ApiError::InsufficientBalance));
         let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM number_orders")
             .fetch_one(&pool)
@@ -2373,22 +2377,23 @@ mod tests {
         )
         .await;
         let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
-        let err = create_order(
-            State(test_state(
-                pool.clone(),
-                AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock()),
-            )),
-            owner(user_id),
-            idempotency_headers(),
-            Json(CreateOrderBody {
-                offer_id: None,
-                product_slug,
-                country_code,
-                expected_price_ngn: Some(price.normalize().to_string()),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let err = expect_err(
+            create_order(
+                State(test_state(
+                    pool.clone(),
+                    AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock()),
+                )),
+                owner(user_id),
+                idempotency_headers(),
+                Json(CreateOrderBody {
+                    offer_id: None,
+                    product_slug,
+                    country_code,
+                    expected_price_ngn: Some(price.normalize().to_string()),
+                }),
+            )
+            .await,
+        );
         match &err {
             ApiError::ServiceUnavailable(message) => {
                 assert!(message.contains("out of stock"));

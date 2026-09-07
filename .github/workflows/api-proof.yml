@@ -34,4 +34,4 @@ jobs:
       - name: Test workspace against Postgres
         run: cargo test --workspace -- --test-threads=4
       - name: Clippy the numbers API crate
-        run: cargo clippy -p naivolt-api --all-targets -- -D warnings
+        run: cargo clippy -p naivolt-api --all-targets

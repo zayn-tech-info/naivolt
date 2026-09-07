@@ -554,7 +554,8 @@ impl ScriptedStubProvider {
     }
 
     async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
-        match *self.buy.lock().unwrap() {
+        let action = *self.buy.lock().unwrap();
+        match action {
             ScriptedBuy::Succeed => StubProvider.buy(country, product).await,
             ScriptedBuy::OutOfStock => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
                 "That number is out of stock right now. Try another country.".into(),
@@ -564,9 +565,10 @@ impl ScriptedStubProvider {
     }
 
     async fn check(&self, _order_id: &str) -> ApiResult<ActivationCheck> {
-        match &*self.check.lock().unwrap() {
-            Ok(state) => Ok(state.clone()),
-            Err(message) => Err(ApiError::ServiceUnavailable(message.clone())),
+        let snapshot = self.check.lock().unwrap().clone();
+        match snapshot {
+            Ok(state) => Ok(state),
+            Err(message) => Err(ApiError::ServiceUnavailable(message)),
         }
     }
 }
@@ -718,19 +720,25 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_stock_buy_is_a_rejected_purchase() {
-        let err = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock())
+        let err = match AnyNumberProvider::ScriptedStub(ScriptedStubProvider::out_of_stock())
             .buy("nigeria", "whatsapp")
             .await
-            .unwrap_err();
+        {
+            Err(error) => error,
+            Ok(_) => panic!("out of stock must refuse the buy"),
+        };
         assert!(err.is_out_of_stock());
     }
 
     #[tokio::test]
     async fn an_ambiguous_buy_is_not_a_refusal() {
-        let err = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::ambiguous())
+        let err = match AnyNumberProvider::ScriptedStub(ScriptedStubProvider::ambiguous())
             .buy("nigeria", "whatsapp")
             .await
-            .unwrap_err();
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an ambiguous buy must not look like success"),
+        };
         assert!(matches!(err, PurchaseError::Ambiguous));
         assert!(!err.is_out_of_stock());
     }
