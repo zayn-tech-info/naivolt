@@ -704,6 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_and_malformed_checks_are_closed_or_errors() {
+        // covers: AC-6 scripted timeout (closed, no SMS) and malformed check Err
         let timeout = AnyNumberProvider::ScriptedStub(ScriptedStubProvider::timeout())
             .check("any")
             .await

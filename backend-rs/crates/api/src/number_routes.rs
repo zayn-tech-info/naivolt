@@ -1058,6 +1058,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, Environment};
     use axum::extract::FromRequestParts;
+    use axum::response::IntoResponse;
     use serde::Serialize;
     use crate::funding_provider::{AnyFundingProvider, StubFunding};
     use crate::google_keys::GoogleKeys;
@@ -1954,6 +1955,18 @@ mod tests {
         assert!(!blob.contains("\"provider\""));
     }
 
+    fn wire_json<T: Serialize>(value: &T) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+
+    async fn error_body(error: ApiError) -> serde_json::Value {
+        let response = error.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     fn idempotency_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
@@ -1962,6 +1975,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_products_and_countries_honour_stock_and_search_limits() {
+        // covers: AC-1 AC-3 (0004) public catalogue, no supplier names, empty stock
         let database = IsolatedDatabase::new("number_catalog_limits").await;
         let pool = database.pool.clone();
         let (slug, _country, _price) = IsolatedDatabase::first_listed_sku(&pool).await;
@@ -1984,12 +1998,21 @@ mod tests {
         );
         let featured = catalog(State(state.clone())).await.unwrap().0;
         json_hides_suppliers(&featured);
+        let featured_json = wire_json(&featured);
         let matching = featured.iter().find(|product| product.slug == slug);
         if let Some(product) = matching {
             assert!(product.countries.iter().all(|country| !country.in_stock));
             assert!(product.countries.iter().all(|country| {
                 country.price_ngn.parse::<rust_decimal::Decimal>().is_ok()
             }));
+            let json_product = featured_json
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["slug"] == slug)
+                .unwrap();
+            assert_eq!(json_product["countries"][0]["inStock"], false);
+            assert!(json_product["countries"][0]["priceNgn"].is_string());
         }
 
         let page = products(
@@ -2061,6 +2084,8 @@ mod tests {
 
     #[tokio::test]
     async fn private_number_routes_reject_a_missing_bearer_token() {
+        // covers: AC-4 private number routes require a bearer token
+        use tower::ServiceExt;
         let database = IsolatedDatabase::new("number_auth_missing").await;
         let state = test_state(
             database.pool.clone(),
@@ -2088,11 +2113,43 @@ mod tests {
             Ok(_) => panic!("a forged bearer token must not authenticate"),
         };
         assert!(matches!(rejected, ApiError::Unauthorized));
+
+        let app = routes().with_state(state);
+        for uri in [
+            "/numbers/orders",
+            "/numbers/orders/00000000-0000-0000-0000-000000000001",
+            "/numbers/orders/00000000-0000-0000-0000-000000000001/cancel",
+        ] {
+            let method = if uri.ends_with("/cancel") {
+                axum::http::Method::POST
+            } else {
+                axum::http::Method::GET
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], "UNAUTHORIZED");
+            json_hides_suppliers(&body);
+        }
         database.cleanup().await;
     }
 
     #[tokio::test]
     async fn another_user_cannot_read_or_cancel_an_order() {
+        // covers: AC-4 ownership, no inbox leak to another user
         let database = IsolatedDatabase::new("number_ownership").await;
         let pool = database.pool.clone();
         let owner_id = IsolatedDatabase::insert_funded_user(
@@ -2156,6 +2213,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_and_detail_include_lifecycle_fields_without_supplier_names() {
+        // covers: AC-3 (0004) AC-7 AC-9 (0005) activationOpen, cancellable, camelCase
         let database = IsolatedDatabase::new("number_lifecycle_json").await;
         let pool = database.pool.clone();
         let user_id = IsolatedDatabase::insert_funded_user(
@@ -2203,11 +2261,17 @@ mod tests {
         .unwrap()
         .0;
         json_hides_suppliers(&listed);
+        let listed_json = wire_json(&listed);
         assert_eq!(listed[0].id, created.id);
         assert!(listed[0].activation_open);
         assert!(!listed[0].cancellable);
         assert!(listed[0].messages.is_empty());
         assert_eq!(listed[0].price_ngn, price.normalize().to_string());
+        assert_eq!(listed_json[0]["activationOpen"], true);
+        assert_eq!(listed_json[0]["cancellable"], false);
+        assert_eq!(listed_json[0]["priceNgn"], price.normalize().to_string());
+        assert!(listed_json[0].get("expiresAt").is_some());
+        assert!(listed_json[0].get("messages").is_none());
 
         let detail = get_order(
             State(test_state(
@@ -2221,16 +2285,23 @@ mod tests {
         .unwrap()
         .0;
         json_hides_suppliers(&detail);
+        let detail_json = wire_json(&detail);
         assert!(detail.activation_open);
         assert!(!detail.cancellable);
         assert_eq!(detail.messages.len(), 2);
         assert_eq!(detail.messages[0].text, "first");
         assert_eq!(detail.messages[1].text, "second");
+        assert_eq!(detail_json["activationOpen"], true);
+        assert_eq!(detail_json["priceNgn"], price.normalize().to_string());
+        assert_eq!(detail_json["messages"][0]["receivedAt"].as_str().is_some(), true);
+        assert_eq!(detail_json["messages"][0]["text"], "first");
+        assert_eq!(detail_json["messages"][1]["text"], "second");
         database.cleanup().await;
     }
 
     #[tokio::test]
     async fn create_order_rejects_a_stale_price_and_insufficient_balance() {
+        // covers: AC-7 (0004) PriceMoved; insufficient balance leaves no order
         let database = IsolatedDatabase::new("number_price_balance").await;
         let pool = database.pool.clone();
         let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
@@ -2264,12 +2335,10 @@ mod tests {
             )
             .await,
         );
-        match stale {
-            ApiError::PriceMoved { price_ngn } => {
-                assert_eq!(price_ngn, price.normalize().to_string());
-            }
-            other => panic!("expected PRICE_MOVED, got {other:?}"),
-        }
+        let stale_body = error_body(stale).await;
+        assert_eq!(stale_body["code"], "PRICE_MOVED");
+        assert_eq!(stale_body["meta"]["priceNgn"], price.normalize().to_string());
+        json_hides_suppliers(&stale_body);
 
         let broke = expect_err(
             create_order(
@@ -2299,6 +2368,7 @@ mod tests {
 
     #[tokio::test]
     async fn funding_then_a_stub_buy_reserves_once() {
+        // covers: funding credit then spend; one number_reserve, no settle yet
         let database = IsolatedDatabase::new("number_fund_spend").await;
         let pool = database.pool.clone();
         let user_id = IsolatedDatabase::insert_funded_user(
@@ -2368,6 +2438,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_stock_buy_refunds_the_reservation() {
+        // covers: refused buy refunds; user NGN restored
         let database = IsolatedDatabase::new("number_oos_refund").await;
         let pool = database.pool.clone();
         let user_id = IsolatedDatabase::insert_funded_user(

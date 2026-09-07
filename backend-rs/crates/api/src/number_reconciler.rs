@@ -717,6 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_check_retries_then_settles_once() {
+        // covers: AC-1 retry then one settle
         let database = IsolatedDatabase::new("reconcile_retry_then_settle_test").await;
         let token = Uuid::new_v4();
         let id = expired_awaiting_order(&database.pool, token, "RETRY").await;
@@ -814,6 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_workers_cannot_claim_the_same_order() {
+        // covers: two instances, one claim wins
         let database = IsolatedDatabase::new("reconcile_two_worker_claim_test").await;
         let token = Uuid::new_v4();
         let id = expired_awaiting_order(&database.pool, token, "RACE").await;
