@@ -6,29 +6,35 @@
 
 #![forbid(unsafe_code)]
 
+mod activity_routes;
+mod admin_routes;
 mod auth_routes;
+mod bank_routes;
 mod config;
 mod error;
 mod funding_provider;
 mod funding_reconciler;
 mod funding_routes;
-mod google_keys;
-mod middleware;
-mod activity_routes;
-mod admin_routes;
-mod bank_routes;
 mod giftcard_routes;
+mod google_keys;
 mod kyc_routes;
+mod middleware;
 mod notify;
 mod number_catalog;
+mod number_offers;
+mod number_order_transitions;
 mod number_provider;
+mod number_reconciler;
 mod number_routes;
+mod number_smspool;
 mod payout_provider;
 mod payout_routes;
 mod pricing;
 mod rate_routes;
 mod signer;
 mod state;
+#[cfg(test)]
+mod test_database;
 mod user_routes;
 
 use anyhow::{Context, Result};
@@ -65,8 +71,8 @@ async fn main() -> Result<()> {
         .await
         .context("running migrations")?;
 
-    let keys = SessionKeys::from_secret(config.jwt_secret.as_bytes())
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let keys =
+        SessionKeys::from_secret(config.jwt_secret.as_bytes()).map_err(|e| anyhow::anyhow!(e))?;
 
     let notifier = if config.environment.is_production()
         || config.termii_api_key.is_some()
@@ -93,7 +99,9 @@ async fn main() -> Result<()> {
     }
 
     let addresses = match (&config.signer_url, &config.dev_mnemonic) {
-        (Some(url), _) => signer::AnyAddressProvider::Remote(signer::RemoteSigner::new(url.clone())),
+        (Some(url), _) => {
+            signer::AnyAddressProvider::Remote(signer::RemoteSigner::new(url.clone()))
+        }
         (None, Some(mnemonic)) => {
             tracing::warn!("deriving addresses in-process — development only");
             signer::AnyAddressProvider::Local(signer::LocalSigner::from_mnemonic(mnemonic)?)
@@ -113,6 +121,7 @@ async fn main() -> Result<()> {
         auto_approve_kyc: config.auto_approve_kyc,
         web_app_url: config.web_app_url.clone(),
         admin_token: config.admin_token.clone(),
+        operations_alert_email: config.operations_alert_email.clone(),
         google_allowed_emails: Arc::new(config.google_allowed_emails.clone()),
         funding: Arc::new(match &config.paystack_secret_key {
             Some(key) => funding_provider::AnyFundingProvider::Paystack(
@@ -125,16 +134,28 @@ async fn main() -> Result<()> {
         }),
         google_keys: Arc::new(google_keys::GoogleKeys::new()),
         google_client_id: config.google_client_id.clone(),
-        numbers: Arc::new(match &config.fivesim_api_key {
-            Some(key) => number_provider::AnyNumberProvider::FiveSim(
-                number_provider::FiveSimProvider::new(
-                    key.clone(),
-                    config.fivesim_currency.clone(),
+        numbers: Arc::new({
+            let primary = match &config.fivesim_api_key {
+                Some(key) => number_provider::AnyNumberProvider::FiveSim(
+                    number_provider::FiveSimProvider::new(
+                        key.clone(),
+                        config.fivesim_currency.clone(),
+                    ),
                 ),
-            ),
-            None => {
-                tracing::warn!("no number provider configured — numbers will be stubbed");
-                number_provider::AnyNumberProvider::Stub(number_provider::StubProvider)
+                None => {
+                    tracing::warn!("no number provider configured — numbers will be stubbed");
+                    number_provider::AnyNumberProvider::Stub(number_provider::StubProvider)
+                }
+            };
+            number_provider::NumberProviders {
+                primary,
+                smspool: config.smspool_api_key.as_ref().map(|key| {
+                    number_smspool::SmsPoolProvider::new(
+                        key.clone(),
+                        config.smspool_currency.clone(),
+                        Some(config.smspool_base_url.clone()),
+                    )
+                }),
             }
         }),
         payouts: Arc::new(match &config.paystack_secret_key {
@@ -159,7 +180,27 @@ async fn main() -> Result<()> {
             margin: config.numbers_margin,
             supplier_currency: config.fivesim_currency.clone(),
         },
+        number_catalog::OfferSync {
+            write_stub: config.fivesim_api_key.is_none(),
+            smspool: config.smspool_api_key.as_ref().map(|key| {
+                number_smspool::SmsPoolProvider::new(
+                    key.clone(),
+                    config.smspool_currency.clone(),
+                    Some(config.smspool_base_url.clone()),
+                )
+            }),
+            smspool_pricing: number_catalog::Pricing {
+                usd_ngn: config.usd_ngn_mid,
+                margin: config.numbers_margin,
+                supplier_currency: config
+                    .smspool_currency
+                    .clone()
+                    .or_else(|| Some("USD".into())),
+            },
+        },
     );
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let number_workers = number_reconciler::spawn(state.clone(), shutdown_rx);
 
     let app = Router::new()
         .route("/health", get(health))
@@ -200,9 +241,14 @@ async fn main() -> Result<()> {
     );
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        })
         .await
         .context("server error")?;
+
+    number_workers.finish().await;
 
     Ok(())
 }

@@ -36,6 +36,8 @@
 //! inference: set to anything but USD, the sync records stock and cost but
 //! leaves pricing alone rather than converting through a rate it was never given.
 
+use crate::number_offers::{self, OfferSku};
+use crate::number_smspool::SmsPoolProvider;
 use crate::state::AppState;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -66,7 +68,7 @@ const ACTIVATION: &str = "activation";
 /// No number sells for less than this, whatever the arithmetic says.
 const MIN_PRICE_NGN: i64 = 100;
 
-/// What the sale price is built from.
+/// What a number sells for.
 #[derive(Clone)]
 pub struct Pricing {
     /// Naira per dollar — what it costs us to hold the supplier float.
@@ -77,9 +79,15 @@ pub struct Pricing {
     pub supplier_currency: Option<String>,
 }
 
+pub struct OfferSync {
+    pub write_stub: bool,
+    pub smspool: Option<SmsPoolProvider>,
+    pub smspool_pricing: Pricing,
+}
+
 impl Pricing {
     /// Whether costs can be turned into naira at all.
-    fn prices_in_usd(&self) -> bool {
+    pub(crate) fn prices_in_usd(&self) -> bool {
         match &self.supplier_currency {
             Some(currency) => currency.eq_ignore_ascii_case("USD"),
             None => true,
@@ -90,7 +98,7 @@ impl Pricing {
     ///
     /// Up, not to nearest: rounding down is a margin cut taken tens of thousands
     /// of rows at a time.
-    fn sale_price(&self, cost: Decimal) -> Decimal {
+    pub(crate) fn sale_price(&self, cost: Decimal) -> Decimal {
         let ten = Decimal::from(10);
         let raw = cost * self.usd_ngn * self.margin;
         let rounded = (raw / ten).ceil() * ten;
@@ -106,6 +114,10 @@ struct GuestProduct {
     qty: i64,
     #[serde(rename = "Price")]
     price: Decimal,
+    #[serde(default, rename = "Rate")]
+    rate: Option<serde_json::Value>,
+    #[serde(default)]
+    success: Option<serde_json::Value>,
 }
 
 /// 5SIM's country entry. `iso` and `prefix` are objects keyed by the value —
@@ -120,7 +132,7 @@ struct GuestCountry {
     text_en: Option<String>,
 }
 
-pub fn spawn(state: AppState, pricing: Pricing) {
+pub fn spawn(state: AppState, pricing: Pricing, offers: OfferSync) {
     if !pricing.prices_in_usd() {
         tracing::warn!(
             currency = ?pricing.supplier_currency,
@@ -137,17 +149,27 @@ pub fn spawn(state: AppState, pricing: Pricing) {
 
         loop {
             match sync(&state, &pricing, &http).await {
-                Ok(report) => tracing::info!(
-                    countries = report.countries,
-                    products = report.products,
-                    rows = report.rows,
-                    in_stock = report.in_stock,
-                    "number catalogue synced"
-                ),
+                Ok((report, fivesim_skus)) => {
+                    tracing::info!(
+                        countries = report.countries,
+                        products = report.products,
+                        rows = report.rows,
+                        in_stock = report.in_stock,
+                        "number catalogue synced"
+                    );
+                    if let Err(err) = sync_offers(&state, &pricing, &offers, fivesim_skus).await {
+                        tracing::warn!(error = ?err, "number offers sync failed");
+                    }
+                }
                 // Leave the last known catalogue in place. A supplier we cannot
                 // reach is not a supplier with nothing in stock, and zeroing the
                 // table on a failed fetch would empty the shop.
-                Err(err) => tracing::warn!(error = ?err, "number catalogue sync failed"),
+                Err(err) => {
+                    tracing::warn!(error = ?err, "number catalogue sync failed");
+                    if let Err(err) = sync_offers(&state, &pricing, &offers, Vec::new()).await {
+                        tracing::warn!(error = ?err, "number offers sync failed");
+                    }
+                }
             }
             tokio::time::sleep(INTERVAL).await;
         }
@@ -166,7 +188,7 @@ pub async fn sync(
     state: &AppState,
     pricing: &Pricing,
     http: &reqwest::Client,
-) -> anyhow::Result<SyncReport> {
+) -> anyhow::Result<(SyncReport, Vec<OfferSku>)> {
     let countries: HashMap<String, GuestCountry> = http
         .get(GUEST_COUNTRIES)
         .send()
@@ -176,6 +198,7 @@ pub async fn sync(
         .map_err(|e| anyhow::anyhow!("country list unreadable: {e}"))?;
 
     let mut report = SyncReport::default();
+    let mut fivesim_skus = Vec::new();
 
     for (key, country) in &countries {
         let Some(country_id) = upsert_country(state, key, country).await? else {
@@ -218,13 +241,83 @@ pub async fn sync(
         let written = upsert_prices(state, country_id, &offers, &product_ids, pricing).await?;
         report.rows += written;
         report.in_stock += offers.iter().filter(|(_, o)| o.qty > 0).count();
+
+        if let Some(iso) = country.iso.keys().next() {
+            let iso = iso.to_uppercase();
+            for (product_key, product) in &offers {
+                let success = product
+                    .rate
+                    .as_ref()
+                    .or(product.success.as_ref())
+                    .and_then(number_offers::parse_success_json);
+                let Some(success_rate) = success else {
+                    continue;
+                };
+                if product.qty <= 0 {
+                    continue;
+                }
+                fivesim_skus.push(OfferSku {
+                    provider: "fivesim",
+                    product_slug: (*product_key).clone(),
+                    country_code: iso.clone(),
+                    provider_product: (*product_key).clone(),
+                    provider_country: key.clone(),
+                    provider_operator: None,
+                    cost: product.price,
+                    currency: pricing
+                        .supplier_currency
+                        .clone()
+                        .unwrap_or_else(|| "USD".into()),
+                    success_rate,
+                    stock: i32::try_from(product.qty.max(0)).unwrap_or(i32::MAX),
+                });
+            }
+        }
     }
 
     if report.countries == 0 {
         anyhow::bail!("no country could be read from 5sim");
     }
 
-    Ok(report)
+    Ok((report, fivesim_skus))
+}
+
+async fn sync_offers(
+    state: &AppState,
+    pricing: &Pricing,
+    offers: &OfferSync,
+    fivesim_skus: Vec<OfferSku>,
+) -> anyhow::Result<()> {
+    if offers.write_stub {
+        number_offers::apply_provider_skus(
+            &state.db,
+            pricing,
+            "stub",
+            &number_offers::stub_skus(),
+            true,
+        )
+        .await?;
+    }
+    if !fivesim_skus.is_empty() {
+        number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &fivesim_skus, false)
+            .await?;
+    }
+    if let Some(pool) = &offers.smspool {
+        match pool.fetch_skus().await {
+            Ok(skus) => {
+                number_offers::apply_provider_skus(
+                    &state.db,
+                    &offers.smspool_pricing,
+                    "smspool",
+                    &skus,
+                    true,
+                )
+                .await?;
+            }
+            Err(err) => tracing::warn!(error = ?err, "smspool offer sweep failed, keeping last rows"),
+        }
+    }
+    Ok(())
 }
 
 /// Insert a country the supplier lists, or return the id of the one we have.

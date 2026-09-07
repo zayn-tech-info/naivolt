@@ -73,6 +73,7 @@ pub struct Overview {
     pub orders_delivered: i64,
     pub orders_refunded: i64,
     pub orders_open: i64,
+    pub orders_review_required: i64,
     pub topups_succeeded: i64,
     pub topups_pending: i64,
     /// What users could spend right now. A liability, so it is reported as a
@@ -91,13 +92,10 @@ pub struct Overview {
     pub catalogue_in_stock: i64,
 }
 
-async fn overview(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Overview>> {
+async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Overview>> {
     authorise(&state, &headers)?;
 
-    let row: (i64, i64, i64, i64, i64, i64, i64, Decimal, Decimal, Decimal, Decimal, Decimal, i64, i64) =
+    let row: (i64, i64, i64, i64, i64, i64, i64, i64, Decimal, Decimal, Decimal, Decimal, Decimal, i64, i64) =
         sqlx::query_as(
             "SELECT
                (SELECT count(*) FROM users),
@@ -105,6 +103,7 @@ async fn overview(
                (SELECT count(*) FROM number_orders WHERE status = 'delivered'),
                (SELECT count(*) FROM number_orders WHERE status IN ('expired','cancelled','failed')),
                (SELECT count(*) FROM number_orders WHERE status IN ('reserved','awaiting_code')),
+               (SELECT count(*) FROM number_orders WHERE status = 'review_required'),
                (SELECT count(*) FROM ngn_deposits WHERE status = 'succeeded'),
                (SELECT count(*) FROM ngn_deposits WHERE status = 'pending'),
                COALESCE((SELECT -sum(e.amount) FROM ledger_entries e
@@ -135,15 +134,16 @@ async fn overview(
         orders_delivered: row.2,
         orders_refunded: row.3,
         orders_open: row.4,
-        topups_succeeded: row.5,
-        topups_pending: row.6,
-        user_balances_ngn: row.7.normalize().to_string(),
-        float_ngn: row.8.normalize().to_string(),
-        revenue_ngn: row.9.normalize().to_string(),
-        pending_ngn: row.10.normalize().to_string(),
-        supplier_cost: row.11.normalize().to_string(),
-        catalogue_products: row.12,
-        catalogue_in_stock: row.13,
+        orders_review_required: row.5,
+        topups_succeeded: row.6,
+        topups_pending: row.7,
+        user_balances_ngn: row.8.normalize().to_string(),
+        float_ngn: row.9.normalize().to_string(),
+        revenue_ngn: row.10.normalize().to_string(),
+        pending_ngn: row.11.normalize().to_string(),
+        supplier_cost: row.12.normalize().to_string(),
+        catalogue_products: row.13,
+        catalogue_in_stock: row.14,
     }))
 }
 
@@ -175,9 +175,16 @@ async fn activity(
 
     // Orders and top-ups interleaved by time. Two tables, one feed: an operator
     // asking what happened does not care which table it happened in.
-    let rows: Vec<(String, String, Option<String>, String, Decimal, String, DateTime<Utc>)> =
-        sqlx::query_as(
-            "SELECT 'order', o.id::text, u.email,
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        String,
+        Decimal,
+        String,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        "SELECT 'order', o.id::text, u.email,
                     p.name || ' · ' || c.name, o.price_ngn, o.status, o.created_at
                FROM number_orders o
                JOIN users u ON u.id = o.user_id
@@ -190,10 +197,10 @@ async fn activity(
                JOIN users u ON u.id = d.user_id
              ORDER BY 7 DESC
              LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await?;
+    )
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(
         rows.into_iter()

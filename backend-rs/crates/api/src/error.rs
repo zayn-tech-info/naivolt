@@ -64,6 +64,8 @@ pub enum ApiError {
     // --- generic ---
     #[error("{0}")]
     BadRequest(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error("not found")]
     NotFound,
     /// Anything unexpected. The inner detail is logged, never sent.
@@ -90,6 +92,7 @@ impl ApiError {
             ApiError::AssetPaused { .. } => "ASSET_PAUSED",
             ApiError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
             ApiError::BadRequest(_) => "BAD_REQUEST",
+            ApiError::Conflict(_) => "CONFLICT",
             ApiError::NotFound => "NOT_FOUND",
             ApiError::Internal(_) => "INTERNAL",
         }
@@ -114,6 +117,7 @@ impl ApiError {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

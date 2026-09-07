@@ -35,6 +35,7 @@ pub struct Config {
     pub termii_api_key: Option<String>,
     pub termii_sender_id: String,
     pub resend_api_key: Option<String>,
+    pub operations_alert_email: Option<String>,
     pub email_from: String,
     /// Base URL of the isolated signer. None means derive in-process, which is
     /// only allowed outside production — see [`Config::load`].
@@ -61,6 +62,9 @@ pub struct Config {
     /// names the currency, so it is stated here rather than guessed at — a wrong
     /// guess would put a mislabelled cost on every order.
     pub fivesim_currency: Option<String>,
+    pub smspool_api_key: Option<String>,
+    pub smspool_currency: Option<String>,
+    pub smspool_base_url: String,
     /// Who may sign in with Google. Empty means anyone with a Google account,
     /// which is the right default for a public product and the wrong one for a
     /// deployment taking real card payments before it has opened to anybody.
@@ -143,16 +147,27 @@ impl Config {
             termii_api_key: env::var("TERMII_API_KEY").ok().filter(|s| !s.is_empty()),
             termii_sender_id: env::var("TERMII_SENDER_ID").unwrap_or_else(|_| "Naivolt".into()),
             resend_api_key: env::var("RESEND_API_KEY").ok().filter(|s| !s.is_empty()),
+            operations_alert_email: env::var("OPERATIONS_ALERT_EMAIL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             email_from: env::var("EMAIL_FROM")
                 .unwrap_or_else(|_| "Naivolt <no-reply@naivolt.com>".into()),
             signer_url,
             dev_mnemonic,
             dev_otp_code,
             auto_approve_kyc,
-            paystack_secret_key: env::var("PAYSTACK_SECRET_KEY").ok().filter(|s| !s.is_empty()),
+            paystack_secret_key: env::var("PAYSTACK_SECRET_KEY")
+                .ok()
+                .filter(|s| !s.is_empty()),
             google_client_id: env::var("GOOGLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
             fivesim_api_key: env::var("FIVESIM_API_KEY").ok().filter(|s| !s.is_empty()),
             fivesim_currency: env::var("FIVESIM_CURRENCY").ok().filter(|s| !s.is_empty()),
+            smspool_api_key: env::var("SMSPOOL_API_KEY").ok().filter(|s| !s.is_empty()),
+            smspool_currency: env::var("SMSPOOL_CURRENCY").ok().filter(|s| !s.is_empty()),
+            smspool_base_url: env::var("SMSPOOL_BASE_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.smspool.net".into()),
             google_allowed_emails: env::var("GOOGLE_ALLOWED_EMAILS")
                 .unwrap_or_default()
                 .split(',')
@@ -184,6 +199,11 @@ impl Config {
     /// Production has stricter requirements than development, and they are
     /// enforced here rather than trusted to deployment discipline.
     fn validate_for_environment(&self) -> Result<()> {
+        if self.fivesim_api_key.is_some()
+            && (self.resend_api_key.is_none() || self.operations_alert_email.is_none())
+        {
+            bail!("RESEND_API_KEY and OPERATIONS_ALERT_EMAIL are required when live number purchases are enabled");
+        }
         // Anywhere that is not a developer's laptop, money must be real money.
         // Without a key the funding provider is the stub, which confirms every
         // charge it is asked about — so a balance appears that nobody paid for,
@@ -302,6 +322,7 @@ mod tests {
             termii_api_key: Some("k".into()),
             termii_sender_id: "Naivolt".into(),
             resend_api_key: Some("k".into()),
+            operations_alert_email: Some("operations@naivolt.com".into()),
             email_from: "Naivolt <no-reply@naivolt.com>".into(),
             signer_url: Some("https://signer.internal".into()),
             dev_mnemonic: None,
@@ -311,6 +332,9 @@ mod tests {
             google_client_id: Some("naivolt-web.apps.googleusercontent.com".into()),
             fivesim_api_key: Some("5sim_live".into()),
             fivesim_currency: Some("USD".into()),
+            smspool_api_key: None,
+            smspool_currency: Some("USD".into()),
+            smspool_base_url: "https://api.smspool.net".into(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "https://naivolt.com".into(),
@@ -333,7 +357,10 @@ mod tests {
         // A guessable shared secret is worse than none: it reads as protection
         // while exposing every customer email to anyone who tries.
         std::env::set_var("ADMIN_TOKEN", "letmein");
-        assert!(env::var("ADMIN_TOKEN").ok().filter(|s| s.len() >= 24).is_none());
+        assert!(env::var("ADMIN_TOKEN")
+            .ok()
+            .filter(|s| s.len() >= 24)
+            .is_none());
         std::env::remove_var("ADMIN_TOKEN");
     }
 

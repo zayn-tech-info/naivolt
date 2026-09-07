@@ -23,6 +23,22 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::time::Duration;
 
+#[derive(Debug)]
+pub enum PurchaseError {
+    Rejected(ApiError),
+    Ambiguous,
+}
+
+impl PurchaseError {
+    pub fn is_out_of_stock(&self) -> bool {
+        matches!(
+            self,
+            PurchaseError::Rejected(ApiError::ServiceUnavailable(message))
+                if message.contains("out of stock")
+        )
+    }
+}
+
 /// A number the supplier has assigned to one of our orders.
 /// One message a number received.
 #[derive(Debug, Clone)]
@@ -47,6 +63,7 @@ pub struct Activation {
 }
 
 /// Where an order has got to, as the supplier sees it.
+#[derive(Clone)]
 pub enum ActivationState {
     /// Bought, no SMS yet.
     Pending,
@@ -67,13 +84,21 @@ pub enum AnyNumberProvider {
     FiveSim(FiveSimProvider),
     /// Development only.
     Stub(StubProvider),
+    #[cfg(test)]
+    CountingStub(CountingStubProvider),
+    #[cfg(test)]
+    ScriptedStub(ScriptedStubProvider),
 }
 
 impl AnyNumberProvider {
-    pub async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+    pub async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         match self {
-            AnyNumberProvider::FiveSim(p) => p.buy(country, product).await,
+            AnyNumberProvider::FiveSim(p) => p.buy(country, product, ANY_OPERATOR).await,
             AnyNumberProvider::Stub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(p) => p.buy(country, product).await,
         }
     }
 
@@ -81,6 +106,10 @@ impl AnyNumberProvider {
         match self {
             AnyNumberProvider::FiveSim(p) => p.check(order_id).await,
             AnyNumberProvider::Stub(p) => p.check(order_id).await,
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(_) => Ok(ActivationState::Pending),
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(p) => p.check(order_id).await,
         }
     }
 
@@ -90,11 +119,97 @@ impl AnyNumberProvider {
         match self {
             AnyNumberProvider::FiveSim(p) => p.cancel(order_id).await,
             AnyNumberProvider::Stub(_) => Ok(()),
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(_) => Ok(()),
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(_) => Ok(()),
         }
     }
 
     pub fn is_live(&self) -> bool {
         matches!(self, AnyNumberProvider::FiveSim(_))
+    }
+
+    pub async fn buy_with(
+        &self,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
+        match self {
+            AnyNumberProvider::FiveSim(p) => p.buy(country, product, operator).await,
+            AnyNumberProvider::Stub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::CountingStub(p) => p.buy(country, product).await,
+            #[cfg(test)]
+            AnyNumberProvider::ScriptedStub(p) => p.buy(country, product).await,
+        }
+    }
+}
+
+/// Primary supplier plus optional SMSPool. Old buy uses `primary`.
+pub struct NumberProviders {
+    pub primary: AnyNumberProvider,
+    pub smspool: Option<crate::number_smspool::SmsPoolProvider>,
+}
+
+impl From<AnyNumberProvider> for NumberProviders {
+    fn from(primary: AnyNumberProvider) -> Self {
+        Self {
+            primary,
+            smspool: None,
+        }
+    }
+}
+
+impl std::ops::Deref for NumberProviders {
+    type Target = AnyNumberProvider;
+    fn deref(&self) -> &Self::Target {
+        &self.primary
+    }
+}
+
+impl NumberProviders {
+    pub async fn buy_source(
+        &self,
+        provider: &str,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
+        match provider {
+            "smspool" => match &self.smspool {
+                Some(pool) => pool.buy(country, product).await,
+                None => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+                    "That number is out of stock right now. Try another country.".into(),
+                ))),
+            },
+            "fivesim" => self.primary.buy_with(country, product, operator).await,
+            "stub" => self.primary.buy(country, product).await,
+            _ => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+                "We couldn't get a number just now. Nothing was charged.".into(),
+            ))),
+        }
+    }
+
+    pub async fn check_for(&self, provider: &str, order_id: &str) -> ApiResult<ActivationState> {
+        match provider {
+            "smspool" => match &self.smspool {
+                Some(pool) => pool.check(order_id).await,
+                None => self.primary.check(order_id).await,
+            },
+            _ => self.primary.check(order_id).await,
+        }
+    }
+
+    pub async fn cancel_for(&self, provider: &str, order_id: &str) -> ApiResult<()> {
+        match provider {
+            "smspool" => match &self.smspool {
+                Some(pool) => pool.cancel(order_id).await,
+                None => self.primary.cancel(order_id).await,
+            },
+            _ => self.primary.cancel(order_id).await,
+        }
     }
 }
 
@@ -150,8 +265,18 @@ impl FiveSimProvider {
         }
     }
 
-    async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
-        let url = format!("{FIVESIM_BASE}/buy/activation/{country}/{ANY_OPERATOR}/{product}");
+    async fn buy(
+        &self,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
+        let operator = if operator.trim().is_empty() {
+            ANY_OPERATOR
+        } else {
+            operator
+        };
+        let url = format!("{FIVESIM_BASE}/buy/activation/{country}/{operator}/{product}");
 
         let response = self
             .http
@@ -161,15 +286,13 @@ impl FiveSimProvider {
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, %country, %product, "5sim buy failed");
-                ApiError::ServiceUnavailable(
-                    "We couldn't reach our number provider. Nothing was charged.".into(),
-                )
+                PurchaseError::Ambiguous
             })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            tracing::warn!(%status, %body, %country, %product, "5sim buy rejected");
+            tracing::warn!(%status, %country, %product, "5sim buy rejected");
 
             // 5SIM answers in bare strings rather than codes. Only the
             // out-of-stock case is worth showing a user, because it is the only
@@ -182,12 +305,17 @@ impl FiveSimProvider {
             } else {
                 "We couldn't get a number just now. Nothing was charged."
             };
-            return Err(ApiError::ServiceUnavailable(message.into()));
+            let error = ApiError::ServiceUnavailable(message.into());
+            return if status.is_server_error() {
+                Err(PurchaseError::Ambiguous)
+            } else {
+                Err(PurchaseError::Rejected(error))
+            };
         }
 
         let order: FiveSimOrder = response.json().await.map_err(|e| {
             tracing::warn!(error = %e, "5sim buy returned unreadable body");
-            ApiError::ServiceUnavailable("We couldn't get a number just now.".into())
+            PurchaseError::Ambiguous
         })?;
 
         Ok(Activation {
@@ -269,6 +397,9 @@ impl FiveSimProvider {
 
         if !response.status().is_success() {
             tracing::warn!(status = %response.status(), %order_id, "5sim cancel rejected");
+            return Err(ApiError::ServiceUnavailable(
+                "That number can't be released just yet — try again in a moment.".into(),
+            ));
         }
         Ok(())
     }
@@ -281,8 +412,81 @@ impl FiveSimProvider {
 #[derive(Clone)]
 pub struct StubProvider;
 
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct CountingStubProvider {
+    buy_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl CountingStubProvider {
+    pub fn buy_calls(&self) -> usize {
+        self.buy_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
+        self.buy_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        StubProvider.buy(country, product).await
+    }
+}
+
+fn stub_received() -> ActivationState {
+    ActivationState::Received {
+        code: "123456".into(),
+        text: "Your code is 123456".into(),
+        messages: vec![Sms {
+            sender: Some("Naivolt".into()),
+            text: "Your code is 123456".into(),
+            code: Some("123456".into()),
+            received_at: None,
+        }],
+    }
+}
+
+/// Test helper: `check()` returns a scripted supplier view, including failures.
+#[cfg(test)]
+#[derive(Clone)]
+pub struct ScriptedStubProvider {
+    check: std::sync::Arc<std::sync::Mutex<Result<ActivationState, String>>>,
+}
+
+#[cfg(test)]
+impl ScriptedStubProvider {
+    pub fn received() -> Self {
+        Self {
+            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(stub_received()))),
+        }
+    }
+
+    pub fn pending() -> Self {
+        Self {
+            check: std::sync::Arc::new(std::sync::Mutex::new(Ok(ActivationState::Pending))),
+        }
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            check: std::sync::Arc::new(std::sync::Mutex::new(Err(
+                "supplier check unavailable".into(),
+            ))),
+        }
+    }
+
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
+        StubProvider.buy(country, product).await
+    }
+
+    async fn check(&self, _order_id: &str) -> ApiResult<ActivationState> {
+        match &*self.check.lock().unwrap() {
+            Ok(state) => Ok(state.clone()),
+            Err(message) => Err(ApiError::ServiceUnavailable(message.clone())),
+        }
+    }
+}
+
 impl StubProvider {
-    async fn buy(&self, country: &str, product: &str) -> ApiResult<Activation> {
+    async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
         let seed = uuid::Uuid::new_v4().simple().to_string();
         Ok(Activation {
             provider_order_id: format!("stub-{}", &seed[..12]),
@@ -297,16 +501,7 @@ impl StubProvider {
     }
 
     async fn check(&self, _order_id: &str) -> ApiResult<ActivationState> {
-        Ok(ActivationState::Received {
-            code: "123456".into(),
-            text: "Your code is 123456".into(),
-            messages: vec![Sms {
-                sender: Some("Naivolt".into()),
-                text: "Your code is 123456".into(),
-                code: Some("123456".into()),
-                received_at: None,
-            }],
-        })
+        Ok(stub_received())
     }
 }
 
@@ -319,11 +514,10 @@ mod tests {
         // `is_live` gates the provider label written onto every order. A stub
         // that claimed to be live would leave rows saying 5SIM sold a number it
         // has never heard of.
-        assert!(AnyNumberProvider::FiveSim(FiveSimProvider::new(
-            "key".into(),
-            Some("USD".into())
-        ))
-        .is_live());
+        assert!(
+            AnyNumberProvider::FiveSim(FiveSimProvider::new("key".into(), Some("USD".into())))
+                .is_live()
+        );
         assert!(!AnyNumberProvider::Stub(StubProvider).is_live());
     }
 

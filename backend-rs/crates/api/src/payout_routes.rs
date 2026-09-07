@@ -386,9 +386,24 @@ pub(crate) async fn lock_user_ngn_account(
         return Ok(id);
     }
 
-    let id: Uuid = sqlx::query_scalar(
+    let inserted: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO ledger_accounts (kind, user_id, asset) VALUES ('user_ngn', $1, 'NGN')
+         ON CONFLICT (user_id, kind, asset) WHERE user_id IS NOT NULL DO NOTHING
          RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    if let Some(id) = inserted {
+        return Ok(id);
+    }
+
+    let id = sqlx::query_scalar(
+        "SELECT id FROM ledger_accounts
+          WHERE kind = 'user_ngn' AND user_id = $1 AND asset = 'NGN'
+          FOR UPDATE",
     )
     .bind(user_id)
     .fetch_one(&mut **tx)
@@ -428,4 +443,46 @@ pub(crate) async fn platform_account(
 
 pub fn bank_name_for(code: &str) -> String {
     crate::bank_routes::bank_name(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_database::IsolatedDatabase;
+
+    #[tokio::test]
+    async fn concurrent_first_ngn_account_creation_returns_one_account() {
+        let database = IsolatedDatabase::new("ngn_account_race_test").await;
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email) VALUES ('ngn-account-race@example.test') RETURNING id",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+
+        let create = |pool: sqlx::PgPool| async move {
+            let mut tx = pool.begin().await.unwrap();
+            let id = lock_user_ngn_account(&mut tx, user_id).await.unwrap();
+            tx.commit().await.unwrap();
+            id
+        };
+        let (first, second) = tokio::join!(
+            create(database.pool.clone()),
+            create(database.pool.clone())
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM ledger_accounts
+                  WHERE kind = 'user_ngn' AND user_id = $1 AND asset = 'NGN'",
+            )
+            .bind(user_id)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap(),
+            1
+        );
+        database.cleanup().await;
+    }
 }
