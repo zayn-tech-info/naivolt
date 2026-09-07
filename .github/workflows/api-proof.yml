@@ -20,7 +20,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres -d naivolt_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -28,7 +28,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/naivolt_test
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - name: Test workspace against Postgres
