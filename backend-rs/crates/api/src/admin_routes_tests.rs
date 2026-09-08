@@ -435,6 +435,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exhausted_recheck_inserts_one_alert_without_buying() {
+        // covers: AC-10 exhausted recheck alert, AC-12 scripted stub
+        let database = IsolatedDatabase::new("ops_exhausted").await;
+        let pool = database.pool.clone();
+        let stub = ScriptedStubProvider::failing();
+        let id = held_order(
+            &pool,
+            "exh",
+            "awaiting_code",
+            Some("stub-exh"),
+            None,
+            None,
+        )
+        .await;
+        sqlx::query("UPDATE number_orders SET reconcile_attempt_count = 4 WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = test_state(pool.clone(), AnyNumberProvider::ScriptedStub(stub.clone()));
+        let token = enroll_and_login(&state, "exhausted@example.test").await;
+        let first = recheck_order(State(state.clone()), operator_headers(&token), Path(id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(first.status, "awaiting_code");
+        assert_eq!(stub.buy_calls(), 0);
+        let key = format!("number-recheck-exhausted:{id}");
+        let alerts: Vec<(String, String)> = sqlx::query_as(
+            "SELECT dedupe_key, state FROM operator_alerts WHERE number_order_id = $1 AND dedupe_key = $2",
+        )
+        .bind(id)
+        .bind(&key)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].0, key);
+        assert_eq!(alerts[0].1, "pending");
+
+        let _again = recheck_order(State(state), operator_headers(&token), Path(id))
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM operator_alerts WHERE dedupe_key = $1",
+        )
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn worker_claim_blocks_operator_refund() {
         let database = IsolatedDatabase::new("ops_claim").await;
         let pool = database.pool.clone();
