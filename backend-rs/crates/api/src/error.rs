@@ -64,6 +64,16 @@ pub enum ApiError {
     // --- generic ---
     #[error("{0}")]
     BadRequest(String),
+    #[error("too many TOTP attempts, try again shortly")]
+    TotpLocked,
+    #[error("this operator is disabled")]
+    OperatorDisabled,
+    #[error("that refund is over the configured cap")]
+    RefundCap,
+    #[error("this order cannot be rechecked without buying again")]
+    RecheckUnavailable,
+    #[error("another worker is updating this order")]
+    ClaimConflict,
     #[error("{0}")]
     Conflict(String),
     #[error("not found")]
@@ -94,6 +104,11 @@ impl ApiError {
             ApiError::AssetPaused { .. } => "ASSET_PAUSED",
             ApiError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
             ApiError::BadRequest(_) => "BAD_REQUEST",
+            ApiError::TotpLocked => "TOTP_LOCKED",
+            ApiError::OperatorDisabled => "FORBIDDEN",
+            ApiError::RefundCap => "REFUND_CAP",
+            ApiError::RecheckUnavailable => "RECHECK_UNAVAILABLE",
+            ApiError::ClaimConflict => "CLAIM_CONFLICT",
             ApiError::Conflict(_) => "CONFLICT",
             ApiError::NotFound => "NOT_FOUND",
             ApiError::RateLimited { .. } => "RATE_LIMITED",
@@ -114,15 +129,19 @@ impl ApiError {
             ApiError::InsufficientBalance
             | ApiError::LimitExceeded { .. }
             | ApiError::BankUnverified => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::KycRequired { .. } => StatusCode::FORBIDDEN,
+            ApiError::KycRequired { .. } | ApiError::OperatorDisabled => StatusCode::FORBIDDEN,
             ApiError::QuoteExpired | ApiError::QuoteConsumed | ApiError::PriceMoved { .. } => {
                 StatusCode::CONFLICT
             }
             ApiError::AssetPaused { .. } | ApiError::ServiceUnavailable(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
-            ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::BadRequest(_) | ApiError::TotpLocked | ApiError::RefundCap => {
+                StatusCode::BAD_REQUEST
+            }
+            ApiError::Conflict(_)
+            | ApiError::RecheckUnavailable
+            | ApiError::ClaimConflict => StatusCode::CONFLICT,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

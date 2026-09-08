@@ -1,38 +1,37 @@
-//! A read-only window on what the platform is doing.
+//! Operator overview, search, TOTP sessions, supplier recheck, and held refunds.
 //!
-//! ## This is not the admin panel ARCHITECTURE.md §10.4 describes
-//!
-//! That one has its own identity table, mandatory TOTP, an IP allowlist,
-//! 30-minute sessions, RBAC across four roles, and every mutating action in the
-//! hash-chained `audit_log`. It is days of work and it is the right answer for a
-//! panel that can *move money*.
-//!
-//! This one moves nothing. Every endpoint here is a `SELECT`. It exists because
-//! the alternative — running SQL over SSH to answer "did that top-up land" — is
-//! worse in every way including safety, and because an operator who cannot see
-//! the system cannot notice it is wrong.
-//!
-//! Access is a single shared token in `ADMIN_TOKEN`. That is a real limitation
-//! and not a design: there is no per-person identity, so nothing here can be
-//! attributed to who looked, and a leaked token exposes customer emails and
-//! order history until it is rotated. Unset the variable and these routes stop
-//! existing — which is the correct state for any deployment that does not need
-//! them today.
+//! Reads and enroll still use the shared `ADMIN_TOKEN`. Recheck and refund need
+//! a named operator session. Money still goes through the existing order
+//! transition. This is not the four role panel in ARCHITECTURE.md §10.4 (no IP
+//! allowlist, no extra roles). Unset `ADMIN_TOKEN` and the read routes answer
+//! 404.
 
 use crate::error::{ApiError, ApiResult};
+use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
+use crate::number_reconciler;
+use crate::operator;
 use crate::state::AppState;
-use axum::extract::{Query, State};
-use axum::http::HeaderMap;
-use axum::routing::get;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/overview", get(overview))
         .route("/admin/activity", get(activity))
+        .route("/admin/orders", get(list_orders))
+        .route("/admin/orders/:id", get(order_detail))
+        .route("/admin/orders/:id/recheck", post(recheck_order))
+        .route("/admin/orders/:id/refund", post(refund_order))
+        .route("/admin/operators", post(enroll_operator))
+        .route("/admin/operator/session", post(create_session).delete(delete_session))
 }
 
 /// Constant-time-ish check on the shared token.
@@ -90,6 +89,10 @@ pub struct Overview {
     pub supplier_cost: String,
     pub catalogue_products: i64,
     pub catalogue_in_stock: i64,
+    pub oldest_open_age_seconds: Option<i64>,
+    pub catalogue_synced_at: Option<String>,
+    pub operator_refunds_last24h: i64,
+    pub last_provider_error_category: Option<String>,
 }
 
 async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Overview>> {
@@ -128,6 +131,33 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
         .fetch_one(&state.db)
         .await?;
 
+    let oldest_open_age_seconds: Option<i64> = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM now() - min(created_at))::bigint
+           FROM number_orders
+          WHERE status IN ('reserved','awaiting_code','review_required')",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    let catalogue_synced_at: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT max(synced_at) FROM number_prices")
+            .fetch_one(&state.db)
+            .await?;
+    let operator_refunds_last24h: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log
+          WHERE action = 'number_refund' AND created_at > now() - interval '24 hours'",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    let last_provider_error_category: Option<String> = sqlx::query_scalar(
+        "SELECT reconcile_last_error_category FROM number_orders
+          WHERE status IN ('reserved','awaiting_code','review_required')
+            AND reconcile_last_error_category IS NOT NULL
+          ORDER BY reconcile_last_checked_at DESC NULLS LAST, created_at DESC
+          LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await?;
+
     Ok(Json(Overview {
         users: row.0,
         orders_total: row.1,
@@ -144,6 +174,10 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
         supplier_cost: row.12.normalize().to_string(),
         catalogue_products: row.13,
         catalogue_in_stock: row.14,
+        oldest_open_age_seconds,
+        catalogue_synced_at: catalogue_synced_at.map(|at| at.to_rfc3339()),
+        operator_refunds_last24h,
+        last_provider_error_category,
     }))
 }
 
@@ -216,3 +250,6 @@ async fn activity(
             .collect(),
     ))
 }
+
+include!("admin_recovery.rs");
+include!("admin_routes_tests.rs");
