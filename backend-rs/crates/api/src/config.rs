@@ -93,6 +93,8 @@ pub struct Config {
     /// When true, honor `X-Real-IP` only if the TCP peer is loopback.
     pub trusted_proxy_loopback: bool,
     pub rate_limits: RateLimitQuotas,
+    pub operator_totp_key: Option<Vec<u8>>,
+    pub admin_refund_cap_ngn: Decimal,
 }
 
 /// Per minute token bucket sizes for the HTTP limiter.
@@ -242,6 +244,8 @@ impl Config {
             cors_allowed_origins: Vec::new(),
             trusted_proxy_loopback: false,
             rate_limits: RateLimitQuotas::defaults(),
+            operator_totp_key: None,
+            admin_refund_cap_ngn: Decimal::from(100_000),
         };
 
         let cors_override = env::var("CORS_ALLOWED_ORIGINS").ok();
@@ -252,6 +256,11 @@ impl Config {
         )?;
         config.trusted_proxy_loopback = trusted_proxy_loopback(config.environment)?;
         config.rate_limits = RateLimitQuotas::from_env()?;
+        config.operator_totp_key = operator_totp_key_from_env()?;
+        config.admin_refund_cap_ngn = decimal_env("ADMIN_REFUND_CAP_NGN", Decimal::from(100_000))?;
+        if config.admin_refund_cap_ngn <= Decimal::ZERO {
+            bail!("ADMIN_REFUND_CAP_NGN must be a positive number");
+        }
 
         // A margin at or below 1 sells every number for less than it costs.
         if config.numbers_margin <= Decimal::ONE {
@@ -333,6 +342,14 @@ impl Config {
         // exist and charge them for the privilege.
         if self.fivesim_api_key.is_none() {
             bail!("FIVESIM_API_KEY is required in production — the stub provider issues numbers that do not exist");
+        }
+
+        match &self.operator_totp_key {
+            None => bail!("OPERATOR_TOTP_KEY is required in production and must be at least 32 bytes"),
+            Some(key) if key.len() < 32 => {
+                bail!("OPERATOR_TOTP_KEY is {} bytes; at least 32 are required", key.len())
+            }
+            Some(_) => {}
         }
 
         // Paystack returns the payer to this URL. Left at its development
@@ -443,6 +460,17 @@ fn trusted_proxy_loopback(environment: Environment) -> Result<bool> {
     }
 }
 
+fn operator_totp_key_from_env() -> Result<Option<Vec<u8>>> {
+    match env::var("OPERATOR_TOTP_KEY") {
+        Ok(raw) if raw.is_empty() => Ok(None),
+        Ok(raw) if raw.len() < 32 => {
+            bail!("OPERATOR_TOTP_KEY must be at least 32 bytes, got {}", raw.len())
+        }
+        Ok(raw) => Ok(Some(raw.into_bytes())),
+        Err(_) => Ok(None),
+    }
+}
+
 fn u32_env(key: &str, fallback: u32) -> Result<u32> {
     match env::var(key) {
         Ok(raw) if !raw.trim().is_empty() => {
@@ -518,6 +546,8 @@ mod tests {
             cors_allowed_origins: vec![PRODUCTION_WEB_ORIGIN.to_owned()],
             trusted_proxy_loopback: true,
             rate_limits: RateLimitQuotas::defaults(),
+            operator_totp_key: Some(b"01234567890123456789012345678901".to_vec()),
+            admin_refund_cap_ngn: Decimal::from(100_000),
         }
     }
 
@@ -582,6 +612,18 @@ mod tests {
         let mut config = production_config();
         config.dev_mnemonic = Some("test test test".into());
         assert!(config.validate_for_environment().is_err());
+    }
+
+    #[test]
+    fn production_refuses_to_boot_without_an_operator_totp_key() {
+        let mut config = production_config();
+        config.operator_totp_key = None;
+        let err = config.validate_for_environment().unwrap_err().to_string();
+        assert!(err.contains("OPERATOR_TOTP_KEY"), "unexpected error: {err}");
+
+        config.operator_totp_key = Some(b"too-short".to_vec());
+        let err = config.validate_for_environment().unwrap_err().to_string();
+        assert!(err.contains("OPERATOR_TOTP_KEY"), "unexpected error: {err}");
     }
 
     #[test]

@@ -108,6 +108,7 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
             HeaderName::from_static("content-type"),
             HeaderName::from_static("idempotency-key"),
             HeaderName::from_static("x-admin-token"),
+            HeaderName::from_static("x-operator-session"),
         ])
         .allow_origin(AllowOrigin::list(values))
 }
@@ -363,6 +364,7 @@ mod tests {
             "content-type",
             "idempotency-key",
             "x-admin-token",
+            "x-operator-session",
         ] {
             assert!(allow.contains(header), "{allow}");
         }

@@ -21,6 +21,7 @@ mod google_keys;
 mod kyc_routes;
 mod middleware;
 mod notify;
+mod operator;
 mod number_catalog;
 mod number_offers;
 mod number_order_transitions;
@@ -122,6 +123,9 @@ async fn main() -> Result<()> {
         web_app_url: config.web_app_url.clone(),
         admin_token: config.admin_token.clone(),
         operations_alert_email: config.operations_alert_email.clone(),
+        operator_totp_key: config.operator_totp_key.clone(),
+        admin_refund_cap_ngn: config.admin_refund_cap_ngn,
+        totp_lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         google_allowed_emails: Arc::new(config.google_allowed_emails.clone()),
         funding: Arc::new(match &config.paystack_secret_key {
             Some(key) => funding_provider::AnyFundingProvider::Paystack(

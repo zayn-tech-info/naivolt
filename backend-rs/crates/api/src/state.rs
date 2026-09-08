@@ -37,6 +37,9 @@ pub struct AppState {
     /// Shared secret for the read-only admin endpoints; None disables them.
     pub admin_token: Option<String>,
     pub operations_alert_email: Option<String>,
+    pub operator_totp_key: Option<Vec<u8>>,
+    pub admin_refund_cap_ngn: rust_decimal::Decimal,
+    pub totp_lockouts: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>>,
     /// Where the dashboard lives, without a trailing slash. Paystack returns the
     /// payer to a URL under it.
     pub web_app_url: String,

@@ -501,6 +501,7 @@ enum ScriptedBuy {
 pub struct ScriptedStubProvider {
     check: std::sync::Arc<std::sync::Mutex<Result<ActivationCheck, String>>>,
     buy: std::sync::Arc<std::sync::Mutex<ScriptedBuy>>,
+    buy_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(test)]
@@ -509,7 +510,12 @@ impl ScriptedStubProvider {
         Self {
             check: std::sync::Arc::new(std::sync::Mutex::new(check)),
             buy: std::sync::Arc::new(std::sync::Mutex::new(ScriptedBuy::Succeed)),
+            buy_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    pub fn buy_calls(&self) -> usize {
+        self.buy_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn received() -> Self {
@@ -557,6 +563,8 @@ impl ScriptedStubProvider {
     }
 
     async fn buy(&self, country: &str, product: &str) -> Result<Activation, PurchaseError> {
+        self.buy_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let action = *self.buy.lock().unwrap();
         match action {
             ScriptedBuy::Succeed => StubProvider.buy(country, product).await,

@@ -148,6 +148,24 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
     Ok(())
 }
 
+pub(crate) async fn try_claim_held_order(db: &PgPool, id: Uuid) -> ApiResult<Option<Uuid>> {
+    sqlx::query_scalar(
+        "UPDATE number_orders
+            SET reconcile_claim_token = gen_random_uuid(),
+                reconcile_claimed_until = now() + interval '60 seconds',
+                updated_at = now()
+          WHERE id = $1
+            AND status IN ('reserved', 'awaiting_code', 'review_required')
+            AND (reconcile_claimed_until IS NULL OR reconcile_claimed_until < now())
+          RETURNING reconcile_claim_token",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    .map_err(anyhow::Error::from)
+    .map_err(ApiError::Internal)
+}
+
 pub(crate) async fn try_claim_order(db: &PgPool, id: Uuid) -> ApiResult<Option<Uuid>> {
     sqlx::query_scalar(
         "UPDATE number_orders
@@ -166,7 +184,7 @@ pub(crate) async fn try_claim_order(db: &PgPool, id: Uuid) -> ApiResult<Option<U
     .map_err(ApiError::Internal)
 }
 
-async fn claim_slot(db: &PgPool, token: Uuid) -> ApiResult<Option<i16>> {
+pub(crate) async fn claim_slot(db: &PgPool, token: Uuid) -> ApiResult<Option<i16>> {
     sqlx::query_scalar(
         "WITH available AS (SELECT slot FROM number_provider_slots
           WHERE claimed_until IS NULL OR claimed_until < now() ORDER BY slot FOR UPDATE SKIP LOCKED LIMIT 1)
@@ -175,13 +193,13 @@ async fn claim_slot(db: &PgPool, token: Uuid) -> ApiResult<Option<i16>> {
         .bind(token).fetch_optional(db).await.map_err(anyhow::Error::from).map_err(ApiError::Internal)
 }
 
-async fn release_slot(db: &PgPool, slot: i16, token: Uuid) -> ApiResult<()> {
+pub(crate) async fn release_slot(db: &PgPool, slot: i16, token: Uuid) -> ApiResult<()> {
     sqlx::query("UPDATE number_provider_slots SET claim_token=NULL, claimed_until=NULL WHERE slot=$1 AND claim_token=$2")
         .bind(slot).bind(token).execute(db).await?;
     Ok(())
 }
 
-async fn release_order(
+pub(crate) async fn release_order(
     db: &PgPool,
     id: Uuid,
     token: Uuid,
@@ -239,7 +257,7 @@ async fn deliver_alert(state: &AppState) -> ApiResult<()> {
            AND (claimed_until IS NULL OR claimed_until<now()) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1)
          UPDATE operator_alerts a SET claim_token=$1, claimed_until=now()+interval '60 seconds', updated_at=now()
           FROM due, number_orders o WHERE a.id=due.id AND o.id=a.number_order_id
-         RETURNING a.id,o.reference,o.review_reason,o.review_required_at")
+         RETURNING a.id,o.reference,COALESCE(o.review_reason, a.dedupe_key),COALESCE(o.review_required_at, a.created_at)")
         .bind(token).fetch_optional(&state.db).await?;
     let Some((id, reference, reason, at)) = row else {
         return Ok(());
@@ -318,6 +336,8 @@ mod tests {
             cors_allowed_origins: vec!["http://localhost:5173".into()],
             trusted_proxy_loopback: false,
             rate_limits: crate::config::RateLimitQuotas::defaults(),
+            operator_totp_key: None,
+            admin_refund_cap_ngn: rust_decimal::Decimal::from(100_000),
         }
     }
 
@@ -346,6 +366,9 @@ mod tests {
             google_allowed_emails: Arc::new(Vec::new()),
             admin_token: None,
             operations_alert_email: None,
+            operator_totp_key: None,
+            admin_refund_cap_ngn: rust_decimal::Decimal::from(100_000),
+            totp_lockouts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             web_app_url: "http://localhost".into(),
         }
     }

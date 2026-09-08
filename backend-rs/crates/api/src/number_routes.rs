@@ -1116,6 +1116,8 @@ mod tests {
             cors_allowed_origins: vec!["http://localhost:5173".into()],
             trusted_proxy_loopback: false,
             rate_limits: crate::config::RateLimitQuotas::defaults(),
+            operator_totp_key: None,
+            admin_refund_cap_ngn: rust_decimal::Decimal::from(100_000),
         }
     }
 
@@ -1189,6 +1191,9 @@ mod tests {
             google_allowed_emails: Arc::new(Vec::new()),
             admin_token: None,
             operations_alert_email: None,
+            operator_totp_key: None,
+            admin_refund_cap_ngn: rust_decimal::Decimal::from(100_000),
+            totp_lockouts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             web_app_url: "http://localhost".into(),
         };
         let (product_slug, country_code, price): (String, String, Decimal) = sqlx::query_as(
@@ -1402,6 +1407,9 @@ mod tests {
             google_allowed_emails: Arc::new(Vec::new()),
             admin_token: None,
             operations_alert_email: None,
+            operator_totp_key: None,
+            admin_refund_cap_ngn: rust_decimal::Decimal::from(100_000),
+            totp_lockouts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             web_app_url: "http://localhost".into(),
         }
     }
