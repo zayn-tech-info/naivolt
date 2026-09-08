@@ -555,6 +555,13 @@ async fn create_order(
             )
         };
 
+    // Catalogue buy always hits `primary`. Live Paystack plus a stub primary
+    // (even if SMSPool is configured) must not sell a fake number.
+    if state.funding.is_live() && !state.numbers.primary.is_live() && offer_id.is_none() {
+        return Err(ApiError::ServiceUnavailable(
+            "Numbers aren't on sale yet. Nothing has been charged.".into(),
+        ));
+    }
     if !state.numbers.is_live() && state.funding.is_live() {
         return Err(ApiError::ServiceUnavailable(
             "Numbers aren't on sale yet. Nothing has been charged.".into(),
@@ -854,6 +861,10 @@ async fn cancel_order(
 
     let (status, provider_order_id, sms_code, message_count, provider) =
         row.ok_or(ApiError::NotFound)?;
+    if status == "review_required" {
+        // Spec 0003 AC-11: cancellation leaves review_required unchanged.
+        return load_order(&state, user.id, id).await.map(Json);
+    }
     let locally_cancellable = matches!(status.as_str(), "reserved" | "awaiting_code")
         && sms_code.as_deref().map(str::trim).unwrap_or("").is_empty()
         && message_count == 0;
@@ -1063,7 +1074,9 @@ mod tests {
     use crate::funding_provider::{AnyFundingProvider, StubFunding};
     use crate::google_keys::GoogleKeys;
     use crate::notify::{AnyNotifier, LogNotifier};
-    use crate::number_provider::{AnyNumberProvider, CountingStubProvider, ScriptedStubProvider};
+    use crate::number_provider::{
+        AnyNumberProvider, CountingStubProvider, NumberProviders, ScriptedStubProvider,
+    };
     use crate::payout_provider;
     use crate::pricing::Rates;
     use crate::signer::{AnyAddressProvider, LocalSigner};
@@ -1923,6 +1936,67 @@ mod tests {
         {
             Err(error) => error,
             Ok(_) => panic!("stub offer must not buy when funding is live"),
+        };
+        assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+        let orders: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_orders WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(orders, 0);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn catalogue_buy_blocked_when_funding_is_live_and_primary_is_stub() {
+        let database = IsolatedDatabase::new("catalogue_stub_live_funding").await;
+        let pool = database.pool.clone();
+        let (product_slug, country_code, price) = IsolatedDatabase::first_listed_sku(&pool).await;
+        let user_id = IsolatedDatabase::insert_funded_user(
+            &pool,
+            "catalogue-live-fund@example.test",
+            dec!(100000),
+        )
+        .await;
+
+        let mut state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        state.funding = Arc::new(AnyFundingProvider::Paystack(
+            crate::funding_provider::PaystackFunding::new("sk_test_not_used".into()),
+        ));
+        // SMSPool present makes NumberProviders::is_live true; catalogue still
+        // buys from the stub primary and must refuse.
+        state.numbers = Arc::new(NumberProviders {
+            primary: AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            smspool: Some(crate::number_smspool::SmsPoolProvider::new(
+                "key".into(),
+                Some("USD".into()),
+                None,
+            )),
+        });
+
+        let err = match create_order(
+            State(state),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            idempotency_headers(),
+            Json(CreateOrderBody {
+                offer_id: None,
+                product_slug,
+                country_code,
+                expected_price_ngn: Some(price.normalize().to_string()),
+            }),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("catalogue stub must not buy when funding is live"),
         };
         assert!(matches!(err, ApiError::ServiceUnavailable(_)));
         let orders: i64 =

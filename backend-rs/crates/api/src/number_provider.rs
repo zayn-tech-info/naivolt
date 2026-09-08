@@ -229,7 +229,9 @@ impl NumberProviders {
         match provider {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.check(order_id).await,
-                None => self.primary.check(order_id).await,
+                None => Err(ApiError::ServiceUnavailable(
+                    "That number isn't available to check right now.".into(),
+                )),
             },
             _ => self.primary.check(order_id).await,
         }
@@ -239,7 +241,9 @@ impl NumberProviders {
         match provider {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.cancel(order_id).await,
-                None => self.primary.cancel(order_id).await,
+                None => Err(ApiError::ServiceUnavailable(
+                    "That number isn't available to cancel right now.".into(),
+                )),
             },
             _ => self.primary.cancel(order_id).await,
         }
@@ -440,7 +444,6 @@ impl CountingStubProvider {
 
 fn fivesim_activation_check(order: FiveSimOrder) -> ActivationCheck {
     let status = order.status.to_ascii_uppercase();
-    let waiting = matches!(status.as_str(), "PENDING" | "RECEIVED");
     let closed = matches!(
         status.as_str(),
         "FINISHED" | "TIMEOUT" | "CANCELED" | "CANCELLED" | "BANNED"
@@ -460,9 +463,9 @@ fn fivesim_activation_check(order: FiveSimOrder) -> ActivationCheck {
             }),
         })
         .collect();
-    let lifecycle = if waiting && !closed {
-        ActivationLifecycle::Open
-    } else if closed || !waiting {
+    // Unknown or missing status stays Open. Closing on "" invented a finish the
+    // supplier never sent (spec 0005: unrecognised stays open).
+    let lifecycle = if closed {
         ActivationLifecycle::Closed
     } else {
         ActivationLifecycle::Open
@@ -688,6 +691,41 @@ mod tests {
             assert_eq!(check.messages.len(), 1);
             assert_eq!(check.messages[0].code.as_deref(), Some("999999"));
         }
+    }
+
+    #[test]
+    fn unrecognised_or_missing_five_sim_status_stays_open() {
+        let missing = fivesim_activation_check(fivesim_order(serde_json::json!({
+            "id": 3,
+            "phone": "+000",
+            "sms": []
+        })));
+        assert_eq!(missing.lifecycle, ActivationLifecycle::Open);
+        for status in ["", "RESERVED"] {
+            let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+                "id": 3,
+                "phone": "+000",
+                "status": status,
+                "sms": []
+            })));
+            assert_eq!(
+                check.lifecycle,
+                ActivationLifecycle::Open,
+                "status {status:?} must stay open"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn smspool_check_and_cancel_do_not_fall_back_to_primary() {
+        let providers = NumberProviders {
+            primary: AnyNumberProvider::Stub(StubProvider),
+            smspool: None,
+        };
+        let check = providers.check_for("smspool", "pool-1").await;
+        assert!(matches!(check, Err(ApiError::ServiceUnavailable(_))));
+        let cancel = providers.cancel_for("smspool", "pool-1").await;
+        assert!(matches!(cancel, Err(ApiError::ServiceUnavailable(_))));
     }
 
     #[test]

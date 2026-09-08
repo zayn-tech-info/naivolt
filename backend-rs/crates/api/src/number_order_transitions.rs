@@ -228,6 +228,21 @@ pub(crate) async fn apply_check(
             .await;
         }
         if check.lifecycle == ActivationLifecycle::Closed || expired {
+            let inbox_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM number_messages WHERE order_id = $1",
+            )
+            .bind(order_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(anyhow::Error::from)?;
+            if inbox_count > 0 {
+                let reason = if check.lifecycle == ActivationLifecycle::Closed {
+                    "closed_without_code"
+                } else {
+                    "expired_without_code"
+                };
+                return review_open(tx, order_id, reference, reason).await;
+            }
             let reason = if check.lifecycle == ActivationLifecycle::Closed {
                 "supplier_finished"
             } else {
@@ -394,6 +409,49 @@ async fn settle_open(
     .map_err(anyhow::Error::from)?;
     tx.commit().await.map_err(anyhow::Error::from)?;
     tracing::info!(order = %reference, transition = "deliver", status = "delivered", outcome = "applied", "number order transition completed");
+    Ok(TransitionOutcome::Applied)
+}
+
+/// SMS arrived but no qualifying code. Keep the reservation until an operator
+/// decides; refunding here would give the customer a free number.
+async fn review_open(
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: Uuid,
+    reference: String,
+    reason: &str,
+) -> ApiResult<TransitionOutcome> {
+    sqlx::query(
+        "UPDATE number_orders
+            SET status = 'review_required',
+                review_required_at = now(),
+                review_reason = $2,
+                activation_open = false,
+                reconcile_next_at = NULL,
+                reconcile_claim_token = NULL,
+                reconcile_claimed_until = NULL,
+                updated_at = now()
+          WHERE id = $1 AND status IN ('reserved', 'awaiting_code', 'review_required')",
+    )
+    .bind(order_id)
+    .bind(reason)
+    .execute(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    sqlx::query(
+        "INSERT INTO operator_alerts (number_order_id, dedupe_key)
+         VALUES ($1, 'number-review:' || $1::text)
+         ON CONFLICT (dedupe_key) DO NOTHING",
+    )
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
+    tx.commit().await.map_err(anyhow::Error::from)?;
+    tracing::warn!(
+        order = %reference,
+        error_category = reason,
+        "number order requires operator review"
+    );
     Ok(TransitionOutcome::Applied)
 }
 
@@ -1148,6 +1206,94 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 2);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn text_only_sms_then_closed_does_not_refund() {
+        let database = IsolatedDatabase::new("number_text_closed_review_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "TEXTCLOSE").await;
+        sqlx::query("UPDATE number_orders SET provider_order_id='provider-text-close' WHERE id=$1")
+            .bind(order_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![Sms {
+                sender: Some("svc".into()),
+                text: "Your WhatsApp code is 483-921".into(),
+                code: None,
+                received_at: None,
+                provider_message_id: None,
+            }]),
+        )
+        .await
+        .unwrap();
+        apply_check(&pool, order_id, None, ActivationCheck::closed())
+            .await
+            .unwrap();
+        let (status, refunds, reason): (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT o.status,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_refund'),
+                    o.review_reason
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "review_required");
+        assert_eq!(refunds, 0);
+        assert_eq!(reason.as_deref(), Some("closed_without_code"));
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn text_only_sms_then_expiry_does_not_refund() {
+        let database = IsolatedDatabase::new("number_text_expiry_review_test").await;
+        let pool = database.pool.clone();
+        let order_id = seeded_order(&pool, "TEXTEXP").await;
+        sqlx::query(
+            "UPDATE number_orders
+                SET provider_order_id='provider-text-exp',
+                    expires_at = now() - interval '1 second'
+              WHERE id=$1",
+        )
+        .bind(order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        apply_check(
+            &pool,
+            order_id,
+            None,
+            ActivationCheck::open().with_messages(vec![Sms {
+                sender: Some("svc".into()),
+                text: "Your WhatsApp code is 483-921".into(),
+                code: None,
+                received_at: None,
+                provider_message_id: None,
+            }]),
+        )
+        .await
+        .unwrap();
+        let (status, refunds, reason): (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT o.status,
+                    (SELECT count(*) FROM ledger_journals j WHERE j.reference = o.reference AND j.kind = 'number_refund'),
+                    o.review_reason
+               FROM number_orders o WHERE o.id=$1",
+        )
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "review_required");
+        assert_eq!(refunds, 0);
+        assert_eq!(reason.as_deref(), Some("expired_without_code"));
         database.cleanup().await;
     }
 
