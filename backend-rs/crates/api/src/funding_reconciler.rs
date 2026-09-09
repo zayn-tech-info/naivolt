@@ -30,7 +30,12 @@ const SETTLE_AFTER_SECONDS: i64 = 20;
 /// After this, a pending intent is abandoned rather than verified forever.
 /// Paystack's checkout link is long dead by then; what remains is a row that
 /// would otherwise be re-verified every 30 seconds for the life of the process.
-const ABANDON_AFTER_HOURS: i64 = 24;
+///
+/// `i32` because it is bound to `make_interval(hours => ...)`, whose `hours`
+/// argument is `integer`. Only its `secs` argument is `double precision`, so
+/// binding hours as a float resolves to no function at all and fails the whole
+/// sweep at runtime rather than at compile time.
+const ABANDON_AFTER_HOURS: i32 = 24;
 
 /// How many to settle per pass. A backlog drains over several sweeps rather than
 /// opening hundreds of provider calls at once.
@@ -73,7 +78,7 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
           LIMIT $3",
     )
     .bind(SETTLE_AFTER_SECONDS as f64)
-    .bind(ABANDON_AFTER_HOURS as f64)
+    .bind(ABANDON_AFTER_HOURS)
     .bind(BATCH)
     .fetch_all(&state.db)
     .await?;
@@ -101,7 +106,7 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
             AND provider = 'paystack'
             AND created_at < now() - make_interval(hours => $1)",
     )
-    .bind(ABANDON_AFTER_HOURS as f64)
+    .bind(ABANDON_AFTER_HOURS)
     .execute(&state.db)
     .await?
     .rows_affected();
