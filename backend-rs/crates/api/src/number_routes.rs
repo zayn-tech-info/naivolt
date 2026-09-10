@@ -26,7 +26,7 @@
 use crate::error::{ApiError, ApiResult};
 use crate::middleware::CurrentUser;
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
-use crate::number_provider::{ActivationLifecycle, PurchaseError};
+use crate::number_provider::{ActivationLifecycle, PurchaseError, try_next_source};
 use crate::payout_routes::{lock_user_ngn_account, platform_account};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -731,7 +731,7 @@ async fn create_order(
                     break;
                 }
                 Err(PurchaseError::Rejected(err)) => {
-                    if err.to_string().contains("out of stock") {
+                    if try_next_source(&err) {
                         last_reject = Some(err);
                         continue;
                     }

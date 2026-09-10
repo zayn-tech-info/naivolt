@@ -2,7 +2,10 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::number_offers::OfferSku;
-use crate::number_provider::{Activation, ActivationCheck, ActivationLifecycle, PurchaseError, Sms};
+use crate::number_provider::{
+    Activation, ActivationCheck, ActivationLifecycle, PurchaseError, Sms, COPY_BUY_RESTORED,
+    COPY_OUT_OF_STOCK, COPY_SOURCE_UNAVAILABLE,
+};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -155,21 +158,16 @@ impl SmsPoolProvider {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             tracing::warn!(%status, "smspool buy rejected");
-            let lower = body.to_ascii_lowercase();
-            if lower.contains("stock") || lower.contains("available") {
-                return Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
-                    "That number is out of stock right now. Try another country.".into(),
-                )));
-            }
-            return if status.is_server_error() {
-                Err(PurchaseError::Ambiguous)
-            } else {
-                Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
-                    "We couldn't get a number just now. Nothing was charged.".into(),
-                )))
-            };
+            return Err(classify_smspool_failure(status.is_server_error(), &body, None));
         }
-        let order: SmsPoolOrder = response.json().await.map_err(|e| {
+        let body: Value = response.json().await.map_err(|e| {
+            tracing::warn!(error = %e, "smspool buy returned unreadable body");
+            PurchaseError::Ambiguous
+        })?;
+        if let Some(err) = smspool_error_from_json(&body) {
+            return Err(err);
+        }
+        let order: SmsPoolOrder = serde_json::from_value(body).map_err(|e| {
             tracing::warn!(error = %e, "smspool buy returned unreadable body");
             PurchaseError::Ambiguous
         })?;
@@ -234,6 +232,62 @@ impl SmsPoolProvider {
         }
         Ok(())
     }
+}
+
+fn json_success_zero(value: &Value) -> bool {
+    match value.get("success") {
+        Some(Value::Bool(false)) => true,
+        Some(Value::Number(n)) => n.as_i64() == Some(0) || n.as_f64() == Some(0.0),
+        Some(Value::String(s)) => s.trim() == "0" || s.eq_ignore_ascii_case("false"),
+        _ => false,
+    }
+}
+
+fn smspool_error_from_json(body: &Value) -> Option<PurchaseError> {
+    let kind = value_key(body.get("type").unwrap_or(&Value::Null)).to_ascii_uppercase();
+    let message = value_key(body.get("message").unwrap_or(&Value::Null));
+    if !json_success_zero(body) && kind.is_empty() {
+        return None;
+    }
+    Some(classify_smspool_failure(
+        false,
+        &format!("{kind} {message}"),
+        Some(body),
+    ))
+}
+
+fn classify_smspool_failure(
+    server_error: bool,
+    body: &str,
+    json: Option<&Value>,
+) -> PurchaseError {
+    let lower = body.to_ascii_lowercase();
+    let kind = json
+        .and_then(|v| v.get("type"))
+        .map(value_key)
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if kind == "OUT_OF_STOCK"
+        || lower.contains("out_of_stock")
+        || lower.contains("out of stock")
+        || lower.contains("available")
+        || (lower.contains("stock") && !lower.contains("balance"))
+    {
+        return PurchaseError::Rejected(ApiError::ServiceUnavailable(COPY_OUT_OF_STOCK.into()));
+    }
+    if kind == "BALANCE_ERROR"
+        || lower.contains("balance")
+        || lower.contains("funds")
+        || lower.contains("no money")
+    {
+        return PurchaseError::Rejected(ApiError::ServiceUnavailable(
+            COPY_SOURCE_UNAVAILABLE.into(),
+        ));
+    }
+    if server_error {
+        return PurchaseError::Ambiguous;
+    }
+    PurchaseError::Rejected(ApiError::ServiceUnavailable(COPY_BUY_RESTORED.into()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -510,6 +564,31 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use serde_json::json;
+
+    #[test]
+    fn balance_error_json_is_unavailable_not_ambiguous() {
+        let body = json!({"success": 0, "type": "BALANCE_ERROR", "message": "Not enough balance"});
+        let err = smspool_error_from_json(&body).expect("error");
+        match err {
+            PurchaseError::Rejected(ApiError::ServiceUnavailable(msg)) => {
+                assert!(msg.contains("isn't available right now"));
+                assert!(!msg.contains("charged"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn out_of_stock_json_keeps_stock_copy() {
+        let body = json!({"success": 0, "type": "OUT_OF_STOCK"});
+        let err = smspool_error_from_json(&body).expect("error");
+        match err {
+            PurchaseError::Rejected(ApiError::ServiceUnavailable(msg)) => {
+                assert!(msg.contains("out of stock"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn empty_wallet_is_zero() {

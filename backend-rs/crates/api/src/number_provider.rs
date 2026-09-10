@@ -196,6 +196,20 @@ impl std::ops::Deref for NumberProviders {
     }
 }
 
+/// Reservation already sits on the ledger — say the money came back.
+pub const COPY_BUY_RESTORED: &str =
+    "We couldn't get that number. Your money is back in your balance.";
+/// This source cannot fulfil; the order loop may try the next SKU.
+pub const COPY_SOURCE_UNAVAILABLE: &str =
+    "That option isn't available right now. Try another country.";
+pub const COPY_OUT_OF_STOCK: &str =
+    "That number is out of stock right now. Try another country.";
+
+pub fn try_next_source(err: &ApiError) -> bool {
+    let msg = err.to_string();
+    msg.contains("out of stock") || msg.contains("isn't available right now")
+}
+
 impl NumberProviders {
     /// Real supplier money can move. FiveSim primary or a configured SMSPool
     /// both count; stub-only must never pair with live funding.
@@ -214,13 +228,13 @@ impl NumberProviders {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.buy(country, product).await,
                 None => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
-                    "That number is out of stock right now. Try another country.".into(),
+                    COPY_OUT_OF_STOCK.into(),
                 ))),
             },
             "fivesim" => self.primary.buy_with(country, product, operator).await,
             "stub" => self.primary.buy(country, product).await,
             _ => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
-                "We couldn't get a number just now. Nothing was charged.".into(),
+                COPY_BUY_RESTORED.into(),
             ))),
         }
     }
@@ -337,12 +351,11 @@ impl FiveSimProvider {
             // out-of-stock case is worth showing a user, because it is the only
             // one they can act on — everything else is ours to fix.
             let message = if body.contains("no free phones") || body.contains("no product") {
-                "That number is out of stock right now. Try another country."
+                COPY_OUT_OF_STOCK
             } else if body.contains("not enough user balance") {
-                // Our balance, not theirs. Say nothing about whose.
-                "Numbers are briefly unavailable. Nothing was charged."
+                COPY_SOURCE_UNAVAILABLE
             } else {
-                "We couldn't get a number just now. Nothing was charged."
+                COPY_BUY_RESTORED
             };
             let error = ApiError::ServiceUnavailable(message.into());
             return if status.is_server_error() {
