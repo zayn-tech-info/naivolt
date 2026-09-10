@@ -109,8 +109,10 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
             HeaderName::from_static("idempotency-key"),
             HeaderName::from_static("x-admin-token"),
             HeaderName::from_static("x-operator-session"),
+            HeaderName::from_static("cookie"),
         ])
         .allow_origin(AllowOrigin::list(values))
+        .allow_credentials(true)
 }
 
 pub fn apply<S>(router: Router<S>, boundary: BoundaryState) -> Router<S>
@@ -365,10 +367,17 @@ mod tests {
             "idempotency-key",
             "x-admin-token",
             "x-operator-session",
+            "cookie",
         ] {
             assert!(allow.contains(header), "{allow}");
         }
-        assert!(response.headers().get("access-control-allow-credentials").is_none());
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .unwrap(),
+            "true"
+        );
 
         let get = with_peer(
             Request::builder()

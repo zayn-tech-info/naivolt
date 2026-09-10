@@ -268,13 +268,26 @@ pub async fn sync(
 
     // Offers use /guest/prices (cost, count, rate per operator). Guest products
     // do not document Rate; listing from that field produced zero 5SIM offers.
-    let fivesim_skus = match fetch_guest_prices(http).await {
-        Ok(payload) => Some(skus_from_guest_prices(&payload, &countries, pricing)),
-        Err(err) => {
-            tracing::warn!(error = ?err, "5sim guest prices unread — keeping last 5SIM offers");
-            None
+    // Unfiltered JSON is country → product; `?product=` is product → country.
+    // WhatsApp is the shop default, so it is fetched even if the 9MB dump fails.
+    let mut fivesim_skus: Option<Vec<OfferSku>> = None;
+    match fetch_guest_prices(http).await {
+        Ok(payload) => {
+            fivesim_skus = Some(skus_from_guest_prices(&payload, &countries, pricing));
         }
-    };
+        Err(err) => {
+            tracing::warn!(error = ?err, "5sim guest prices unread — trying product slices");
+        }
+    }
+    match fetch_guest_prices_for_product(http, "whatsapp").await {
+        Ok(payload) => {
+            let extra = skus_from_guest_prices(&payload, &countries, pricing);
+            fivesim_skus = Some(merge_skus(fivesim_skus.unwrap_or_default(), extra));
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "5sim whatsapp prices unread");
+        }
+    }
 
     Ok((report, fivesim_skus))
 }
@@ -401,8 +414,28 @@ fn affordable_skus(skus: Vec<OfferSku>, max_cost: Decimal) -> Vec<OfferSku> {
 }
 
 async fn fetch_guest_prices(http: &reqwest::Client) -> anyhow::Result<serde_json::Value> {
-    let response = http
-        .get(GUEST_PRICES)
+    fetch_guest_prices_url(http, GUEST_PRICES).await
+}
+
+async fn fetch_guest_prices_for_product(
+    http: &reqwest::Client,
+    product: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!("{GUEST_PRICES}?product={product}");
+    fetch_guest_prices_url(http, &url).await
+}
+
+async fn fetch_guest_prices_url(
+    http: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .user_agent("NaivoltNumbers/1.0")
+        .build()
+        .unwrap_or_else(|_| http.clone());
+    let response = client
+        .get(url)
         .header("Accept", "application/json")
         .send()
         .await?;
@@ -410,6 +443,21 @@ async fn fetch_guest_prices(http: &reqwest::Client) -> anyhow::Result<serde_json
         anyhow::bail!("5sim guest prices refused {}", response.status());
     }
     Ok(response.json().await?)
+}
+
+fn merge_skus(mut left: Vec<OfferSku>, right: Vec<OfferSku>) -> Vec<OfferSku> {
+    for sku in right {
+        let dup = left.iter().any(|existing| {
+            existing.provider == sku.provider
+                && existing.provider_product == sku.provider_product
+                && existing.provider_country == sku.provider_country
+                && existing.provider_operator == sku.provider_operator
+        });
+        if !dup {
+            left.push(sku);
+        }
+    }
+    left
 }
 
 async fn fetch_fivesim_balance(http: &reqwest::Client, api_key: &str) -> anyhow::Result<Decimal> {
@@ -447,14 +495,17 @@ fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
     }
 }
 
-/// Operator rows from `/v1/guest/prices`. Skip missing `rate` (5SIM omits it
-/// under 20% or too few orders). Drop `any` when a named operator is in stock.
+/// Operator rows from `/v1/guest/prices`.
+///
+/// Unfiltered dump is `{country: {product: {operator: row}}}`. `?product=` is
+/// `{product: {country: {operator: row}}}`. `rate` is omitted or 0 when 5SIM
+/// will not publish a figure; `rate1` is the 1-hour statistic. Never invent.
 fn skus_from_guest_prices(
     prices: &serde_json::Value,
     countries: &HashMap<String, GuestCountry>,
     pricing: &Pricing,
 ) -> Vec<OfferSku> {
-    let Some(by_country) = prices.as_object() else {
+    let Some(root) = prices.as_object() else {
         return Vec::new();
     };
     let currency = pricing
@@ -462,59 +513,98 @@ fn skus_from_guest_prices(
         .clone()
         .unwrap_or_else(|| "USD".into());
     let mut skus = Vec::new();
-    for (country_key, products) in by_country {
-        let Some(country) = countries.get(country_key) else {
-            continue;
-        };
-        let Some(iso) = country.iso.keys().next() else {
-            continue;
-        };
-        let iso = iso.to_uppercase();
-        let Some(products) = products.as_object() else {
-            continue;
-        };
-        for (product_key, operators) in products {
-            let Some(operators) = operators.as_object() else {
+    for (top_key, nested) in root {
+        if countries.contains_key(top_key) {
+            let Some(products) = nested.as_object() else {
                 continue;
             };
-            let mut rows: Vec<(&String, i64, Decimal, Decimal)> = Vec::new();
-            for (operator, row) in operators {
-                let Some(count) = json_i64(row.get("count")) else {
-                    continue;
-                };
-                if count <= 0 {
-                    continue;
-                }
-                let Some(cost) = json_decimal(row.get("cost")) else {
-                    continue;
-                };
-                let Some(success_rate) = row.get("rate").and_then(number_offers::parse_success_json)
-                else {
-                    continue;
-                };
-                rows.push((operator, count, cost, success_rate));
+            for (product_key, operators) in products {
+                push_operator_skus(
+                    &mut skus,
+                    countries,
+                    &currency,
+                    top_key,
+                    product_key,
+                    operators,
+                );
             }
-            let has_named = rows.iter().any(|(op, _, _, _)| *op != "any");
-            for (operator, count, cost, success_rate) in rows {
-                if has_named && operator == "any" {
-                    continue;
-                }
-                skus.push(OfferSku {
-                    provider: "fivesim",
-                    product_slug: product_key.clone(),
-                    country_code: iso.clone(),
-                    provider_product: product_key.clone(),
-                    provider_country: country_key.clone(),
-                    provider_operator: Some(operator.clone()),
-                    cost,
-                    currency: currency.clone(),
-                    success_rate,
-                    stock: i32::try_from(count).unwrap_or(i32::MAX),
-                });
+        } else {
+            let Some(by_country) = nested.as_object() else {
+                continue;
+            };
+            for (country_key, operators) in by_country {
+                push_operator_skus(
+                    &mut skus,
+                    countries,
+                    &currency,
+                    country_key,
+                    top_key,
+                    operators,
+                );
             }
         }
     }
     skus
+}
+
+fn row_success_rate(row: &serde_json::Value) -> Option<Decimal> {
+    row.get("rate")
+        .and_then(number_offers::parse_success_json)
+        .or_else(|| row.get("rate1").and_then(number_offers::parse_success_json))
+}
+
+fn push_operator_skus(
+    skus: &mut Vec<OfferSku>,
+    countries: &HashMap<String, GuestCountry>,
+    currency: &str,
+    country_key: &str,
+    product_key: &str,
+    operators: &serde_json::Value,
+) {
+    let Some(country) = countries.get(country_key) else {
+        return;
+    };
+    let Some(iso) = country.iso.keys().next() else {
+        return;
+    };
+    let iso = iso.to_uppercase();
+    let Some(operators) = operators.as_object() else {
+        return;
+    };
+    let mut rows: Vec<(&String, i64, Decimal, Decimal)> = Vec::new();
+    for (operator, row) in operators {
+        let Some(count) = json_i64(row.get("count")) else {
+            continue;
+        };
+        if count <= 0 {
+            continue;
+        }
+        let Some(cost) = json_decimal(row.get("cost")) else {
+            continue;
+        };
+        let Some(success_rate) = row_success_rate(row) else {
+            continue;
+        };
+        rows.push((operator, count, cost, success_rate));
+    }
+    let has_named = rows.iter().any(|(op, _, _, _)| *op != "any");
+    for (operator, count, cost, success_rate) in rows {
+        if has_named && operator == "any" {
+            continue;
+        }
+        skus.push(OfferSku {
+            provider: "fivesim",
+            product_slug: product_key.to_string(),
+            country_code: iso.clone(),
+            provider_product: product_key.to_string(),
+            provider_country: country_key.to_string(),
+            provider_operator: Some(operator.clone()),
+            cost,
+            currency: currency.to_string(),
+            success_rate,
+            stock: i32::try_from(count).unwrap_or(i32::MAX),
+        });
+    }
 }
 
 /// Insert a country the supplier lists, or return the id of the one we have.
@@ -833,6 +923,21 @@ mod tests {
         });
         let skus = skus_from_guest_prices(&payload, &countries, &pricing);
         assert_eq!(skus.len(), 2, "laos has no rate; any is dropped");
+        let product_first = serde_json::json!({
+            "whatsapp": {
+                "england": {
+                    "virtual59": { "cost": 0.7, "count": 41789, "rate": 0, "rate1": 44.58 },
+                    "any": { "cost": 0.3, "count": 10, "rate": 90 }
+                }
+            }
+        });
+        let from_product = skus_from_guest_prices(&product_first, &countries, &pricing);
+        assert_eq!(from_product.len(), 1, "product-first uses rate1; any dropped");
+        assert_eq!(
+            from_product[0].provider_operator.as_deref(),
+            Some("virtual59")
+        );
+        assert_eq!(from_product[0].success_rate, dec!(44.58));
         assert!(skus.iter().all(|s| s.provider_country == "england"));
         assert!(skus.iter().any(|s| {
             s.provider_operator.as_deref() == Some("virtual59")
