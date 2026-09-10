@@ -80,6 +80,22 @@ const ACTIVATION: &str = "activation";
 /// No number sells for less than this, whatever the arithmetic says.
 const MIN_PRICE_NGN: i64 = 100;
 
+/// Shop picker slugs 5SIM names the same way, except X (`twitter`).
+const SHOP_GUEST_PRODUCTS: &[&str] = &[
+    "whatsapp",
+    "telegram",
+    "instagram",
+    "facebook",
+    "tiktok",
+    "google",
+    "twitter",
+    "discord",
+    "apple",
+    "uber",
+    "tinder",
+    "amazon",
+];
+
 /// What a number sells for.
 #[derive(Clone)]
 pub struct Pricing {
@@ -268,13 +284,28 @@ pub async fn sync(
 
     // Offers use /guest/prices (cost, count, rate per operator). Guest products
     // do not document Rate; listing from that field produced zero 5SIM offers.
-    let fivesim_skus = match fetch_guest_prices(http).await {
-        Ok(payload) => Some(skus_from_guest_prices(&payload, &countries, pricing)),
-        Err(err) => {
-            tracing::warn!(error = ?err, "5sim guest prices unread — keeping last 5SIM offers");
-            None
+    // Unfiltered JSON is country → product; `?product=` is product → country.
+    // Shop slices cover the picker even when the 9MB dump fails or is country-shaped.
+    let mut fivesim_skus: Option<Vec<OfferSku>> = None;
+    match fetch_guest_prices(http).await {
+        Ok(payload) => {
+            fivesim_skus = Some(skus_from_guest_prices(&payload, &countries, pricing));
         }
-    };
+        Err(err) => {
+            tracing::warn!(error = ?err, "5sim guest prices unread — trying product slices");
+        }
+    }
+    for product in SHOP_GUEST_PRODUCTS {
+        match fetch_guest_prices_for_product(http, product).await {
+            Ok(payload) => {
+                let extra = skus_from_guest_prices(&payload, &countries, pricing);
+                fivesim_skus = Some(merge_skus(fivesim_skus.unwrap_or_default(), extra));
+            }
+            Err(err) => {
+                tracing::warn!(product, error = ?err, "5sim product prices unread");
+            }
+        }
+    }
 
     Ok((report, fivesim_skus))
 }
@@ -282,12 +313,17 @@ pub async fn sync(
 /// `fivesim_skus` is `Some` only after a successful guest catalogue sweep.
 /// On success, missing fivesim sources are zeroed (including an empty list).
 /// On failure (`None`), last fivesim rows stay until the next good sweep.
+/// SMSPool is never written while sell settings have it off, or its wallet is empty.
 async fn sync_offers(
     state: &AppState,
     pricing: &Pricing,
     offers: &OfferSync,
     fivesim_skus: Option<Vec<OfferSku>>,
 ) -> anyhow::Result<()> {
+    let sell = crate::number_sell::load(&state.db)
+        .await
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
+
     if offers.write_stub {
         number_offers::apply_provider_skus(
             &state.db,
@@ -298,9 +334,13 @@ async fn sync_offers(
         )
         .await?;
         number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &[], true).await?;
-    } else {
-        // Live keys are on: stub fixtures must not stay on the public list.
-        number_offers::apply_provider_skus(&state.db, pricing, "stub", &[], true).await?;
+        hide_provider(&state.db, &offers.smspool_pricing, "smspool").await?;
+        return Ok(());
+    }
+
+    number_offers::apply_provider_skus(&state.db, pricing, "stub", &[], true).await?;
+
+    if sell.fivesim_enabled {
         match fivesim_listing(
             http_from_offers(offers),
             offers.fivesim_api_key.as_deref(),
@@ -314,24 +354,43 @@ async fn sync_offers(
             }
             FivesimListing::KeepLast => {}
         }
+    } else {
+        hide_provider(&state.db, pricing, "fivesim").await?;
     }
 
-    if let Some(pool) = &offers.smspool {
-        match smspool_listing(pool).await {
-            Ok(Some(skus)) => {
-                number_offers::apply_provider_skus(
-                    &state.db,
-                    &offers.smspool_pricing,
-                    "smspool",
-                    &skus,
-                    true,
-                )
-                .await?;
+    if sell.smspool_enabled {
+        if let Some(pool) = &offers.smspool {
+            match smspool_listing(pool).await {
+                Ok(Some(skus)) => {
+                    number_offers::apply_provider_skus(
+                        &state.db,
+                        &offers.smspool_pricing,
+                        "smspool",
+                        &skus,
+                        true,
+                    )
+                    .await?;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = ?err, "smspool offer sweep failed, keeping last rows")
+                }
             }
-            Ok(None) => {}
-            Err(err) => tracing::warn!(error = ?err, "smspool offer sweep failed, keeping last rows"),
+        } else {
+            hide_provider(&state.db, &offers.smspool_pricing, "smspool").await?;
         }
+    } else {
+        hide_provider(&state.db, &offers.smspool_pricing, "smspool").await?;
     }
+    Ok(())
+}
+
+async fn hide_provider(
+    db: &sqlx::PgPool,
+    pricing: &Pricing,
+    provider: &str,
+) -> anyhow::Result<()> {
+    number_offers::apply_provider_skus(db, pricing, provider, &[], true).await?;
     Ok(())
 }
 
@@ -364,7 +423,7 @@ async fn fivesim_listing(
         None => None,
     };
     if let Some(balance) = balance {
-        if balance <= Decimal::ZERO {
+        if !wallet_is_funded(balance) {
             tracing::warn!("5sim balance is empty — hiding 5SIM from the shop");
             return FivesimListing::Write(Vec::new());
         }
@@ -381,7 +440,7 @@ async fn fivesim_listing(
 
 async fn smspool_listing(pool: &SmsPoolProvider) -> anyhow::Result<Option<Vec<OfferSku>>> {
     match pool.fetch_balance().await {
-        Ok(balance) if balance <= Decimal::ZERO => {
+        Ok(balance) if !wallet_is_funded(balance) => {
             tracing::warn!("smspool balance is empty — hiding SMSPool from the shop");
             return Ok(Some(Vec::new()));
         }
@@ -397,12 +456,38 @@ async fn smspool_listing(pool: &SmsPoolProvider) -> anyhow::Result<Option<Vec<Of
 }
 
 fn affordable_skus(skus: Vec<OfferSku>, max_cost: Decimal) -> Vec<OfferSku> {
-    skus.into_iter().filter(|sku| sku.cost <= max_cost).collect()
+    skus.into_iter()
+        .filter(|sku| sku.cost <= max_cost && sku.success_rate > Decimal::ZERO)
+        .collect()
+}
+
+fn wallet_is_funded(balance: Decimal) -> bool {
+    balance > Decimal::ZERO
 }
 
 async fn fetch_guest_prices(http: &reqwest::Client) -> anyhow::Result<serde_json::Value> {
-    let response = http
-        .get(GUEST_PRICES)
+    fetch_guest_prices_url(http, GUEST_PRICES).await
+}
+
+async fn fetch_guest_prices_for_product(
+    http: &reqwest::Client,
+    product: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let url = format!("{GUEST_PRICES}?product={product}");
+    fetch_guest_prices_url(http, &url).await
+}
+
+async fn fetch_guest_prices_url(
+    http: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .user_agent("NaivoltNumbers/1.0")
+        .build()
+        .unwrap_or_else(|_| http.clone());
+    let response = client
+        .get(url)
         .header("Accept", "application/json")
         .send()
         .await?;
@@ -410,6 +495,21 @@ async fn fetch_guest_prices(http: &reqwest::Client) -> anyhow::Result<serde_json
         anyhow::bail!("5sim guest prices refused {}", response.status());
     }
     Ok(response.json().await?)
+}
+
+fn merge_skus(mut left: Vec<OfferSku>, right: Vec<OfferSku>) -> Vec<OfferSku> {
+    for sku in right {
+        let dup = left.iter().any(|existing| {
+            existing.provider == sku.provider
+                && existing.provider_product == sku.provider_product
+                && existing.provider_country == sku.provider_country
+                && existing.provider_operator == sku.provider_operator
+        });
+        if !dup {
+            left.push(sku);
+        }
+    }
+    left
 }
 
 async fn fetch_fivesim_balance(http: &reqwest::Client, api_key: &str) -> anyhow::Result<Decimal> {
@@ -447,14 +547,18 @@ fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
     }
 }
 
-/// Operator rows from `/v1/guest/prices`. Skip missing `rate` (5SIM omits it
-/// under 20% or too few orders). Drop `any` when a named operator is in stock.
+/// Operator rows from `/v1/guest/prices`.
+///
+/// Unfiltered dump is `{country: {product: {operator: row}}}`. `?product=` is
+/// `{product: {country: {operator: row}}}`. `rate` is omitted or 0 when 5SIM
+/// will not publish a figure; `rate1` is the 1-hour statistic. Never invent.
+/// `rate72` alone is not a shop statistic — skip the row.
 fn skus_from_guest_prices(
     prices: &serde_json::Value,
     countries: &HashMap<String, GuestCountry>,
     pricing: &Pricing,
 ) -> Vec<OfferSku> {
-    let Some(by_country) = prices.as_object() else {
+    let Some(root) = prices.as_object() else {
         return Vec::new();
     };
     let currency = pricing
@@ -462,59 +566,98 @@ fn skus_from_guest_prices(
         .clone()
         .unwrap_or_else(|| "USD".into());
     let mut skus = Vec::new();
-    for (country_key, products) in by_country {
-        let Some(country) = countries.get(country_key) else {
-            continue;
-        };
-        let Some(iso) = country.iso.keys().next() else {
-            continue;
-        };
-        let iso = iso.to_uppercase();
-        let Some(products) = products.as_object() else {
-            continue;
-        };
-        for (product_key, operators) in products {
-            let Some(operators) = operators.as_object() else {
+    for (top_key, nested) in root {
+        if countries.contains_key(top_key) {
+            let Some(products) = nested.as_object() else {
                 continue;
             };
-            let mut rows: Vec<(&String, i64, Decimal, Decimal)> = Vec::new();
-            for (operator, row) in operators {
-                let Some(count) = json_i64(row.get("count")) else {
-                    continue;
-                };
-                if count <= 0 {
-                    continue;
-                }
-                let Some(cost) = json_decimal(row.get("cost")) else {
-                    continue;
-                };
-                let Some(success_rate) = row.get("rate").and_then(number_offers::parse_success_json)
-                else {
-                    continue;
-                };
-                rows.push((operator, count, cost, success_rate));
+            for (product_key, operators) in products {
+                push_operator_skus(
+                    &mut skus,
+                    countries,
+                    &currency,
+                    top_key,
+                    product_key,
+                    operators,
+                );
             }
-            let has_named = rows.iter().any(|(op, _, _, _)| *op != "any");
-            for (operator, count, cost, success_rate) in rows {
-                if has_named && operator == "any" {
-                    continue;
-                }
-                skus.push(OfferSku {
-                    provider: "fivesim",
-                    product_slug: product_key.clone(),
-                    country_code: iso.clone(),
-                    provider_product: product_key.clone(),
-                    provider_country: country_key.clone(),
-                    provider_operator: Some(operator.clone()),
-                    cost,
-                    currency: currency.clone(),
-                    success_rate,
-                    stock: i32::try_from(count).unwrap_or(i32::MAX),
-                });
+        } else {
+            let Some(by_country) = nested.as_object() else {
+                continue;
+            };
+            for (country_key, operators) in by_country {
+                push_operator_skus(
+                    &mut skus,
+                    countries,
+                    &currency,
+                    country_key,
+                    top_key,
+                    operators,
+                );
             }
         }
     }
     skus
+}
+
+fn row_success_rate(row: &serde_json::Value) -> Option<Decimal> {
+    row.get("rate")
+        .and_then(number_offers::parse_success_json)
+        .or_else(|| row.get("rate1").and_then(number_offers::parse_success_json))
+}
+
+fn push_operator_skus(
+    skus: &mut Vec<OfferSku>,
+    countries: &HashMap<String, GuestCountry>,
+    currency: &str,
+    country_key: &str,
+    product_key: &str,
+    operators: &serde_json::Value,
+) {
+    let Some(country) = countries.get(country_key) else {
+        return;
+    };
+    let Some(iso) = country.iso.keys().next() else {
+        return;
+    };
+    let iso = iso.to_uppercase();
+    let Some(operators) = operators.as_object() else {
+        return;
+    };
+    let mut rows: Vec<(&String, i64, Decimal, Decimal)> = Vec::new();
+    for (operator, row) in operators {
+        let Some(count) = json_i64(row.get("count")) else {
+            continue;
+        };
+        if count <= 0 {
+            continue;
+        }
+        let Some(cost) = json_decimal(row.get("cost")) else {
+            continue;
+        };
+        let Some(success_rate) = row_success_rate(row) else {
+            continue;
+        };
+        rows.push((operator, count, cost, success_rate));
+    }
+    let has_named = rows.iter().any(|(op, _, _, _)| *op != "any");
+    for (operator, count, cost, success_rate) in rows {
+        if has_named && operator == "any" {
+            continue;
+        }
+        skus.push(OfferSku {
+            provider: "fivesim",
+            product_slug: product_key.to_string(),
+            country_code: iso.clone(),
+            provider_product: product_key.to_string(),
+            provider_country: country_key.to_string(),
+            provider_operator: Some(operator.clone()),
+            cost,
+            currency: currency.to_string(),
+            success_rate,
+            stock: i32::try_from(count).unwrap_or(i32::MAX),
+        });
+    }
 }
 
 /// Insert a country the supplier lists, or return the id of the one we have.
@@ -842,6 +985,31 @@ mod tests {
         let cheap_only = affordable_skus(skus, dec!(0.8));
         assert_eq!(cheap_only.len(), 1);
         assert_eq!(cheap_only[0].provider_operator.as_deref(), Some("virtual59"));
+        let product_first = serde_json::json!({
+            "whatsapp": {
+                "england": {
+                    "virtual59": { "cost": 0.7, "count": 41789, "rate": 0, "rate1": 44.58 },
+                    "any": { "cost": 0.3, "count": 10, "rate": 90 }
+                }
+            }
+        });
+        let from_product = skus_from_guest_prices(&product_first, &countries, &pricing);
+        assert_eq!(from_product.len(), 1, "product-first uses rate1; any dropped");
+        assert_eq!(from_product[0].success_rate, dec!(44.58));
+        let no_stats = serde_json::json!({
+            "england": {
+                "whatsapp": {
+                    "virtual34": { "cost": 0.3, "count": 4145642, "rate": 0, "rate1": 0, "rate72": 0.26 }
+                }
+            }
+        });
+        assert!(
+            skus_from_guest_prices(&no_stats, &countries, &pricing).is_empty(),
+            "rate72 is not a shop statistic"
+        );
+        assert!(!wallet_is_funded(dec!(0)));
+        assert!(!wallet_is_funded(dec!(-0.01)));
+        assert!(wallet_is_funded(dec!(0.05)));
     }
 
     #[test]
@@ -1158,6 +1326,45 @@ mod tests {
         .unwrap();
         assert_eq!(after_fail, 5, "failed catalogue sync must keep last fivesim rows");
 
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn hiding_smspool_zeros_stock_left_on_the_shop() {
+        use crate::test_database::IsolatedDatabase;
+        let database = IsolatedDatabase::new("hide_smspool_stock").await;
+        let pool = database.pool.clone();
+        let pricing = pricing();
+        let leftover = OfferSku {
+            provider: "smspool",
+            product_slug: "whatsapp".into(),
+            country_code: "NG".into(),
+            provider_product: "907".into(),
+            provider_country: "NG".into(),
+            provider_operator: None,
+            cost: dec!(0.22),
+            currency: "USD".into(),
+            success_rate: Decimal::from(65),
+            stock: 17_937_247,
+        };
+        number_offers::apply_provider_skus(&pool, &pricing, "smspool", &[leftover], true)
+            .await
+            .unwrap();
+        let before: i32 = sqlx::query_scalar(
+            "SELECT stock FROM number_offer_sources WHERE provider = 'smspool'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, 17_937_247);
+        hide_provider(&pool, &pricing, "smspool").await.unwrap();
+        let after: i32 = sqlx::query_scalar(
+            "SELECT stock FROM number_offer_sources WHERE provider = 'smspool'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(after, 0);
         database.cleanup().await;
     }
 }
