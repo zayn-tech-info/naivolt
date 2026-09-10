@@ -17,7 +17,14 @@
 //!
 //! GET /v1/guest/products/nigeria/any
 //! {"whatsapp":{"Category":"activation","Qty":1554232,"Price":0.28}, …}
+//!
+//! GET /v1/guest/prices
+//! {"england":{"whatsapp":{"virtual59":{"cost":0.7,"count":41789,"rate":44.58}}}}
 //! ```
+//!
+//! Guest products feed `number_prices`. Customer offers copy cost, stock, and
+//! `rate` from guest prices — 5SIM omits `rate` under 20% or too few orders, and
+//! we skip those rows rather than inventing a number.
 //!
 //! Guest endpoints need no API key, so the catalogue is live in development too.
 //!
@@ -42,11 +49,16 @@ use crate::state::AppState;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
 
 const GUEST_COUNTRIES: &str = "https://5sim.net/v1/guest/countries";
 const GUEST_PRODUCTS: &str = "https://5sim.net/v1/guest/products";
+/// Operator-level cost, stock, and delivery rate. This is the payload behind
+/// 5SIM's Prices / Statistics pages. Guest products do not include `rate`.
+const GUEST_PRICES: &str = "https://5sim.net/v1/guest/prices";
+const FIVESIM_PROFILE: &str = "https://5sim.net/v1/user/profile";
 
 /// A full sweep is 153 requests. Stock moves constantly, price barely does, and
 /// this is paced for price — and for staying welcome on an unauthenticated API.
@@ -81,6 +93,7 @@ pub struct Pricing {
 
 pub struct OfferSync {
     pub write_stub: bool,
+    pub fivesim_api_key: Option<String>,
     pub smspool: Option<SmsPoolProvider>,
     pub smspool_pricing: Pricing,
 }
@@ -114,10 +127,6 @@ struct GuestProduct {
     qty: i64,
     #[serde(rename = "Price")]
     price: Decimal,
-    #[serde(default, rename = "Rate")]
-    rate: Option<serde_json::Value>,
-    #[serde(default)]
-    success: Option<serde_json::Value>,
 }
 
 /// 5SIM's country entry. `iso` and `prefix` are objects keyed by the value —
@@ -143,7 +152,8 @@ pub fn spawn(state: AppState, pricing: Pricing, offers: OfferSync) {
 
     tokio::spawn(async move {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(60))
+            .user_agent("NaivoltNumbers/1.0")
             .build()
             .unwrap_or_default();
 
@@ -155,10 +165,10 @@ pub fn spawn(state: AppState, pricing: Pricing, offers: OfferSync) {
                         products = report.products,
                         rows = report.rows,
                         in_stock = report.in_stock,
+                        fivesim_offers = fivesim_skus.as_ref().map(|s| s.len()).unwrap_or(0),
                         "number catalogue synced"
                     );
-                    if let Err(err) =
-                        sync_offers(&state, &pricing, &offers, Some(fivesim_skus)).await
+                    if let Err(err) = sync_offers(&state, &pricing, &offers, fivesim_skus).await
                     {
                         tracing::warn!(error = ?err, "number offers sync failed");
                     }
@@ -190,7 +200,7 @@ pub async fn sync(
     state: &AppState,
     pricing: &Pricing,
     http: &reqwest::Client,
-) -> anyhow::Result<(SyncReport, Vec<OfferSku>)> {
+) -> anyhow::Result<(SyncReport, Option<Vec<OfferSku>>)> {
     let countries: HashMap<String, GuestCountry> = http
         .get(GUEST_COUNTRIES)
         .send()
@@ -200,7 +210,6 @@ pub async fn sync(
         .map_err(|e| anyhow::anyhow!("country list unreadable: {e}"))?;
 
     let mut report = SyncReport::default();
-    let mut fivesim_skus = Vec::new();
 
     // Sorted, because two supplier keys can claim one ISO code and only the
     // lower-sorting one keeps it (see `upsert_country`). Iterating the `HashMap`
@@ -251,43 +260,21 @@ pub async fn sync(
         let written = upsert_prices(state, country_id, &offers, &product_ids, pricing).await?;
         report.rows += written;
         report.in_stock += offers.iter().filter(|(_, o)| o.qty > 0).count();
-
-        if let Some(iso) = country.iso.keys().next() {
-            let iso = iso.to_uppercase();
-            for (product_key, product) in &offers {
-                let success = product
-                    .rate
-                    .as_ref()
-                    .or(product.success.as_ref())
-                    .and_then(number_offers::parse_success_json);
-                let Some(success_rate) = success else {
-                    continue;
-                };
-                if product.qty <= 0 {
-                    continue;
-                }
-                fivesim_skus.push(OfferSku {
-                    provider: "fivesim",
-                    product_slug: (*product_key).clone(),
-                    country_code: iso.clone(),
-                    provider_product: (*product_key).clone(),
-                    provider_country: key.clone(),
-                    provider_operator: None,
-                    cost: product.price,
-                    currency: pricing
-                        .supplier_currency
-                        .clone()
-                        .unwrap_or_else(|| "USD".into()),
-                    success_rate,
-                    stock: i32::try_from(product.qty.max(0)).unwrap_or(i32::MAX),
-                });
-            }
-        }
     }
 
     if report.countries == 0 {
         anyhow::bail!("no country could be read from 5sim");
     }
+
+    // Offers use /guest/prices (cost, count, rate per operator). Guest products
+    // do not document Rate; listing from that field produced zero 5SIM offers.
+    let fivesim_skus = match fetch_guest_prices(http).await {
+        Ok(payload) => Some(skus_from_guest_prices(&payload, &countries, pricing)),
+        Err(err) => {
+            tracing::warn!(error = ?err, "5sim guest prices unread — keeping last 5SIM offers");
+            None
+        }
+    };
 
     Ok((report, fivesim_skus))
 }
@@ -310,16 +297,28 @@ async fn sync_offers(
             true,
         )
         .await?;
+        number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &[], true).await?;
     } else {
         // Live keys are on: stub fixtures must not stay on the public list.
         number_offers::apply_provider_skus(&state.db, pricing, "stub", &[], true).await?;
+        match fivesim_listing(
+            http_from_offers(offers),
+            offers.fivesim_api_key.as_deref(),
+            fivesim_skus,
+        )
+        .await
+        {
+            FivesimListing::Write(skus) => {
+                number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &skus, true)
+                    .await?;
+            }
+            FivesimListing::KeepLast => {}
+        }
     }
-    if let Some(skus) = fivesim_skus {
-        number_offers::apply_provider_skus(&state.db, pricing, "fivesim", &skus, true).await?;
-    }
+
     if let Some(pool) = &offers.smspool {
-        match pool.fetch_skus().await {
-            Ok(skus) => {
+        match smspool_listing(pool).await {
+            Ok(Some(skus)) => {
                 number_offers::apply_provider_skus(
                     &state.db,
                     &offers.smspool_pricing,
@@ -329,10 +328,193 @@ async fn sync_offers(
                 )
                 .await?;
             }
+            Ok(None) => {}
             Err(err) => tracing::warn!(error = ?err, "smspool offer sweep failed, keeping last rows"),
         }
     }
     Ok(())
+}
+
+enum FivesimListing {
+    Write(Vec<OfferSku>),
+    KeepLast,
+}
+
+fn http_from_offers(_offers: &OfferSync) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("NaivoltNumbers/1.0")
+        .build()
+        .unwrap_or_default()
+}
+
+async fn fivesim_listing(
+    http: reqwest::Client,
+    api_key: Option<&str>,
+    skus: Option<Vec<OfferSku>>,
+) -> FivesimListing {
+    let balance = match api_key {
+        Some(key) => match fetch_fivesim_balance(&http, key).await {
+            Ok(balance) => Some(balance),
+            Err(err) => {
+                tracing::warn!(error = ?err, "5sim profile unread — not guessing float");
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(balance) = balance {
+        if balance <= Decimal::ZERO {
+            tracing::warn!("5sim balance is empty — hiding 5SIM from the shop");
+            return FivesimListing::Write(Vec::new());
+        }
+        return match skus {
+            Some(skus) => FivesimListing::Write(affordable_skus(skus, balance)),
+            None => FivesimListing::KeepLast,
+        };
+    }
+    match skus {
+        Some(skus) => FivesimListing::Write(skus),
+        None => FivesimListing::KeepLast,
+    }
+}
+
+async fn smspool_listing(pool: &SmsPoolProvider) -> anyhow::Result<Option<Vec<OfferSku>>> {
+    match pool.fetch_balance().await {
+        Ok(balance) if balance <= Decimal::ZERO => {
+            tracing::warn!("smspool balance is empty — hiding SMSPool from the shop");
+            return Ok(Some(Vec::new()));
+        }
+        Ok(balance) => {
+            let skus = pool.fetch_skus().await?;
+            Ok(Some(affordable_skus(skus, balance)))
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "smspool balance unread — keeping last rows");
+            Ok(None)
+        }
+    }
+}
+
+fn affordable_skus(skus: Vec<OfferSku>, max_cost: Decimal) -> Vec<OfferSku> {
+    skus.into_iter().filter(|sku| sku.cost <= max_cost).collect()
+}
+
+async fn fetch_guest_prices(http: &reqwest::Client) -> anyhow::Result<serde_json::Value> {
+    let response = http
+        .get(GUEST_PRICES)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("5sim guest prices refused {}", response.status());
+    }
+    Ok(response.json().await?)
+}
+
+async fn fetch_fivesim_balance(http: &reqwest::Client, api_key: &str) -> anyhow::Result<Decimal> {
+    let response = http
+        .get(FIVESIM_PROFILE)
+        .bearer_auth(api_key)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("5sim profile refused {}", response.status());
+    }
+    let body: serde_json::Value = response.json().await?;
+    json_decimal(body.get("balance")).ok_or_else(|| anyhow::anyhow!("5sim profile had no balance"))
+}
+
+fn json_decimal(value: Option<&serde_json::Value>) -> Option<Decimal> {
+    let value = value?;
+    match value {
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .and_then(|f| Decimal::from_str(&f.to_string()).ok())
+            .or_else(|| n.as_i64().map(Decimal::from)),
+        serde_json::Value::String(s) => Decimal::from_str(s.trim()).ok(),
+        _ => None,
+    }
+}
+
+fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    let value = value?;
+    match value {
+        serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Operator rows from `/v1/guest/prices`. Skip missing `rate` (5SIM omits it
+/// under 20% or too few orders). Drop `any` when a named operator is in stock.
+fn skus_from_guest_prices(
+    prices: &serde_json::Value,
+    countries: &HashMap<String, GuestCountry>,
+    pricing: &Pricing,
+) -> Vec<OfferSku> {
+    let Some(by_country) = prices.as_object() else {
+        return Vec::new();
+    };
+    let currency = pricing
+        .supplier_currency
+        .clone()
+        .unwrap_or_else(|| "USD".into());
+    let mut skus = Vec::new();
+    for (country_key, products) in by_country {
+        let Some(country) = countries.get(country_key) else {
+            continue;
+        };
+        let Some(iso) = country.iso.keys().next() else {
+            continue;
+        };
+        let iso = iso.to_uppercase();
+        let Some(products) = products.as_object() else {
+            continue;
+        };
+        for (product_key, operators) in products {
+            let Some(operators) = operators.as_object() else {
+                continue;
+            };
+            let mut rows: Vec<(&String, i64, Decimal, Decimal)> = Vec::new();
+            for (operator, row) in operators {
+                let Some(count) = json_i64(row.get("count")) else {
+                    continue;
+                };
+                if count <= 0 {
+                    continue;
+                }
+                let Some(cost) = json_decimal(row.get("cost")) else {
+                    continue;
+                };
+                let Some(success_rate) = row.get("rate").and_then(number_offers::parse_success_json)
+                else {
+                    continue;
+                };
+                rows.push((operator, count, cost, success_rate));
+            }
+            let has_named = rows.iter().any(|(op, _, _, _)| *op != "any");
+            for (operator, count, cost, success_rate) in rows {
+                if has_named && operator == "any" {
+                    continue;
+                }
+                skus.push(OfferSku {
+                    provider: "fivesim",
+                    product_slug: product_key.clone(),
+                    country_code: iso.clone(),
+                    provider_product: product_key.clone(),
+                    provider_country: country_key.clone(),
+                    provider_operator: Some(operator.clone()),
+                    cost,
+                    currency: currency.clone(),
+                    success_rate,
+                    stock: i32::try_from(count).unwrap_or(i32::MAX),
+                });
+            }
+        }
+    }
+    skus
 }
 
 /// Insert a country the supplier lists, or return the id of the one we have.
@@ -625,6 +807,44 @@ mod tests {
     }
 
     #[test]
+    fn guest_prices_copy_rate_skip_missing_and_drop_any_when_named() {
+        let pricing = pricing();
+        let countries = HashMap::from([(
+            "england".into(),
+            GuestCountry {
+                iso: HashMap::from([("gb".into(), serde_json::json!(1))]),
+                prefix: HashMap::from([("+44".into(), serde_json::json!(1))]),
+                text_en: Some("England".into()),
+            },
+        )]);
+        let payload = serde_json::json!({
+            "england": {
+                "whatsapp": {
+                    "virtual59": { "cost": 0.7, "count": 41789, "rate": 44.58 },
+                    "virtual60": { "cost": 0.9, "count": 41902, "rate": 35 },
+                    "any": { "cost": 0.3, "count": 3967222 }
+                }
+            },
+            "laos": {
+                "whatsapp": {
+                    "virtual1": { "cost": 0.5, "count": 10 }
+                }
+            }
+        });
+        let skus = skus_from_guest_prices(&payload, &countries, &pricing);
+        assert_eq!(skus.len(), 2, "laos has no rate; any is dropped");
+        assert!(skus.iter().all(|s| s.provider_country == "england"));
+        assert!(skus.iter().any(|s| {
+            s.provider_operator.as_deref() == Some("virtual59")
+                && s.success_rate == dec!(44.58)
+                && s.stock == 41789
+        }));
+        let cheap_only = affordable_skus(skus, dec!(0.8));
+        assert_eq!(cheap_only.len(), 1);
+        assert_eq!(cheap_only[0].provider_operator.as_deref(), Some("virtual59"));
+    }
+
+    #[test]
     fn a_sale_price_always_clears_the_supplier_cost() {
         // The failure this exists to prevent: US WhatsApp cost $0.90 while the
         // hand-set table charged ₦1,010, a loss of ~₦380 on every sale.
@@ -889,6 +1109,7 @@ mod tests {
         };
         let offers = OfferSync {
             write_stub: false,
+            fivesim_api_key: None,
             smspool: None,
             smspool_pricing: pricing.clone(),
         };
