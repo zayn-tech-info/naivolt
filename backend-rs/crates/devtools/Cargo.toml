@@ -10,6 +10,10 @@ publish = false
 name = "seed"
 path = "src/bin/seed.rs"
 
+[[bin]]
+name = "credit"
+path = "src/bin/credit.rs"
+
 [dependencies]
 naivolt-core = { path = "../core" }
 naivolt-wallet = { path = "../wallet" }

@@ -202,7 +202,15 @@ pub async fn sync(
     let mut report = SyncReport::default();
     let mut fivesim_skus = Vec::new();
 
-    for (key, country) in &countries {
+    // Sorted, because two supplier keys can claim one ISO code and only the
+    // lower-sorting one keeps it (see `upsert_country`). Iterating the `HashMap`
+    // directly still converges, but the loser would spend a sweep writing prices
+    // against a row the winner then takes over.
+    let mut keys: Vec<&String> = countries.keys().collect();
+    keys.sort();
+
+    for key in keys {
+        let country = &countries[key];
         let Some(country_id) = upsert_country(&state.db, key, country).await? else {
             continue;
         };
@@ -332,9 +340,34 @@ async fn sync_offers(
 /// `iso` and `prefix` are keyed by their own value, so a missing key means the
 /// supplier gave us a country we cannot address — skipped rather than guessed.
 ///
-/// Naivolt identity is ISO `code`. Two 5SIM guest keys that share one ISO must
-/// reuse one row; upserting only on `provider_country` used to abort the sweep
-/// on `number_countries_code_key`.
+/// ## Two supplier keys, one ISO code
+///
+/// Naivolt identity is ISO `code`, and `number_countries` keeps it unique. 5SIM
+/// ships 153 country keys carrying 152 distinct codes, because it files **French
+/// Guiana under `fr`** — France's code, not its own `gf`. Upserting on
+/// `provider_country` alone used to abort the whole sweep on
+/// `number_countries_code_key` when the second of the two arrived.
+///
+/// Reusing the row is only half an answer, though. The row's `provider_country`
+/// is the single key every order for that code is placed against
+/// (`number_routes.rs` resolves a country by `code`, then buys with the
+/// `provider_country` it finds), so updating the name and dial code of a row
+/// bought against somebody else's key produces a country that advertises French
+/// Guiana at +594 and hands out French numbers at +33.
+///
+/// So the code belongs to exactly one supplier key, and the other is skipped —
+/// the same answer as a country with no ISO at all: not one we can address. Its
+/// prices are never written, because it never gets an id back to write them
+/// against.
+///
+/// **Lowest key wins, rather than whoever arrived first.** First-writer-wins
+/// looks equivalent and is not: this sync had already run before the rule
+/// existed, and `frenchguiana` held `FR` — so France, a country people actually
+/// buy numbers in, was the one being skipped, permanently, with no amount of
+/// re-running able to move it. A tie-break that cannot correct itself needs a
+/// human to hand-edit the table, which is the same as not having one. Sorting
+/// converges on the same catalogue from any starting state, and the row is taken
+/// over in place rather than replaced: its id is what existing orders point at.
 async fn upsert_country(
     db: &sqlx::PgPool,
     key: &str,
@@ -368,20 +401,41 @@ async fn upsert_country(
         return Ok(Some(id));
     }
 
-    // Same ISO, different supplier key: keep the existing provider_country so
-    // buy paths that still read the country row stay stable.
-    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
-        "UPDATE number_countries
-            SET name = $2, dial_code = $3
-          WHERE code = $1
-      RETURNING id",
-    )
-    .bind(&code)
-    .bind(&name)
-    .bind(&prefix)
-    .fetch_optional(db)
-    .await?
-    {
+    // Nobody is selling under our key. Whoever holds the code decides whether we
+    // get to, and a row we do not win is one we must not describe.
+    let holder: Option<String> =
+        sqlx::query_scalar("SELECT provider_country FROM number_countries WHERE code = $1")
+            .bind(&code)
+            .fetch_optional(db)
+            .await?;
+
+    if let Some(holder) = holder {
+        if holder.as_str() < key {
+            tracing::debug!(
+                country = %key, %code, %holder,
+                "supplier key skipped: a lower-sorting key already sells under this ISO code"
+            );
+            return Ok(None);
+        }
+
+        let id: Uuid = sqlx::query_scalar(
+            "UPDATE number_countries
+                SET provider_country = $1, name = $2, dial_code = $3
+              WHERE code = $4
+          RETURNING id",
+        )
+        .bind(key)
+        .bind(&name)
+        .bind(&prefix)
+        .bind(&code)
+        .fetch_one(db)
+        .await?;
+
+        tracing::info!(
+            country = %key, %code, replaced = %holder,
+            "supplier key took over an ISO code held by a higher-sorting key"
+        );
+
         return Ok(Some(id));
     }
 
@@ -624,46 +678,106 @@ mod tests {
         assert_eq!(humanise("1688"), "1688");
     }
 
+    /// 5SIM's real collision: `france` and `frenchguiana` both report iso `fr`.
+    fn colliding_pair() -> (GuestCountry, GuestCountry) {
+        (
+            GuestCountry {
+                iso: HashMap::from([("fr".into(), serde_json::json!(1))]),
+                prefix: HashMap::from([("+33".into(), serde_json::json!(1))]),
+                text_en: Some("France".into()),
+            },
+            GuestCountry {
+                iso: HashMap::from([("fr".into(), serde_json::json!(1))]),
+                prefix: HashMap::from([("+594".into(), serde_json::json!(1))]),
+                text_en: Some("French Guiana".into()),
+            },
+        )
+    }
+
+    async fn country_row(pool: &sqlx::PgPool, code: &str) -> (String, String, String) {
+        sqlx::query_as("SELECT name, dial_code, provider_country FROM number_countries WHERE code = $1")
+            .bind(code)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The row is bought against its `provider_country`, so a name and dial code
+    /// belonging to the *other* supplier key would sell French numbers at +33 to
+    /// somebody who asked for French Guiana at +594.
     #[tokio::test]
-    async fn upsert_country_reuses_iso_when_provider_keys_differ() {
+    async fn one_iso_code_belongs_to_one_supplier_key() {
         use crate::test_database::IsolatedDatabase;
 
-        let database = IsolatedDatabase::new("country_iso_upsert").await;
+        let database = IsolatedDatabase::new("country_iso_owner").await;
+        let (france, french_guiana) = colliding_pair();
 
-        let first = GuestCountry {
-            iso: HashMap::from([("zz".into(), serde_json::json!(1))]),
-            prefix: HashMap::from([("+999".into(), serde_json::json!(1))]),
-            text_en: Some("Testland".into()),
-        };
-        let second = GuestCountry {
-            iso: HashMap::from([("zz".into(), serde_json::json!(1))]),
-            prefix: HashMap::from([("+999".into(), serde_json::json!(1))]),
-            text_en: Some("Testland Alt".into()),
-        };
-
-        let id1 = upsert_country(&database.pool, "testland", &first)
+        let id = upsert_country(&database.pool, "france", &france)
             .await
             .unwrap()
             .expect("first insert");
-        let id2 = upsert_country(&database.pool, "testland-alt", &second)
+        assert!(
+            upsert_country(&database.pool, "frenchguiana", &french_guiana)
+                .await
+                .unwrap()
+                .is_none(),
+            "the higher-sorting key must be skipped, not given the row to price against"
+        );
+
+        assert_eq!(
+            country_row(&database.pool, "FR").await,
+            ("France".into(), "+33".into(), "france".into())
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM number_countries WHERE code = 'FR'")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            upsert_country(&database.pool, "france", &france).await.unwrap(),
+            Some(id),
+            "the winner keeps its id, and with it every order already placed"
+        );
+
+        database.cleanup().await;
+    }
+
+    /// The sync had already run before the rule existed, leaving `frenchguiana`
+    /// holding `FR`. A first-writer-wins tie-break would strand France there for
+    /// good; lowest-key-wins takes the row over in place, keeping its id.
+    #[tokio::test]
+    async fn a_wrongly_held_iso_code_is_taken_back_without_losing_the_row() {
+        use crate::test_database::IsolatedDatabase;
+
+        let database = IsolatedDatabase::new("country_iso_takeover").await;
+        let (france, french_guiana) = colliding_pair();
+
+        let squatted = upsert_country(&database.pool, "frenchguiana", &french_guiana)
             .await
             .unwrap()
-            .expect("second insert must reuse ISO");
-        assert_eq!(id1, id2);
+            .expect("first insert");
+        assert_eq!(
+            country_row(&database.pool, "FR").await,
+            ("French Guiana".into(), "+594".into(), "frenchguiana".into())
+        );
 
-        let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM number_countries WHERE code = 'ZZ'")
-                .fetch_one(&database.pool)
-                .await
-                .unwrap();
-        assert_eq!(count, 1);
+        let taken = upsert_country(&database.pool, "france", &france)
+            .await
+            .unwrap()
+            .expect("france must take the code back");
 
-        let provider: String =
-            sqlx::query_scalar("SELECT provider_country FROM number_countries WHERE code = 'ZZ'")
-                .fetch_one(&database.pool)
+        assert_eq!(taken, squatted, "taking over must not orphan existing orders");
+        assert_eq!(
+            country_row(&database.pool, "FR").await,
+            ("France".into(), "+33".into(), "france".into())
+        );
+        assert!(
+            upsert_country(&database.pool, "frenchguiana", &french_guiana)
                 .await
-                .unwrap();
-        assert_eq!(provider, "testland");
+                .unwrap()
+                .is_none(),
+            "and the loser stays skipped on the next sweep"
+        );
 
         database.cleanup().await;
     }
