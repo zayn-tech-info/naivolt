@@ -3,9 +3,12 @@
 
 use crate::error::{ApiError, ApiResult};
 use crate::notify::Notifier;
+use crate::session_cookie::{self, cookie_secure};
 use crate::signer::AddressProvider;
 use crate::state::AppState;
 use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::{Json, Router};
 use axum::routing::post;
 use chrono::Utc;
@@ -24,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/otp/verify", post(verify_otp))
         .route("/auth/google", post(google_sign_in))
         .route("/auth/refresh", post(refresh))
+        .route("/auth/logout", post(logout))
         .route("/auth/unlock", post(unlock))
 }
 
@@ -170,7 +174,7 @@ pub struct UserResponse {
 async fn verify_otp(
     State(state): State<AppState>,
     Json(body): Json<VerifyOtpBody>,
-) -> ApiResult<Json<SessionResponse>> {
+) -> ApiResult<impl IntoResponse> {
     let identifier = parse_identifier(&body.identifier)?;
     let now = Utc::now();
 
@@ -254,12 +258,16 @@ async fn verify_otp(
 
     tx.commit().await?;
 
-    Ok(Json(SessionResponse {
-        token: session.0,
-        refresh_token: session.1,
-        is_new_account,
-        user,
-    }))
+    Ok(with_refresh_cookie(
+        SessionResponse {
+            token: session.0.clone(),
+            refresh_token: session.1.clone(),
+            is_new_account,
+            user,
+        },
+        &session.1,
+        cookie_secure(&state.web_app_url),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +298,7 @@ pub struct GoogleSignInBody {
 async fn google_sign_in(
     State(state): State<AppState>,
     Json(body): Json<GoogleSignInBody>,
-) -> ApiResult<Json<SessionResponse>> {
+) -> ApiResult<impl IntoResponse> {
     let audience = state.google_client_id.as_deref().ok_or_else(|| {
         ApiError::ServiceUnavailable("Google sign-in isn't set up yet.".into())
     })?;
@@ -380,22 +388,27 @@ async fn google_sign_in(
 
     tx.commit().await?;
 
-    Ok(Json(SessionResponse {
-        token: session.0,
-        refresh_token: session.1,
-        is_new_account,
-        user,
-    }))
+    Ok(with_refresh_cookie(
+        SessionResponse {
+            token: session.0.clone(),
+            refresh_token: session.1.clone(),
+            is_new_account,
+            user,
+        },
+        &session.1,
+        cookie_secure(&state.web_app_url),
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // POST /auth/refresh
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshBody {
-    pub refresh_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -429,8 +442,9 @@ pub struct UnlockBody {
 /// offline.
 async fn unlock(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<UnlockBody>,
-) -> ApiResult<Json<RefreshResponse>> {
+) -> ApiResult<impl IntoResponse> {
     let presented = hash_refresh(&body.refresh_token);
 
     // Resolve the session first so the PIN is checked against the right user,
@@ -467,19 +481,57 @@ async fn unlock(
     // path means reuse detection and family revocation apply here too.
     refresh(
         State(state),
-        Json(RefreshBody {
-            refresh_token: body.refresh_token,
-        }),
+        headers,
+        Some(Json(RefreshBody {
+            refresh_token: Some(body.refresh_token),
+        })),
     )
     .await
 }
 
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<RefreshBody>>,
+) -> impl IntoResponse {
+    let presented = session_cookie::presented_refresh(
+        &headers,
+        body.as_ref()
+            .and_then(|Json(body)| body.refresh_token.as_deref()),
+    );
+    if let Some(secret) = presented {
+        let hash = hash_refresh(&secret);
+        let now = Utc::now();
+        let _ = sqlx::query(
+            "UPDATE sessions SET revoked_at = $1
+              WHERE family_id = (
+                  SELECT family_id FROM sessions WHERE refresh_token_hash = $2 LIMIT 1
+              )
+                AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(&hash)
+        .execute(&state.db)
+        .await;
+    }
+    let mut out = HeaderMap::new();
+    session_cookie::clear_refresh(&mut out, cookie_secure(&state.web_app_url));
+    (axum::http::StatusCode::NO_CONTENT, out)
+}
+
 async fn refresh(
     State(state): State<AppState>,
-    Json(body): Json<RefreshBody>,
-) -> ApiResult<Json<RefreshResponse>> {
+    headers: HeaderMap,
+    body: Option<Json<RefreshBody>>,
+) -> ApiResult<impl IntoResponse> {
     let now = Utc::now();
-    let presented = hash_refresh(&body.refresh_token);
+    let secret = session_cookie::presented_refresh(
+        &headers,
+        body.as_ref()
+            .and_then(|Json(body)| body.refresh_token.as_deref()),
+    )
+    .ok_or(ApiError::Unauthorized)?;
+    let presented = hash_refresh(&secret);
 
     let mut tx = state.db.begin().await?;
 
@@ -552,12 +604,22 @@ async fn refresh(
 
             tx.commit().await?;
 
-            Ok(Json(RefreshResponse {
-                token: access,
-                refresh_token: next.secret,
-            }))
+            Ok(with_refresh_cookie(
+                RefreshResponse {
+                    token: access,
+                    refresh_token: next.secret.clone(),
+                },
+                &next.secret,
+                cookie_secure(&state.web_app_url),
+            ))
         }
     }
+}
+
+fn with_refresh_cookie<T: Serialize>(body: T, secret: &str, secure: bool) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    session_cookie::set_refresh(&mut headers, secret, secure);
+    (headers, Json(body))
 }
 
 // ---------------------------------------------------------------------------
