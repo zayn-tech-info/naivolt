@@ -2,7 +2,7 @@
 //!
 //! List and buy read this row. Catalogue sync does not. Open orders ignore it.
 
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use sqlx::PgPool;
 
 pub const AUDIT_TARGET: uuid::Uuid = uuid::Uuid::from_u128(1);
