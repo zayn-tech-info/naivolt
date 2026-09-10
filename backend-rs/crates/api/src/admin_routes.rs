@@ -13,7 +13,7 @@ use crate::operator;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/overview", get(overview))
+        .route("/admin/sell-settings", put(put_sell_settings))
         .route("/admin/activity", get(activity))
         .route("/admin/orders", get(list_orders))
         .route("/admin/orders/:id", get(order_detail))
@@ -93,6 +94,8 @@ pub struct Overview {
     pub catalogue_synced_at: Option<String>,
     pub operator_refunds_last24h: i64,
     pub last_provider_error_category: Option<String>,
+    pub fivesim_enabled: bool,
+    pub smspool_enabled: bool,
 }
 
 async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Overview>> {
@@ -157,6 +160,7 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
     )
     .fetch_optional(&state.db)
     .await?;
+    let sell = crate::number_sell::load(&state.db).await?;
 
     Ok(Json(Overview {
         users: row.0,
@@ -178,6 +182,8 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
         catalogue_synced_at: catalogue_synced_at.map(|at| at.to_rfc3339()),
         operator_refunds_last24h,
         last_provider_error_category,
+        fivesim_enabled: sell.fivesim_enabled,
+        smspool_enabled: sell.smspool_enabled,
     }))
 }
 
@@ -249,6 +255,60 @@ async fn activity(
             })
             .collect(),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SellSettingsBody {
+    fivesim_enabled: bool,
+    smspool_enabled: bool,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SellSettingsResponse {
+    fivesim_enabled: bool,
+    smspool_enabled: bool,
+}
+
+async fn put_sell_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SellSettingsBody>,
+) -> ApiResult<Json<SellSettingsResponse>> {
+    let operator_id = require_operator(&state, &headers).await?;
+    if !body.fivesim_enabled && !body.smspool_enabled {
+        return Err(ApiError::LastProvider);
+    }
+    let before = crate::number_sell::load(&state.db).await?;
+    sqlx::query(
+        "UPDATE number_sell_settings
+            SET fivesim_enabled = $1, smspool_enabled = $2, updated_at = now()
+          WHERE id = 1",
+    )
+    .bind(body.fivesim_enabled)
+    .bind(body.smspool_enabled)
+    .execute(&state.db)
+    .await?;
+    insert_audit(
+        &state.db,
+        operator_id,
+        "sell_settings",
+        crate::number_sell::AUDIT_TARGET,
+        json!({
+            "fivesimEnabled": before.fivesim_enabled,
+            "smspoolEnabled": before.smspool_enabled
+        }),
+        json!({
+            "fivesimEnabled": body.fivesim_enabled,
+            "smspoolEnabled": body.smspool_enabled
+        }),
+    )
+    .await?;
+    Ok(Json(SellSettingsResponse {
+        fivesim_enabled: body.fivesim_enabled,
+        smspool_enabled: body.smspool_enabled,
+    }))
 }
 
 include!("admin_recovery.rs");

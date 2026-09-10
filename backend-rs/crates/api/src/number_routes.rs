@@ -182,6 +182,13 @@ async fn list_offers(
         .map(|c| c.trim().to_uppercase())
         .filter(|c| !c.is_empty());
 
+    let providers: Vec<String> = crate::number_sell::load(&state.db)
+        .await?
+        .source_providers(!state.funding.is_live())
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
     let rows: Vec<(
         Uuid,
         String,
@@ -195,17 +202,23 @@ async fn list_offers(
         DateTime<Utc>,
     )> = sqlx::query_as(
         "SELECT o.id, p.slug, p.name, c.code, c.name, c.dial_code,
-                o.price_ngn, o.quantity, o.success_rate, o.success_fetched_at
+                o.price_ngn, SUM(s.stock)::int, o.success_rate, o.success_fetched_at
            FROM number_offers o
            JOIN number_products p ON p.id = o.product_id
            JOIN number_countries c ON c.id = o.country_id
-          WHERE p.slug = $1 AND o.active AND o.quantity > 0
+           JOIN number_offer_sources s ON s.offer_id = o.id
+          WHERE p.slug = $1 AND o.active AND s.stock > 0
+            AND s.provider = ANY($3::text[])
             AND ($2::text IS NULL OR c.code = $2)
-          ORDER BY o.success_rate DESC, o.price_ngn ASC, o.quantity DESC
+          GROUP BY o.id, p.slug, p.name, c.code, c.name, c.dial_code,
+                   o.price_ngn, o.success_rate, o.success_fetched_at
+         HAVING SUM(s.stock) > 0
+          ORDER BY o.success_rate DESC, o.price_ngn ASC, SUM(s.stock) DESC
           LIMIT 200",
     )
     .bind(&product)
     .bind(country.as_deref())
+    .bind(&providers)
     .fetch_all(&state.db)
     .await?;
 
@@ -282,19 +295,29 @@ async fn products(
         .filter(|q| !q.is_empty())
         .map(|q| format!("%{}%", q.to_lowercase()));
 
+    let providers: Vec<String> = crate::number_sell::load(&state.db)
+        .await?
+        .source_providers(!state.funding.is_live())
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
     let rows: Vec<(String, String, Option<Decimal>, i64)> = sqlx::query_as(
-        "SELECT p.slug, p.name, min(pr.price_ngn), count(*)
+        "SELECT p.slug, p.name, min(o.price_ngn), count(DISTINCT o.country_id)
            FROM number_products p
-           JOIN number_prices  pr ON pr.product_id = p.id AND pr.active AND pr.stock > 0
-           JOIN number_countries c ON c.id = pr.country_id AND c.active
+           JOIN number_offers o ON o.product_id = p.id AND o.active
+           JOIN number_offer_sources s ON s.offer_id = o.id AND s.stock > 0
+            AND s.provider = ANY($3::text[])
+           JOIN number_countries c ON c.id = o.country_id AND c.active
           WHERE p.active
             AND ($1::text IS NULL OR lower(p.name) LIKE $1 OR p.slug LIKE $1)
           GROUP BY p.id, p.slug, p.name, p.sort_order
-          ORDER BY p.sort_order, count(*) DESC, p.name
+          ORDER BY p.sort_order, count(DISTINCT o.country_id) DESC, p.name
           LIMIT $2",
     )
     .bind(search.as_deref())
     .bind(limit)
+    .bind(&providers)
     .fetch_all(&state.db)
     .await?;
 
@@ -484,9 +507,18 @@ async fn create_order(
                 "SELECT provider, provider_country, provider_product, provider_operator
                    FROM number_offer_sources
                   WHERE offer_id = $1 AND stock > 0
+                    AND provider = ANY($2::text[])
                   ORDER BY provider_cost ASC, stock DESC",
             )
             .bind(offer_id)
+            .bind(
+                crate::number_sell::load(&state.db)
+                    .await?
+                    .source_providers(!state.funding.is_live())
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )
             .fetch_all(&mut *tx)
             .await?;
             if offer_sources.is_empty() {
@@ -544,6 +576,14 @@ async fn create_order(
             } else {
                 "stub"
             };
+            if !crate::number_sell::load(&state.db)
+                .await?
+                .allows_live_fivesim_catalog(state.numbers.primary.is_live())
+            {
+                return Err(ApiError::Conflict(
+                    "That option is no longer available. Refresh and pick again.".into(),
+                ));
+            }
             (
                 product_id,
                 country_id,
@@ -2063,6 +2103,27 @@ mod tests {
         // covers: AC-1 AC-3 (0004) public catalogue, no supplier names, empty stock
         let database = IsolatedDatabase::new("number_catalog_limits").await;
         let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        let mut skus = crate::number_offers::stub_skus();
+        skus.push(crate::number_offers::OfferSku {
+            provider: "stub",
+            product_slug: "telegram".into(),
+            country_code: "NG".into(),
+            provider_product: "telegram".into(),
+            provider_country: "nigeria".into(),
+            provider_operator: None,
+            cost: Decimal::new(15, 2),
+            currency: "USD".into(),
+            success_rate: Decimal::from(80),
+            stock: 5,
+        });
+        crate::number_offers::apply_provider_skus(&pool, &pricing, "stub", &skus, true)
+            .await
+            .unwrap();
         let (slug, _country, _price) = IsolatedDatabase::first_listed_sku(&pool).await;
         sqlx::query("UPDATE number_prices SET stock = 8")
             .execute(&pool)
@@ -2071,6 +2132,18 @@ mod tests {
         sqlx::query(
             "UPDATE number_prices SET stock = 0
               WHERE product_id = (SELECT id FROM number_products WHERE slug = $1)",
+        )
+        .bind(&slug)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE number_offer_sources SET stock = 0
+              WHERE offer_id IN (
+                    SELECT o.id FROM number_offers o
+                     JOIN number_products p ON p.id = o.product_id
+                    WHERE p.slug = $1
+              )",
         )
         .bind(&slug)
         .execute(&pool)
@@ -2590,6 +2663,197 @@ mod tests {
             AccountKind::UserNgn.user_facing_balance(remaining),
             dec!(100000)
         );
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn sell_flags_filter_merged_offer_quantity_and_buy_source() {
+        let database = IsolatedDatabase::new("sell_flags_offer").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        let fivesim = crate::number_offers::OfferSku {
+            provider: "fivesim",
+            product_slug: "whatsapp".into(),
+            country_code: "NG".into(),
+            provider_product: "whatsapp".into(),
+            provider_country: "nigeria".into(),
+            provider_operator: Some("any".into()),
+            cost: Decimal::new(50, 2),
+            currency: "USD".into(),
+            success_rate: Decimal::from(82),
+            stock: 3,
+        };
+        let smspool = crate::number_offers::OfferSku {
+            provider: "smspool",
+            product_slug: "whatsapp".into(),
+            country_code: "NG".into(),
+            provider_product: "wa".into(),
+            provider_country: "NG".into(),
+            provider_operator: None,
+            cost: Decimal::new(1, 2),
+            currency: "USD".into(),
+            success_rate: Decimal::from(82),
+            stock: 10,
+        };
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "fivesim",
+            std::slice::from_ref(&fivesim),
+            true,
+        )
+        .await
+        .unwrap();
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "smspool",
+            std::slice::from_ref(&smspool),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let listed = list_offers(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            Query(OfferQuery {
+                product: "whatsapp".into(),
+                country: Some("NG".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].quantity, 3);
+        let blob = serde_json::to_string(&listed).unwrap().to_ascii_lowercase();
+        assert!(!blob.contains("smspool"));
+        assert!(!blob.contains("5sim"));
+        assert!(!blob.contains("fivesim"));
+
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email) VALUES ('sell-flags@example.test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, user_id, asset)
+             VALUES ('user_ngn', $1, 'NGN') RETURNING id",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let float_account: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_accounts (kind, asset)
+             VALUES ('naira_bank_float', 'NGN') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let funding_journal: Uuid = sqlx::query_scalar(
+            "INSERT INTO ledger_journals (kind, reference, idempotency_key)
+             VALUES ('ngn_funding', 'sell-flags-funding', 'sell-flags-funding') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ledger_entries (journal_id, account_id, asset, amount)
+             VALUES ($1, $2, 'NGN', -100000), ($1, $3, 'NGN', 100000)",
+        )
+        .bind(funding_journal)
+        .bind(user_account)
+        .bind(float_account)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
+        let bought = create_order(
+            State(state),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            headers,
+            Json(CreateOrderBody {
+                offer_id: Some(listed[0].id),
+                product_slug: "whatsapp".into(),
+                country_code: "NG".into(),
+                expected_price_ngn: Some(listed[0].price_ngn.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let provider: String =
+            sqlx::query_scalar("SELECT provider FROM number_orders WHERE id = $1")
+                .bind(bought.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(provider, "fivesim");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn products_omit_platforms_that_only_have_disabled_sources() {
+        let database = IsolatedDatabase::new("sell_flags_products").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "smspool",
+            &[crate::number_offers::OfferSku {
+                provider: "smspool",
+                product_slug: "instagram".into(),
+                country_code: "NG".into(),
+                provider_product: "ig".into(),
+                provider_country: "NG".into(),
+                provider_operator: None,
+                cost: Decimal::new(12, 2),
+                currency: "USD".into(),
+                success_rate: Decimal::from(70),
+                stock: 4,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+        let page = products(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            Query(ProductQuery {
+                q: Some("instagram".into()),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(page.is_empty());
         database.cleanup().await;
     }
 }

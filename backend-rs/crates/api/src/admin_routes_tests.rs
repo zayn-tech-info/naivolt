@@ -262,6 +262,8 @@ mod tests {
             overview.last_provider_error_category.as_deref(),
             Some("provider_unavailable")
         );
+        assert!(overview.fivesim_enabled);
+        assert!(!overview.smspool_enabled);
         database.cleanup().await;
     }
 
@@ -639,6 +641,64 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err_code(locked).await, "TOTP_LOCKED");
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn sell_settings_need_operator_and_keep_one_on() {
+        let database = IsolatedDatabase::new("ops_sell_settings").await;
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let missing = put_sell_settings(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SellSettingsBody {
+                fivesim_enabled: true,
+                smspool_enabled: true,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(missing).await, "NOT_FOUND");
+
+        let token = enroll_and_login(&state, "sell@example.test").await;
+        let both_off = put_sell_settings(
+            State(state.clone()),
+            operator_headers(&token),
+            Json(SellSettingsBody {
+                fivesim_enabled: false,
+                smspool_enabled: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(both_off).await, "LAST_PROVIDER");
+        let still = crate::number_sell::load(&state.db).await.unwrap();
+        assert!(still.fivesim_enabled);
+        assert!(!still.smspool_enabled);
+
+        let updated = put_sell_settings(
+            State(state.clone()),
+            operator_headers(&token),
+            Json(SellSettingsBody {
+                fivesim_enabled: true,
+                smspool_enabled: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(updated.fivesim_enabled);
+        assert!(updated.smspool_enabled);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE action = 'sell_settings'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(audits, 1);
         database.cleanup().await;
     }
 }

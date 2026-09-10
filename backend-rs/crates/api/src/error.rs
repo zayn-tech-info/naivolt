@@ -74,6 +74,8 @@ pub enum ApiError {
     RecheckUnavailable,
     #[error("another worker is updating this order")]
     ClaimConflict,
+    #[error("Keep at least one supplier on.")]
+    LastProvider,
     #[error("{0}")]
     Conflict(String),
     #[error("not found")]
@@ -109,6 +111,7 @@ impl ApiError {
             ApiError::RefundCap => "REFUND_CAP",
             ApiError::RecheckUnavailable => "RECHECK_UNAVAILABLE",
             ApiError::ClaimConflict => "CLAIM_CONFLICT",
+            ApiError::LastProvider => "LAST_PROVIDER",
             ApiError::Conflict(_) => "CONFLICT",
             ApiError::NotFound => "NOT_FOUND",
             ApiError::RateLimited { .. } => "RATE_LIMITED",
@@ -141,7 +144,8 @@ impl ApiError {
             }
             ApiError::Conflict(_)
             | ApiError::RecheckUnavailable
-            | ApiError::ClaimConflict => StatusCode::CONFLICT,
+            | ApiError::ClaimConflict
+            | ApiError::LastProvider => StatusCode::CONFLICT,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }

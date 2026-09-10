@@ -28,6 +28,7 @@ mod number_order_transitions;
 mod number_provider;
 mod number_reconciler;
 mod number_routes;
+mod number_sell;
 mod number_smspool;
 mod payout_provider;
 mod payout_routes;
