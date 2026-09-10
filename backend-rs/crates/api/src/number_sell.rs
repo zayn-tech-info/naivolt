@@ -1,6 +1,8 @@
 //! Who we currently sell numbers from.
 //!
-//! List and buy read this row. Catalogue sync does not. Open orders ignore it.
+//! List, buy, and catalogue sync read this row. Open orders ignore it.
+//! Seed is 5SIM on and SMSPool off so an unfunded SMSPool wallet cannot reach
+//! the shop even if that key is still in the environment.
 
 use crate::error::ApiResult;
 use sqlx::PgPool;

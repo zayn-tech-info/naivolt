@@ -208,6 +208,7 @@ async fn list_offers(
            JOIN number_countries c ON c.id = o.country_id
            JOIN number_offer_sources s ON s.offer_id = o.id
           WHERE p.slug = $1 AND o.active AND s.stock > 0
+            AND o.success_rate > 0 AND s.provider_success_rate > 0
             AND s.provider = ANY($3::text[])
             AND ($2::text IS NULL OR c.code = $2)
           GROUP BY o.id, p.slug, p.name, c.code, c.name, c.dial_code,
@@ -307,6 +308,7 @@ async fn products(
            FROM number_products p
            JOIN number_offers o ON o.product_id = p.id AND o.active
            JOIN number_offer_sources s ON s.offer_id = o.id AND s.stock > 0
+            AND s.provider_success_rate > 0
             AND s.provider = ANY($3::text[])
            JOIN number_countries c ON c.id = o.country_id AND c.active
           WHERE p.active
@@ -507,6 +509,7 @@ async fn create_order(
                 "SELECT provider, provider_country, provider_product, provider_operator
                    FROM number_offer_sources
                   WHERE offer_id = $1 AND stock > 0
+                    AND provider_success_rate > 0
                     AND provider = ANY($2::text[])
                   ORDER BY provider_cost ASC, stock DESC",
             )
