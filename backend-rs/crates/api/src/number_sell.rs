@@ -33,22 +33,48 @@ impl SellSettings {
     }
 }
 
-pub async fn load(db: &PgPool) -> ApiResult<SellSettings> {
-    let row: (bool, bool) = sqlx::query_as(
+const SEED: SellSettings = SellSettings {
+    fivesim_enabled: true,
+    smspool_enabled: false,
+};
+
+async fn fetch_row(db: &PgPool) -> ApiResult<Option<(bool, bool)>> {
+    Ok(sqlx::query_as(
         "SELECT fivesim_enabled, smspool_enabled FROM number_sell_settings WHERE id = 1",
     )
     .fetch_optional(db)
-    .await?
-    .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("number_sell_settings row is missing")))?;
-    Ok(SellSettings {
-        fivesim_enabled: row.0,
-        smspool_enabled: row.1,
-    })
+    .await?)
+}
+
+/// Seed is 5SIM on, SMSPool off. Both off is illegal (CHECK + PUT).
+/// Recreate that seed if the row is missing or both flags are false so
+/// operators can choose from a valid starting point.
+pub async fn load(db: &PgPool) -> ApiResult<SellSettings> {
+    if let Some((fivesim_enabled, smspool_enabled)) = fetch_row(db).await? {
+        if fivesim_enabled || smspool_enabled {
+            return Ok(SellSettings {
+                fivesim_enabled,
+                smspool_enabled,
+            });
+        }
+    }
+    sqlx::query(
+        "INSERT INTO number_sell_settings (id, fivesim_enabled, smspool_enabled)
+         VALUES (1, true, false)
+         ON CONFLICT (id) DO UPDATE SET
+           fivesim_enabled = true,
+           smspool_enabled = false,
+           updated_at = now()",
+    )
+    .execute(db)
+    .await?;
+    Ok(SEED)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_database::IsolatedDatabase;
 
     #[test]
     fn stub_joins_enabled_live_suppliers() {
@@ -66,5 +92,21 @@ mod tests {
         };
         assert!(!off.allows_live_fivesim_catalog(true));
         assert!(off.allows_live_fivesim_catalog(false));
+    }
+
+    #[tokio::test]
+    async fn load_recreates_seed_when_row_is_missing() {
+        let database = IsolatedDatabase::new("sell_missing_row").await;
+        sqlx::query("DELETE FROM number_sell_settings WHERE id = 1")
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        let sell = load(&database.pool).await.unwrap();
+        assert!(sell.fivesim_enabled);
+        assert!(!sell.smspool_enabled);
+        let again = load(&database.pool).await.unwrap();
+        assert!(again.fivesim_enabled);
+        assert!(!again.smspool_enabled);
+        database.cleanup().await;
     }
 }
