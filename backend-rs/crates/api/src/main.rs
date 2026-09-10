@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
         },
         number_catalog::OfferSync {
             write_stub: config.fivesim_api_key.is_none(),
+            fivesim_api_key: config.fivesim_api_key.clone(),
             smspool: config.smspool_api_key.as_ref().map(|key| {
                 number_smspool::SmsPoolProvider::new(
                     key.clone(),

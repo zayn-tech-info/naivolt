@@ -71,6 +71,22 @@ impl SmsPoolProvider {
         Ok(skus)
     }
 
+    /// Wallet float. Zero means we cannot buy, so the shop must not list us.
+    pub async fn fetch_balance(&self) -> anyhow::Result<Decimal> {
+        let url = format!("{}/request/balance", self.base.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(&url)
+            .form(&[("key", self.api_key.as_str())])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("smspool balance refused {}", response.status());
+        }
+        let body: Value = response.json().await?;
+        parse_balance_json(&body)
+    }
+
     async fn fetch_mapped_services(&self) -> anyhow::Result<Vec<MappedService>> {
         let url = format!("{}/service/retrieve_all", self.base.trim_end_matches('/'));
         let response = self
@@ -461,6 +477,20 @@ fn parse_smspool_check(body: &Value) -> ActivationCheck {
     }
 }
 
+fn parse_balance_json(body: &Value) -> anyhow::Result<Decimal> {
+    let raw = body.get("balance").or_else(|| body.get("Balance"));
+    match raw {
+        Some(Value::String(s)) => Decimal::from_str(s.trim())
+            .map_err(|e| anyhow::anyhow!("smspool balance unreadable: {e}")),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .and_then(|f| Decimal::from_str(&f.to_string()).ok())
+            .or_else(|| n.as_i64().map(Decimal::from))
+            .ok_or_else(|| anyhow::anyhow!("smspool balance unreadable")),
+        _ => anyhow::bail!("smspool balance missing"),
+    }
+}
+
 fn map_country(name: &str) -> Option<String> {
     let n = name.to_ascii_lowercase();
     let code = match n.as_str() {
@@ -480,6 +510,12 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use serde_json::json;
+
+    #[test]
+    fn empty_wallet_is_zero() {
+        assert_eq!(parse_balance_json(&json!({"balance": "0.00"})).unwrap(), dec!(0));
+        assert_eq!(parse_balance_json(&json!({"balance": 1.5})).unwrap(), dec!(1.5));
+    }
 
     #[test]
     fn success_rows_parse_short_name_and_one_vs_hundred() {
