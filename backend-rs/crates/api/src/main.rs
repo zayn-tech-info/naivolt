@@ -34,6 +34,7 @@ mod payout_provider;
 mod payout_routes;
 mod pricing;
 mod rate_routes;
+mod session_cookie;
 mod signer;
 mod state;
 #[cfg(test)]

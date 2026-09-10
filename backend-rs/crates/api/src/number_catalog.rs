@@ -976,6 +976,21 @@ mod tests {
         });
         let skus = skus_from_guest_prices(&payload, &countries, &pricing);
         assert_eq!(skus.len(), 2, "laos has no rate; any is dropped");
+        let product_first = serde_json::json!({
+            "whatsapp": {
+                "england": {
+                    "virtual59": { "cost": 0.7, "count": 41789, "rate": 0, "rate1": 44.58 },
+                    "any": { "cost": 0.3, "count": 10, "rate": 90 }
+                }
+            }
+        });
+        let from_product = skus_from_guest_prices(&product_first, &countries, &pricing);
+        assert_eq!(from_product.len(), 1, "product-first uses rate1; any dropped");
+        assert_eq!(
+            from_product[0].provider_operator.as_deref(),
+            Some("virtual59")
+        );
+        assert_eq!(from_product[0].success_rate, dec!(44.58));
         assert!(skus.iter().all(|s| s.provider_country == "england"));
         assert!(skus.iter().any(|s| {
             s.provider_operator.as_deref() == Some("virtual59")
