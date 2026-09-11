@@ -315,16 +315,78 @@ pub struct FiveSimProvider {
 
 #[derive(Deserialize)]
 struct FiveSimOrder {
-    id: i64,
+    /// 5SIM sends a JSON number. String-only Decimal serde used to reject the
+    /// whole payload after they had already assigned a phone.
+    id: serde_json::Value,
     phone: String,
     #[serde(default)]
-    price: Option<Decimal>,
+    price: Option<serde_json::Value>,
     #[serde(default)]
-    expires: Option<DateTime<Utc>>,
+    expires: Option<String>,
     #[serde(default)]
     status: String,
     #[serde(default)]
     sms: Vec<FiveSimSms>,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default)]
+    product: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FiveSimOrderList {
+    #[serde(rename = "Data")]
+    data: Vec<FiveSimOrder>,
+}
+
+fn fivesim_order_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn json_decimal(value: Option<&serde_json::Value>) -> Option<Decimal> {
+    match value? {
+        serde_json::Value::Number(n) => n.to_string().parse().ok(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn parse_rfc3339_loose(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|| {
+            let Some((head, rest)) = raw.split_once('.') else {
+                return None;
+            };
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let tz: String = rest.chars().skip_while(|c| c.is_ascii_digit()).collect();
+            if digits.len() <= 6 {
+                return None;
+            }
+            let trimmed = format!("{head}.{}{tz}", &digits[..6]);
+            DateTime::parse_from_rfc3339(&trimmed)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+}
+
+fn activation_from_order(order: &FiveSimOrder, currency: Option<String>) -> Option<Activation> {
+    let provider_order_id = fivesim_order_id(&order.id)?;
+    if order.phone.trim().is_empty() {
+        return None;
+    }
+    Some(Activation {
+        provider_order_id,
+        phone: order.phone.clone(),
+        cost: json_decimal(order.price.as_ref()),
+        cost_currency: currency,
+        expires_at: order.expires.as_deref().and_then(parse_rfc3339_loose),
+    })
 }
 
 #[derive(Deserialize)]
@@ -391,6 +453,7 @@ impl FiveSimProvider {
             .http
             .get(&url)
             .bearer_auth(&self.api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
             .map_err(|e| {
@@ -429,17 +492,48 @@ impl FiveSimProvider {
             return Err(err);
         }
 
-        let order: FiveSimOrder = serde_json::from_str(&body).map_err(|e| {
-            tracing::warn!(error = %e, "5sim buy returned unreadable body");
-            PurchaseError::Ambiguous
-        })?;
+        if let Ok(order) = serde_json::from_str::<FiveSimOrder>(&body) {
+            if let Some(activation) = activation_from_order(&order, self.currency.clone()) {
+                return Ok(activation);
+            }
+        } else {
+            tracing::warn!(body = %body, "5sim buy returned unreadable body");
+        }
 
-        Ok(Activation {
-            provider_order_id: order.id.to_string(),
-            phone: order.phone,
-            cost: order.price,
-            cost_currency: self.currency.clone(),
-            expires_at: order.expires,
+        if let Some(activation) = self.recover_recent_buy(country, product).await {
+            return Ok(activation);
+        }
+        Err(PurchaseError::Ambiguous)
+    }
+
+    async fn recover_recent_buy(&self, country: &str, product: &str) -> Option<Activation> {
+        let response = self
+            .http
+            .get("https://5sim.net/v1/user/orders?category=activation&limit=5&offset=0&order=id&reverse=true")
+            .bearer_auth(&self.api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let list: FiveSimOrderList = response.json().await.ok()?;
+        let country = country.to_ascii_lowercase();
+        let product = product.to_ascii_lowercase();
+        list.data.into_iter().find_map(|order| {
+            let same_country = order
+                .country
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case(&country));
+            let same_product = order
+                .product
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(&product));
+            if !same_country || !same_product {
+                return None;
+            }
+            activation_from_order(&order, self.currency.clone())
         })
     }
 
@@ -448,6 +542,7 @@ impl FiveSimProvider {
             .http
             .get(format!("{FIVESIM_BASE}/check/{order_id}"))
             .bearer_auth(&self.api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
             .map_err(|e| {
@@ -476,6 +571,7 @@ impl FiveSimProvider {
             .http
             .get(format!("{FIVESIM_BASE}/cancel/{order_id}"))
             .bearer_auth(&self.api_key)
+            .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
             .map_err(|e| {
@@ -550,7 +646,7 @@ fn fivesim_activation_check(order: FiveSimOrder) -> ActivationCheck {
     ActivationCheck {
         messages,
         lifecycle,
-        expires_at: order.expires,
+        expires_at: order.expires.as_deref().and_then(parse_rfc3339_loose),
     }
 }
 
@@ -884,6 +980,28 @@ mod tests {
             }
             other => panic!("plain 200 must refund, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn five_sim_buy_json_with_numeric_price_is_a_number() {
+        let body = r#"{
+            "id": 1089955264,
+            "phone": "+5562942636168",
+            "operator": "virtual61",
+            "product": "instagram",
+            "price": 0.1359,
+            "status": "PENDING",
+            "expires": "2018-10-13T08:28:38.809469028Z",
+            "sms": [],
+            "created_at": "2026-09-11T12:13:33.707189Z",
+            "country": "brazil"
+        }"#;
+        let order: FiveSimOrder = serde_json::from_str(body).unwrap();
+        let activation = activation_from_order(&order, Some("USD".into())).unwrap();
+        assert_eq!(activation.provider_order_id, "1089955264");
+        assert_eq!(activation.phone, "+5562942636168");
+        assert!(activation.cost.is_some());
+        assert!(activation.expires_at.is_some());
     }
 
     #[tokio::test]

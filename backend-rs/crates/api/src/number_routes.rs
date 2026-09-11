@@ -734,6 +734,21 @@ async fn create_order(
                     break;
                 }
                 Err(PurchaseError::Rejected(err)) => {
+                    if err.to_string().contains("out of stock") {
+                        sqlx::query(
+                            "UPDATE number_offer_sources SET stock = 0, synced_at = now()
+                              WHERE offer_id = $1 AND provider = $2 AND provider_country = $3
+                                AND provider_product = $4 AND provider_operator = $5",
+                        )
+                        .bind(offer_id)
+                        .bind(provider)
+                        .bind(country)
+                        .bind(product)
+                        .bind(operator)
+                        .execute(&state.db)
+                        .await
+                        .ok();
+                    }
                     if try_next_source(&err) {
                         last_reject = Some(err);
                         continue;
