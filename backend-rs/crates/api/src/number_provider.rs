@@ -371,19 +371,38 @@ fn parse_rfc3339_loose(raw: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|| {
-            let Some((head, rest)) = raw.split_once('.') else {
-                return None;
-            };
+            let (head, rest) = raw.split_once('.')?;
             let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            let tz: String = rest.chars().skip_while(|c| c.is_ascii_digit()).collect();
-            if digits.len() <= 6 {
+            if digits.is_empty() {
                 return None;
             }
-            let trimmed = format!("{head}.{}{tz}", &digits[..6]);
-            DateTime::parse_from_rfc3339(&trimmed)
+            let tz: String = rest.chars().skip_while(|c| c.is_ascii_digit()).collect();
+            let mut frac = digits;
+            if frac.len() > 6 {
+                frac.truncate(6);
+            }
+            while frac.len() < 6 {
+                frac.push('0');
+            }
+            DateTime::parse_from_rfc3339(&format!("{head}.{frac}{tz}"))
                 .ok()
                 .map(|dt| dt.with_timezone(&Utc))
         })
+}
+
+fn json_code(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
 }
 
 fn activation_from_order(order: &FiveSimOrder, currency: Option<String>) -> Option<Activation> {
@@ -404,13 +423,17 @@ fn activation_from_order(order: &FiveSimOrder, currency: Option<String>) -> Opti
 struct FiveSimSms {
     #[serde(default)]
     text: String,
+    /// 5SIM sends this as a string or a JSON number.
     #[serde(default)]
-    code: Option<String>,
+    code: Option<serde_json::Value>,
     #[serde(default)]
     sender: Option<String>,
-    /// 5SIM sends `date` on some routes and `created_at` on others.
-    #[serde(default, alias = "created_at")]
-    date: Option<DateTime<Utc>>,
+    /// Check payloads include both `date` and `created_at`. Mapping one field
+    /// to both names makes serde reject the whole SMS as a duplicate.
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
     #[serde(default)]
     id: Option<serde_json::Value>,
 }
@@ -570,7 +593,7 @@ impl FiveSimProvider {
         }
 
         let order: FiveSimOrder = response.json().await.map_err(|e| {
-            tracing::warn!(error = %e, "5sim check returned unreadable body");
+            tracing::warn!(error = %e, %order_id, "5sim check returned unreadable body");
             ApiError::ServiceUnavailable("We couldn't check that number just now.".into())
         })?;
 
@@ -635,16 +658,23 @@ fn fivesim_activation_check(order: FiveSimOrder) -> ActivationCheck {
     let messages: Vec<Sms> = order
         .sms
         .into_iter()
-        .map(|sms| Sms {
-            sender: sms.sender,
-            text: sms.text,
-            code: sms.code,
-            received_at: sms.date,
-            provider_message_id: sms.id.and_then(|value| match value {
-                serde_json::Value::String(text) if !text.is_empty() => Some(text),
-                serde_json::Value::Number(number) => Some(number.to_string()),
-                _ => None,
-            }),
+        .map(|sms| {
+            let received_at = sms
+                .date
+                .as_deref()
+                .and_then(parse_rfc3339_loose)
+                .or_else(|| sms.created_at.as_deref().and_then(parse_rfc3339_loose));
+            Sms {
+                sender: sms.sender,
+                text: sms.text,
+                code: json_code(sms.code.as_ref()),
+                received_at,
+                provider_message_id: sms.id.and_then(|value| match value {
+                    serde_json::Value::String(text) if !text.is_empty() => Some(text),
+                    serde_json::Value::Number(number) => Some(number.to_string()),
+                    _ => None,
+                }),
+            }
         })
         .collect();
     // Unknown or missing status stays Open. Closing on "" invented a finish the
@@ -860,6 +890,54 @@ mod tests {
             assert_eq!(check.messages[0].code.as_deref(), Some("111111"));
             assert_eq!(check.messages[0].provider_message_id.as_deref(), Some("77"));
         }
+    }
+
+    #[test]
+    fn check_body_with_date_and_created_at_keeps_the_code() {
+        let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+            "id": 1090161578,
+            "phone": "+85262009940",
+            "operator": "virtual54",
+            "product": "google",
+            "price": 0.25,
+            "status": "FINISHED",
+            "expires": "2026-09-11T18:58:56.764426Z",
+            "sms": [{
+                "created_at": "2026-09-11T18:42:24.75995Z",
+                "date": "2026-09-11T18:42:24.748275Z",
+                "sender": "",
+                "text": "[Google]Your Google verification code is 616738.",
+                "code": "616738"
+            }],
+            "created_at": "2026-09-11T18:38:56.764426Z",
+            "country": "hongkong"
+        })));
+        assert_eq!(check.lifecycle, ActivationLifecycle::Closed);
+        assert_eq!(check.messages.len(), 1);
+        assert_eq!(check.messages[0].code.as_deref(), Some("616738"));
+        assert_eq!(
+            check.messages[0].text,
+            "[Google]Your Google verification code is 616738."
+        );
+        assert!(check.messages[0].received_at.is_some());
+    }
+
+    #[test]
+    fn check_sms_code_may_be_a_json_number() {
+        let check = fivesim_activation_check(fivesim_order(serde_json::json!({
+            "id": 1,
+            "phone": "+000",
+            "status": "RECEIVED",
+            "sms": [{ "text": "code 42", "code": 616738 }]
+        })));
+        assert_eq!(check.messages[0].code.as_deref(), Some("616738"));
+    }
+
+    #[test]
+    fn odd_fractional_timestamps_still_parse() {
+        assert!(parse_rfc3339_loose("2026-09-11T18:42:24.75995Z").is_some());
+        assert!(parse_rfc3339_loose("2026-09-11T18:42:24.748275Z").is_some());
+        assert!(parse_rfc3339_loose("2026-09-11T18:42:24.123456789Z").is_some());
     }
 
     #[test]
