@@ -253,6 +253,17 @@ impl NumberProviders {
         self.primary.is_live() || self.smspool.is_some()
     }
 
+    pub async fn recover_activation(
+        &self,
+        country: &str,
+        product: &str,
+    ) -> Option<Activation> {
+        match &self.primary {
+            AnyNumberProvider::FiveSim(p) => p.recover_recent_buy(country, product).await,
+            _ => None,
+        }
+    }
+
     pub async fn buy_source(
         &self,
         provider: &str,
@@ -506,7 +517,7 @@ impl FiveSimProvider {
         Err(PurchaseError::Ambiguous)
     }
 
-    async fn recover_recent_buy(&self, country: &str, product: &str) -> Option<Activation> {
+    pub(crate) async fn recover_recent_buy(&self, country: &str, product: &str) -> Option<Activation> {
         let response = self
             .http
             .get("https://5sim.net/v1/user/orders?category=activation&limit=5&offset=0&order=id&reverse=true")
