@@ -1834,6 +1834,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offers_rank_by_provider_rate_without_scaling_fractions() {
+        let database = IsolatedDatabase::new("number_offers_provider_rate").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        let usa = crate::number_offers::OfferSku {
+            provider: "fivesim",
+            product_slug: "instagram".into(),
+            country_code: "US".into(),
+            provider_product: "instagram".into(),
+            provider_country: "usa".into(),
+            provider_operator: Some("virtual28".into()),
+            cost: dec!(0.3),
+            currency: "USD".into(),
+            success_rate: dec!(72.32),
+            stock: 25259,
+        };
+        let philippines_like = crate::number_offers::OfferSku {
+            provider: "fivesim",
+            product_slug: "instagram".into(),
+            country_code: "NG".into(),
+            provider_product: "instagram".into(),
+            provider_country: "nigeria".into(),
+            provider_operator: Some("virtual34".into()),
+            cost: dec!(0.06),
+            currency: "USD".into(),
+            success_rate: dec!(0.93),
+            stock: 235926,
+        };
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "fivesim",
+            &[usa, philippines_like],
+            true,
+        )
+        .await
+        .unwrap();
+        let listed = list_offers(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            Query(OfferQuery {
+                product: "instagram".into(),
+                country: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].country_code, "US");
+        assert_eq!(listed[0].success_rate, "72.32");
+        assert!(listed[0].recommended);
+        assert_eq!(listed[1].country_code, "NG");
+        assert_eq!(listed[1].success_rate, "0.93");
+        assert!(!listed[1].recommended);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
     async fn offers_merge_same_success_and_skip_missing_rate() {
         let database = IsolatedDatabase::new("number_offers_merge").await;
         let pool = database.pool.clone();

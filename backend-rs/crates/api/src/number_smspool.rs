@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn success_rows_parse_short_name_and_one_vs_hundred() {
+    fn success_rows_parse_short_name_and_published_percent() {
         let rows = vec![
             json!({
                 "country_id": 1,
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(skus[0].provider_product, "1012");
         assert_eq!(skus[0].success_rate, dec!(100));
         assert_eq!(skus[1].country_code, "GB");
-        assert_eq!(skus[1].success_rate, dec!(100));
+        assert_eq!(skus[1].success_rate, dec!(1));
         assert_eq!(skus[1].provider_country, "2");
     }
 

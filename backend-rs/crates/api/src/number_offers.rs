@@ -19,15 +19,15 @@ pub struct OfferSku {
     pub stock: i32,
 }
 
+/// Copy a provider-published percent as given.
+///
+/// 5SIM's Prices `rate` is already the Statistics "Rate (%)" figure: `72.32`
+/// for USA Instagram Virtual28 and `0.93` for Philippines Virtual34. Treating
+/// `0.93` as a fraction (×100) or `1` as 100% invented a 93% Philippines pick
+/// that 5SIM does not show. Values outside (0, 100] are missing, not guessed.
 pub fn parse_success_rate(value: Decimal) -> Option<Decimal> {
-    if value == Decimal::ONE || value == Decimal::from(100) {
-        return Some(Decimal::from(100));
-    }
-    if value > Decimal::ONE && value <= Decimal::from(99) {
+    if value > Decimal::ZERO && value <= Decimal::from(100) {
         return Some(value);
-    }
-    if value > Decimal::ZERO && value < Decimal::ONE {
-        return Some(value * Decimal::from(100));
     }
     None
 }
@@ -109,7 +109,10 @@ pub async fn apply_provider_skus(
                 (product_id, country_id, price_ngn, success_rate, success_fetched_at, quantity, active, synced_at)
              VALUES ($1, $2, $3, $4, now(), $5, $6, now())
              ON CONFLICT (product_id, country_id, price_ngn, success_rate) DO UPDATE
-                SET success_fetched_at = now(), synced_at = now()
+                SET quantity = EXCLUDED.quantity,
+                    active = EXCLUDED.active,
+                    success_fetched_at = now(),
+                    synced_at = now()
              RETURNING id",
         )
         .bind(product_id)
@@ -224,11 +227,13 @@ mod tests {
     use rust_decimal_macros::dec;
 
     #[test]
-    fn smspool_one_and_one_hundred_are_full_success() {
-        assert_eq!(parse_success_rate(dec!(1)), Some(dec!(100)));
+    fn provider_percent_is_copied_never_scaled() {
+        assert_eq!(parse_success_rate(dec!(72.32)), Some(dec!(72.32)));
+        assert_eq!(parse_success_rate(dec!(0.93)), Some(dec!(0.93)));
+        assert_eq!(parse_success_rate(dec!(0.61)), Some(dec!(0.61)));
+        assert_eq!(parse_success_rate(dec!(1)), Some(dec!(1)));
         assert_eq!(parse_success_rate(dec!(100)), Some(dec!(100)));
         assert_eq!(parse_success_rate(dec!(39)), Some(dec!(39)));
-        assert_eq!(parse_success_rate(dec!(0.82)), Some(dec!(82)));
         assert_eq!(parse_success_rate(dec!(0)), None);
         assert_eq!(parse_success_rate(dec!(150)), None);
     }
