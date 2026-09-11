@@ -239,7 +239,11 @@ pub fn classify_fivesim_plain_body(body: &str) -> Option<PurchaseError> {
             COPY_SOURCE_UNAVAILABLE.into(),
         )));
     }
-    Some(PurchaseError::Ambiguous)
+    // HTTP 200 plus a sentence is a refusal. Holding the naira for review is
+    // how Instagram/WhatsApp buys sat in review_required with no phone.
+    Some(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+        COPY_BUY_RESTORED.into(),
+    )))
 }
 
 impl NumberProviders {
@@ -361,6 +365,26 @@ impl FiveSimProvider {
         } else {
             operator
         };
+        match self.purchase(country, product, operator).await {
+            Err(err) if err.is_out_of_stock() && !operator.eq_ignore_ascii_case(ANY_OPERATOR) => {
+                tracing::info!(
+                    %country,
+                    %product,
+                    %operator,
+                    "5sim named operator empty, retrying any"
+                );
+                self.purchase(country, product, ANY_OPERATOR).await
+            }
+            other => other,
+        }
+    }
+
+    async fn purchase(
+        &self,
+        country: &str,
+        product: &str,
+        operator: &str,
+    ) -> Result<Activation, PurchaseError> {
         let url = format!("{FIVESIM_BASE}/buy/activation/{country}/{operator}/{product}");
 
         let response = self
@@ -854,6 +878,12 @@ mod tests {
         let err = classify_fivesim_plain_body("no free phones").unwrap();
         assert!(err.is_out_of_stock());
         assert!(classify_fivesim_plain_body(r#"{"id":1,"phone":"+1"}"#).is_none());
+        match classify_fivesim_plain_body("orderland not found").unwrap() {
+            PurchaseError::Rejected(ApiError::ServiceUnavailable(message)) => {
+                assert_eq!(message, COPY_BUY_RESTORED);
+            }
+            other => panic!("plain 200 must refund, got {other:?}"),
+        }
     }
 
     #[tokio::test]
