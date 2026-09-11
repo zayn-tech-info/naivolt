@@ -883,13 +883,43 @@ async fn list_orders(
     Ok(Json(rows.into_iter().map(into_response).collect()))
 }
 
-/// Reads the stored order. Supplier state is owned by the reconciler.
+/// Reads the stored order. While the number is still live, also ask the
+/// supplier so the inbox is not stuck waiting on the reconciler backoff.
 async fn get_order(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<OrderResponse>> {
+    pull_inbox_from_provider(&state, user.id, id).await;
     load_order(&state, user.id, id).await.map(Json)
+}
+
+async fn pull_inbox_from_provider(state: &AppState, user_id: Uuid, id: Uuid) {
+    if !state.numbers.is_live() {
+        return;
+    }
+    let row: Option<(String, Option<String>, String)> = match sqlx::query_as(
+        "SELECT status, provider_order_id, provider
+           FROM number_orders WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return,
+    };
+    let Some((status, Some(provider_order_id), provider)) = row else {
+        return;
+    };
+    if !matches!(status.as_str(), "reserved" | "awaiting_code") {
+        return;
+    }
+    let Ok(check) = state.numbers.check_for(&provider, &provider_order_id).await else {
+        return;
+    };
+    let _ = number_order_transitions::apply_check(&state.db, id, None, check).await;
 }
 
 /// Give a number back before its twenty minutes are up.
