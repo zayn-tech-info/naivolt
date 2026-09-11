@@ -99,6 +99,7 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
         .allow_methods([
             Method::GET,
             Method::POST,
+            Method::PUT,
             Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
@@ -317,7 +318,11 @@ mod tests {
                     "/api/v1/numbers/orders/:id",
                     get(|| async { "order" }),
                 )
-                .route("/api/v1/auth/google", post(|| async { "auth" })),
+                .route("/api/v1/auth/google", post(|| async { "auth" }))
+                .route(
+                    "/api/v1/admin/sell-settings",
+                    axum::routing::put(|| async { "sell" }),
+                ),
             boundary,
         )
     }
@@ -377,6 +382,41 @@ mod tests {
                 .get("access-control-allow-credentials")
                 .unwrap(),
             "true"
+        );
+
+        let put_preflight = with_peer(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/api/v1/admin/sell-settings")
+                .header("origin", origin)
+                .header("access-control-request-method", "PUT")
+                .header(
+                    "access-control-request-headers",
+                    "content-type,x-operator-session",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            [127, 0, 0, 1],
+        );
+        let put_response = send(app.clone(), put_preflight).await;
+        assert_eq!(put_response.status(), axum::http::StatusCode::OK);
+        let allow_methods = put_response
+            .headers()
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_uppercase();
+        assert!(
+            allow_methods.split(',').any(|m| m.trim() == "PUT"),
+            "{allow_methods}"
+        );
+        assert_eq!(
+            put_response
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            origin
         );
 
         let get = with_peer(
