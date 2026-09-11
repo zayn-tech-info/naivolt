@@ -600,6 +600,9 @@ fn skus_from_guest_prices(
     skus
 }
 
+/// 5SIM Statistics "Rate (%)" with Period unset is the `rate` field (then `rate1`).
+/// `rate24` / `rate72` are other windows; using them when `rate` is 0 would invent
+/// a figure the default Prices tab does not show.
 fn row_success_rate(row: &serde_json::Value) -> Option<Decimal> {
     row.get("rate")
         .and_then(number_offers::parse_success_json)
@@ -1025,6 +1028,46 @@ mod tests {
         assert!(!wallet_is_funded(dec!(0)));
         assert!(!wallet_is_funded(dec!(-0.01)));
         assert!(wallet_is_funded(dec!(0.05)));
+    }
+
+    #[test]
+    fn guest_prices_keep_sub_one_rate_as_published_percent() {
+        let pricing = pricing();
+        let countries = HashMap::from([
+            (
+                "usa".into(),
+                GuestCountry {
+                    iso: HashMap::from([("us".into(), serde_json::json!(1))]),
+                    prefix: HashMap::from([("+1".into(), serde_json::json!(1))]),
+                    text_en: Some("USA".into()),
+                },
+            ),
+            (
+                "philippines".into(),
+                GuestCountry {
+                    iso: HashMap::from([("ph".into(), serde_json::json!(1))]),
+                    prefix: HashMap::from([("+63".into(), serde_json::json!(1))]),
+                    text_en: Some("Philippines".into()),
+                },
+            ),
+        ]);
+        let payload = serde_json::json!({
+            "instagram": {
+                "philippines": {
+                    "virtual34": { "cost": 0.06, "count": 235926, "rate": 0.93, "rate1": 0.93 }
+                },
+                "usa": {
+                    "virtual28": { "cost": 0.3, "count": 25259, "rate": 72.32, "rate1": 72.32 }
+                }
+            }
+        });
+        let mut skus = skus_from_guest_prices(&payload, &countries, &pricing);
+        skus.sort_by(|a, b| b.success_rate.cmp(&a.success_rate));
+        assert_eq!(skus.len(), 2);
+        assert_eq!(skus[0].country_code, "US");
+        assert_eq!(skus[0].success_rate, dec!(72.32));
+        assert_eq!(skus[1].country_code, "PH");
+        assert_eq!(skus[1].success_rate, dec!(0.93));
     }
 
     #[test]
