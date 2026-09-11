@@ -60,8 +60,10 @@ async fn sweep(state: &AppState) -> ApiResult<()> {
                 AND (
                       status IN ('reserved','awaiting_code')
                    OR (status = 'delivered' AND activation_open)
+                   OR (status = 'review_required' AND provider_order_id IS NULL
+                       AND review_reason = 'purchase_outcome_unknown')
                 )
-                AND reconcile_next_at <= now()
+                AND COALESCE(reconcile_next_at, '-infinity'::timestamptz) <= now()
                 AND (reconcile_claimed_until IS NULL OR reconcile_claimed_until < now())
               ORDER BY reconcile_next_at FOR UPDATE SKIP LOCKED LIMIT 50
          )
@@ -107,6 +109,10 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
         }
         return Ok(());
     }
+    if status == "review_required" {
+        recover_unknown_purchase(state, id, token).await?;
+        return Ok(());
+    }
     let provider_id = provider_id
         .ok_or_else(|| ApiError::Internal(anyhow::anyhow!("awaiting order has no provider id")))?;
     let expired = expires_at.is_some_and(|expiry| expiry <= Utc::now());
@@ -146,6 +152,82 @@ async fn process(state: &AppState, row: ClaimedOrder) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+/// 5SIM already sold a number; we failed to store the id. Pull it from their
+/// order history and put the phone on the customer order, or refund if they
+/// have already closed it.
+async fn recover_unknown_purchase(state: &AppState, id: Uuid, token: Uuid) -> ApiResult<()> {
+    let row: Option<(String, String, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT o.provider, c.provider_country, p.slug, o.created_at
+           FROM number_orders o
+           JOIN number_countries c ON c.id = o.country_id
+           JOIN number_products p ON p.id = o.product_id
+          WHERE o.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((provider, country, product, created_at)) = row else {
+        return Ok(());
+    };
+
+    if let Some(activation) = state.numbers.recover_activation(&country, &product).await {
+        let taken: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM number_orders WHERE provider_order_id = $1 AND id <> $2",
+        )
+        .bind(&activation.provider_order_id)
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+        if taken.is_none() {
+            let assigned = sqlx::query(
+                "UPDATE number_orders
+                    SET status = 'awaiting_code', provider_order_id = $2, phone_number = $3,
+                        provider_cost = $4, provider_cost_currency = $5,
+                        expires_at = COALESCE($6, now() + interval '15 minutes'),
+                        activation_open = true,
+                        reconcile_next_at = now(),
+                        reconcile_claim_token = NULL, reconcile_claimed_until = NULL,
+                        updated_at = now()
+                  WHERE id = $1 AND status = 'review_required' AND reconcile_claim_token = $7",
+            )
+            .bind(id)
+            .bind(&activation.provider_order_id)
+            .bind(&activation.phone)
+            .bind(activation.cost)
+            .bind(activation.cost_currency.as_deref())
+            .bind(activation.expires_at)
+            .bind(token)
+            .execute(&state.db)
+            .await?;
+            if assigned.rows_affected() == 1 {
+                if let Ok(check) = state
+                    .numbers
+                    .check_for(&provider, &activation.provider_order_id)
+                    .await
+                {
+                    number_order_transitions::apply_check(&state.db, id, None, check).await?;
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    if Utc::now() - created_at > chrono::Duration::minutes(20) {
+        number_order_transitions::apply_claimed(
+            &state.db,
+            id,
+            token,
+            OrderTransition::Refund {
+                status: RefundStatus::Failed,
+                reason: "purchase_unconfirmed".into(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+    release_order(&state.db, id, token, 15, Some("purchase_outcome_unknown")).await
 }
 
 pub(crate) async fn try_claim_held_order(db: &PgPool, id: Uuid) -> ApiResult<Option<Uuid>> {
@@ -223,7 +305,7 @@ pub(crate) async fn mark_review_required(
 ) -> ApiResult<()> {
     let mut tx = db.begin().await?;
     let changed = sqlx::query("UPDATE number_orders SET status='review_required', review_required_at=now(), review_reason=$3,
-        reconcile_next_at=NULL, reconcile_claim_token=NULL, reconcile_claimed_until=NULL, updated_at=now()
+        reconcile_next_at=now() + interval '5 seconds', reconcile_claim_token=NULL, reconcile_claimed_until=NULL, updated_at=now()
         WHERE id=$1 AND status IN ('reserved','awaiting_code') AND reconcile_claim_token=$2 AND reconcile_claimed_until>now()")
         .bind(id).bind(token).bind(reason).execute(&mut *tx).await?;
     if changed.rows_affected() != 1 {
