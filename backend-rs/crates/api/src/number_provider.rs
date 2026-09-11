@@ -210,6 +210,38 @@ pub fn try_next_source(err: &ApiError) -> bool {
     msg.contains("out of stock") || msg.contains("isn't available right now")
 }
 
+/// A buy that never left this host cannot have created a supplier order.
+/// Timeouts and mid-flight errors stay Ambiguous because the supplier may
+/// already have charged.
+pub fn classify_buy_transport(err: &reqwest::Error) -> PurchaseError {
+    if err.is_connect() {
+        PurchaseError::Rejected(ApiError::ServiceUnavailable(COPY_BUY_RESTORED.into()))
+    } else {
+        PurchaseError::Ambiguous
+    }
+}
+
+/// 5SIM often answers HTTP 200 with a bare string (`no free phones`) instead
+/// of JSON. That is a refusal, not an unknown charge.
+pub fn classify_fivesim_plain_body(body: &str) -> Option<PurchaseError> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() || trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("no free phones") || lower.contains("no product") {
+        return Some(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+            COPY_OUT_OF_STOCK.into(),
+        )));
+    }
+    if lower.contains("not enough user balance") {
+        return Some(PurchaseError::Rejected(ApiError::ServiceUnavailable(
+            COPY_SOURCE_UNAVAILABLE.into(),
+        )));
+    }
+    Some(PurchaseError::Ambiguous)
+}
+
 impl NumberProviders {
     /// Real supplier money can move. FiveSim primary or a configured SMSPool
     /// both count; stub-only must never pair with live funding.
@@ -339,12 +371,16 @@ impl FiveSimProvider {
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, %country, %product, "5sim buy failed");
-                PurchaseError::Ambiguous
+                classify_buy_transport(&e)
             })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            tracing::warn!(error = %e, "5sim buy returned unreadable body");
+            PurchaseError::Ambiguous
+        })?;
+
+        if !status.is_success() {
             tracing::warn!(%status, %country, %product, "5sim buy rejected");
 
             // 5SIM answers in bare strings rather than codes. Only the
@@ -365,7 +401,11 @@ impl FiveSimProvider {
             };
         }
 
-        let order: FiveSimOrder = response.json().await.map_err(|e| {
+        if let Some(err) = classify_fivesim_plain_body(&body) {
+            return Err(err);
+        }
+
+        let order: FiveSimOrder = serde_json::from_str(&body).map_err(|e| {
             tracing::warn!(error = %e, "5sim buy returned unreadable body");
             PurchaseError::Ambiguous
         })?;
@@ -788,6 +828,32 @@ mod tests {
             Ok(_) => panic!("out of stock must refuse the buy"),
         };
         assert!(err.is_out_of_stock());
+    }
+
+    #[tokio::test]
+    async fn a_connect_failure_is_a_rejected_purchase() {
+        let err = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/buy/activation/x/any/y")
+            .send()
+            .await
+            .expect_err("loopback port 1 must refuse the TCP handshake");
+        assert!(err.is_connect(), "{err}");
+        match classify_buy_transport(&err) {
+            PurchaseError::Rejected(ApiError::ServiceUnavailable(message)) => {
+                assert_eq!(message, COPY_BUY_RESTORED);
+            }
+            other => panic!("connect must refund, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn five_sim_plain_no_phones_is_out_of_stock() {
+        let err = classify_fivesim_plain_body("no free phones").unwrap();
+        assert!(err.is_out_of_stock());
+        assert!(classify_fivesim_plain_body(r#"{"id":1,"phone":"+1"}"#).is_none());
     }
 
     #[tokio::test]

@@ -152,7 +152,7 @@ impl SmsPoolProvider {
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "smspool buy failed");
-                PurchaseError::Ambiguous
+                crate::number_provider::classify_buy_transport(&e)
             })?;
         if !response.status().is_success() {
             let status = response.status();
