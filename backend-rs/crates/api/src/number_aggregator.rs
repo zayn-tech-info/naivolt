@@ -69,10 +69,17 @@ pub fn ranked_sources_sql() -> String {
                         AND o.phone_number IS NOT NULL
                         AND o.created_at > now() - make_interval(days => $4::int)
                ) counts ON true
+               JOIN number_offers o ON o.id = s.offer_id
+               JOIN number_products prod ON prod.id = o.product_id
               WHERE s.offer_id = $1
                 AND s.stock > 0
                 AND s.provider_success_rate > 0
                 AND s.provider = ANY($2::text[])
+                -- Same per-app supplier-cost floor the listing applies, so a
+                -- source hidden from the shop cannot still fill an order.
+                AND (prod.min_provider_cost_usd = 0
+                     OR (s.provider_cost_currency = 'USD'
+                         AND s.provider_cost >= prod.min_provider_cost_usd))
            ) r
           ORDER BY {SCORE_SQL} DESC,
                    r.provider_cost ASC,

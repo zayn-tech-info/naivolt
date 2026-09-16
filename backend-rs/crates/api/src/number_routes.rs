@@ -219,6 +219,13 @@ async fn list_offers(
                AND o.success_rate > 0 AND s.provider_success_rate > 0
                AND s.provider = ANY($3::text[])
                AND ($2::text IS NULL OR c.code = $2)
+               -- Per-app floor on supplier cost. Set for an app whose stock is
+               -- uniformly cheap, where the dearest tier is still bad stock.
+               -- A floor we cannot check in its own currency excludes the row
+               -- rather than trusting it.
+               AND (p.min_provider_cost_usd = 0
+                    OR (s.provider_cost_currency = 'USD'
+                        AND s.provider_cost >= p.min_provider_cost_usd))
              GROUP BY o.id, p.slug, p.name, c.code, c.name, c.dial_code,
                       o.price_ngn, o.success_rate, o.success_fetched_at,
                       o.product_id, o.country_id
@@ -1774,6 +1781,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "awaiting_code");
+        database.cleanup().await;
+    }
+
+    /// Facebook's stock is uniformly cheap, so the relative floor still lands
+    /// on operators that take the money and never deliver. A per-app floor on
+    /// supplier cost is what excludes them, and it must exclude them from the
+    /// buy as well as the listing.
+    #[tokio::test]
+    async fn an_app_below_its_supplier_cost_floor_is_not_sold() {
+        let database = IsolatedDatabase::new("product_cost_floor").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        // Two facebook SKUs either side of the $1.00 floor migration 0025 sets.
+        let skus = vec![
+            crate::number_offers::OfferSku {
+                provider: "stub",
+                product_slug: "facebook".into(),
+                country_code: "NG".into(),
+                provider_product: "facebook-dear".into(),
+                provider_country: "nigeria".into(),
+                provider_operator: None,
+                cost: dec!(1.50),
+                currency: "USD".into(),
+                success_rate: dec!(70),
+                stock: 10,
+            },
+            crate::number_offers::OfferSku {
+                provider: "stub",
+                product_slug: "facebook".into(),
+                country_code: "NG".into(),
+                provider_product: "facebook-cheap".into(),
+                provider_country: "nigeria".into(),
+                provider_operator: Some("budget".into()),
+                cost: dec!(0.30),
+                currency: "USD".into(),
+                success_rate: dec!(95),
+                stock: 400,
+            },
+        ];
+        crate::number_offers::apply_provider_skus(&pool, &pricing, "stub", &skus, true)
+            .await
+            .unwrap();
+
+        // Drop the relative floor so this proves the per-app cost floor alone.
+        let mut listing_state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        listing_state.numbers_min_price_fraction = Decimal::ZERO;
+        let listed = list_offers(
+            State(listing_state),
+            Query(OfferQuery {
+                product: "facebook".into(),
+                country: Some("NG".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            listed.len(),
+            1,
+            "the sub-dollar facebook source must not be listed even at 95%"
+        );
+        assert_eq!(listed[0].price_ngn, "3000");
         database.cleanup().await;
     }
 
