@@ -409,6 +409,7 @@ mod tests {
             smspool_api_key: None,
             smspool_currency: Some("USD".into()),
             smspool_base_url: "https://api.smspool.net".into(),
+            activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "http://localhost".into(),

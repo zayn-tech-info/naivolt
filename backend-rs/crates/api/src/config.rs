@@ -65,6 +65,12 @@ pub struct Config {
     pub smspool_api_key: Option<String>,
     pub smspool_currency: Option<String>,
     pub smspool_base_url: String,
+    /// The `handler_api.php` suppliers, keyed by the provider name used in
+    /// `number_offer_sources` — `smsactivate`, `daisysms`, `smshub`,
+    /// `tigersms`. Absent means that supplier is simply not configured; a
+    /// supplier is only ever listed when it has both a key here and its row
+    /// enabled in `number_sell_providers`.
+    pub activate_keys: Vec<ActivateCredentials>,
     /// Who may sign in with Google. Empty means anyone with a Google account,
     /// which is the right default for a public product and the wrong one for a
     /// deployment taking real card payments before it has opened to anybody.
@@ -95,6 +101,48 @@ pub struct Config {
     pub rate_limits: RateLimitQuotas,
     pub operator_totp_key: Option<Vec<u8>>,
     pub admin_refund_cap_ngn: Decimal,
+}
+
+/// One configured `handler_api.php` supplier.
+#[derive(Debug, Clone)]
+pub struct ActivateCredentials {
+    /// `smsactivate`, `daisysms`, `smshub` or `tigersms`.
+    pub provider: String,
+    pub api_key: String,
+    pub currency: Option<String>,
+    /// Overrides the supplier's default endpoint. These services move domains
+    /// often — SMS-Activate changed operator in December 2025 — so the base URL
+    /// has to be reachable from the environment without a redeploy.
+    pub base_url: Option<String>,
+}
+
+/// Read `<PROVIDER>_API_KEY`, `<PROVIDER>_CURRENCY` and `<PROVIDER>_BASE_URL`
+/// for each supported supplier. A supplier with no key is skipped entirely.
+fn activate_credentials() -> Vec<ActivateCredentials> {
+    const PROVIDERS: &[(&str, &str)] = &[
+        ("smsactivate", "SMSACTIVATE"),
+        ("daisysms", "DAISYSMS"),
+        ("smshub", "SMSHUB"),
+        ("tigersms", "TIGERSMS"),
+    ];
+    PROVIDERS
+        .iter()
+        .filter_map(|(provider, prefix)| {
+            let api_key = env::var(format!("{prefix}_API_KEY"))
+                .ok()
+                .filter(|s| !s.is_empty())?;
+            Some(ActivateCredentials {
+                provider: (*provider).to_string(),
+                api_key,
+                currency: env::var(format!("{prefix}_CURRENCY"))
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                base_url: env::var(format!("{prefix}_BASE_URL"))
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+            })
+        })
+        .collect()
 }
 
 /// Per minute token bucket sizes for the HTTP limiter.
@@ -227,6 +275,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "https://api.smspool.net".into()),
+            activate_keys: activate_credentials(),
             google_allowed_emails: env::var("GOOGLE_ALLOWED_EMAILS")
                 .unwrap_or_default()
                 .split(',')
@@ -537,6 +586,7 @@ mod tests {
             smspool_api_key: None,
             smspool_currency: Some("USD".into()),
             smspool_base_url: "https://api.smspool.net".into(),
+            activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "https://naivolt.com".into(),
