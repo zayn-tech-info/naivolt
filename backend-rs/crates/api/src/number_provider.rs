@@ -301,6 +301,15 @@ impl NumberProviders {
             },
             "fivesim" => self.primary.buy_with(country, product, operator).await,
             "stub" => self.primary.buy(country, product).await,
+            // A supplier we know but hold no key for — usually a sell flag
+            // switched on before the catalogue sweep zeroed its stale rows.
+            // Step aside so the next source still fills the order; aborting
+            // here would fail a sale another supplier can serve.
+            other if is_foreign_supplier(other) => Err(PurchaseError::Rejected(
+                ApiError::ServiceUnavailable(COPY_SOURCE_UNAVAILABLE.into()),
+            )),
+            // A name no adapter claims. That is bad data, not dry stock, so
+            // end the order loudly rather than quietly shopping around.
             _ => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
                 COPY_BUY_RESTORED.into(),
             ))),
@@ -1074,8 +1083,21 @@ mod tests {
             activate: Vec::new(),
         };
         match providers.buy_source("smsactivate", "19", "wa", "any").await {
-            Err(PurchaseError::Rejected(_)) => {}
+            // Refused, and refused in a way the buy loop can move past: a
+            // supplier without a key must not fail a sale 5SIM can fill.
+            Err(PurchaseError::Rejected(err)) => assert!(
+                try_next_source(&err),
+                "an unconfigured supplier must step aside, not end the order"
+            ),
             _ => panic!("an unconfigured supplier must refuse, not hold the money"),
+        }
+        // A name no adapter claims is bad data — end the order instead.
+        match providers.buy_source("not-a-supplier", "19", "wa", "any").await {
+            Err(PurchaseError::Rejected(err)) => assert!(
+                !try_next_source(&err),
+                "an unknown provider name must not quietly shop around"
+            ),
+            _ => panic!("an unknown provider must refuse"),
         }
     }
 
