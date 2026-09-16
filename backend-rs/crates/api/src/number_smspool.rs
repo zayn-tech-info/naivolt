@@ -331,7 +331,7 @@ fn value_key(value: &Value) -> String {
     }
 }
 
-fn map_service(name: &str) -> Option<&'static str> {
+pub(crate) fn map_service(name: &str) -> Option<&'static str> {
     let n = name.to_ascii_lowercase();
     const MAP: &[(&str, &str)] = &[
         ("whatsapp", "whatsapp"),
@@ -545,7 +545,7 @@ fn parse_balance_json(body: &Value) -> anyhow::Result<Decimal> {
     }
 }
 
-fn map_country(name: &str) -> Option<String> {
+pub(crate) fn map_country(name: &str) -> Option<String> {
     let n = name.to_ascii_lowercase();
     let code = match n.as_str() {
         "nigeria" | "ng" => "NG",

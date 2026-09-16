@@ -42,6 +42,7 @@ mod tests {
             smspool_api_key: None,
             smspool_currency: Some("USD".into()),
             smspool_base_url: "https://api.smspool.net".into(),
+            activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
             admin_token: Some(ADMIN.into()),
             web_app_url: "http://localhost".into(),
@@ -657,6 +658,7 @@ mod tests {
             Json(SellSettingsBody {
                 fivesim_enabled: true,
                 smspool_enabled: true,
+                providers: Default::default(),
             }),
         )
         .await
@@ -670,14 +672,15 @@ mod tests {
             Json(SellSettingsBody {
                 fivesim_enabled: false,
                 smspool_enabled: false,
+                providers: Default::default(),
             }),
         )
         .await
         .unwrap_err();
         assert_eq!(err_code(both_off).await, "LAST_PROVIDER");
         let still = crate::number_sell::load(&state.db).await.unwrap();
-        assert!(still.fivesim_enabled);
-        assert!(!still.smspool_enabled);
+        assert!(still.fivesim_enabled());
+        assert!(!still.smspool_enabled());
 
         let updated = put_sell_settings(
             State(state.clone()),
@@ -685,6 +688,7 @@ mod tests {
             Json(SellSettingsBody {
                 fivesim_enabled: true,
                 smspool_enabled: true,
+                providers: Default::default(),
             }),
         )
         .await

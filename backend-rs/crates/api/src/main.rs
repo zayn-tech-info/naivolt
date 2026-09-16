@@ -22,6 +22,8 @@ mod kyc_routes;
 mod middleware;
 mod notify;
 mod operator;
+mod number_activate;
+mod number_aggregator;
 mod number_catalog;
 mod number_offers;
 mod number_order_transitions;
@@ -162,6 +164,7 @@ async fn main() -> Result<()> {
                         Some(config.smspool_base_url.clone()),
                     )
                 }),
+                activate: build_activate_providers(&config.activate_keys),
             }
         }),
         payouts: Arc::new(match &config.paystack_secret_key {
@@ -204,6 +207,21 @@ async fn main() -> Result<()> {
                     .clone()
                     .or_else(|| Some("USD".into())),
             },
+            activate: build_activate_providers(&config.activate_keys),
+            activate_pricing: config
+                .activate_keys
+                .iter()
+                .map(|creds| {
+                    (
+                        creds.provider.clone(),
+                        number_catalog::Pricing {
+                            usd_ngn: config.usd_ngn_mid,
+                            margin: config.numbers_margin,
+                            supplier_currency: creds.currency.clone(),
+                        },
+                    )
+                })
+                .collect(),
         },
     );
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -268,6 +286,32 @@ async fn main() -> Result<()> {
     number_workers.finish().await;
 
     Ok(())
+}
+
+/// Build one adapter per configured `handler_api.php` supplier.
+///
+/// An unrecognised provider name is dropped with a warning rather than failing
+/// the boot: a typo in one supplier's env var should not take the API down when
+/// the others are healthy.
+fn build_activate_providers(
+    credentials: &[config::ActivateCredentials],
+) -> Vec<number_activate::ActivateProvider> {
+    credentials
+        .iter()
+        .filter_map(|creds| {
+            let Some(flavor) = number_activate::ActivateFlavor::parse(&creds.provider) else {
+                tracing::warn!(provider = %creds.provider, "unknown number supplier, ignoring");
+                return None;
+            };
+            tracing::info!(provider = %creds.provider, "number supplier configured");
+            Some(number_activate::ActivateProvider::new(
+                flavor,
+                creds.api_key.clone(),
+                creds.currency.clone(),
+                creds.base_url.clone(),
+            ))
+        })
+        .collect()
 }
 
 async fn health() -> &'static str {

@@ -174,10 +174,13 @@ impl AnyNumberProvider {
     }
 }
 
-/// Primary supplier plus optional SMSPool. Old buy uses `primary`.
+/// Primary supplier, optional SMSPool, and any configured `handler_api.php`
+/// suppliers. Old buy uses `primary`.
 pub struct NumberProviders {
     pub primary: AnyNumberProvider,
     pub smspool: Option<crate::number_smspool::SmsPoolProvider>,
+    /// SMS-Activate, DaisySMS, SMSHub, Tiger SMS — whichever have keys.
+    pub activate: Vec<crate::number_activate::ActivateProvider>,
 }
 
 impl From<AnyNumberProvider> for NumberProviders {
@@ -185,6 +188,7 @@ impl From<AnyNumberProvider> for NumberProviders {
         Self {
             primary,
             smspool: None,
+            activate: Vec::new(),
         }
     }
 }
@@ -246,11 +250,20 @@ pub fn classify_fivesim_plain_body(body: &str) -> Option<PurchaseError> {
     )))
 }
 
+/// Names an order can carry that `primary` must never be asked about.
+///
+/// An order bought from one supplier and checked against another either errors
+/// or, worse, returns someone else's activation.
+fn is_foreign_supplier(provider: &str) -> bool {
+    crate::number_activate::ActivateFlavor::parse(provider).is_some() || provider == "smspool"
+}
+
 impl NumberProviders {
-    /// Real supplier money can move. FiveSim primary or a configured SMSPool
-    /// both count; stub-only must never pair with live funding.
+    /// Real supplier money can move. FiveSim primary, a configured SMSPool, or
+    /// any handler_api supplier counts; stub-only must never pair with live
+    /// funding.
     pub fn is_live(&self) -> bool {
-        self.primary.is_live() || self.smspool.is_some()
+        self.primary.is_live() || self.smspool.is_some() || !self.activate.is_empty()
     }
 
     pub async fn recover_activation(
@@ -264,6 +277,11 @@ impl NumberProviders {
         }
     }
 
+    /// The configured `handler_api.php` supplier under that name, if any.
+    pub fn activate(&self, provider: &str) -> Option<&crate::number_activate::ActivateProvider> {
+        self.activate.iter().find(|p| p.provider() == provider)
+    }
+
     pub async fn buy_source(
         &self,
         provider: &str,
@@ -271,6 +289,9 @@ impl NumberProviders {
         product: &str,
         operator: &str,
     ) -> Result<Activation, PurchaseError> {
+        if let Some(activate) = self.activate(provider) {
+            return activate.buy(country, product).await;
+        }
         match provider {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.buy(country, product).await,
@@ -280,6 +301,15 @@ impl NumberProviders {
             },
             "fivesim" => self.primary.buy_with(country, product, operator).await,
             "stub" => self.primary.buy(country, product).await,
+            // A supplier we know but hold no key for — usually a sell flag
+            // switched on before the catalogue sweep zeroed its stale rows.
+            // Step aside so the next source still fills the order; aborting
+            // here would fail a sale another supplier can serve.
+            other if is_foreign_supplier(other) => Err(PurchaseError::Rejected(
+                ApiError::ServiceUnavailable(COPY_SOURCE_UNAVAILABLE.into()),
+            )),
+            // A name no adapter claims. That is bad data, not dry stock, so
+            // end the order loudly rather than quietly shopping around.
             _ => Err(PurchaseError::Rejected(ApiError::ServiceUnavailable(
                 COPY_BUY_RESTORED.into(),
             ))),
@@ -287,6 +317,9 @@ impl NumberProviders {
     }
 
     pub async fn check_for(&self, provider: &str, order_id: &str) -> ApiResult<ActivationCheck> {
+        if let Some(activate) = self.activate(provider) {
+            return activate.check(order_id).await;
+        }
         match provider {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.check(order_id).await,
@@ -294,11 +327,20 @@ impl NumberProviders {
                     "That number isn't available to check right now.".into(),
                 )),
             },
+            // A supplier we no longer hold a key for. Asking `primary` about
+            // another service's order id would read a stranger's activation,
+            // so say nothing rather than answer from the wrong supplier.
+            other if is_foreign_supplier(other) => Err(ApiError::ServiceUnavailable(
+                "That number isn't available to check right now.".into(),
+            )),
             _ => self.primary.check(order_id).await,
         }
     }
 
     pub async fn cancel_for(&self, provider: &str, order_id: &str) -> ApiResult<()> {
+        if let Some(activate) = self.activate(provider) {
+            return activate.cancel(order_id).await;
+        }
         match provider {
             "smspool" => match &self.smspool {
                 Some(pool) => pool.cancel(order_id).await,
@@ -306,6 +348,9 @@ impl NumberProviders {
                     "That number isn't available to cancel right now.".into(),
                 )),
             },
+            other if is_foreign_supplier(other) => Err(ApiError::ServiceUnavailable(
+                "That number isn't available to cancel right now.".into(),
+            )),
             _ => self.primary.cancel(order_id).await,
         }
     }
@@ -836,6 +881,7 @@ mod tests {
             !NumberProviders {
                 primary: AnyNumberProvider::Stub(StubProvider),
                 smspool: None,
+                activate: Vec::new(),
             }
             .is_live()
         );
@@ -847,6 +893,7 @@ mod tests {
                     Some("USD".into()),
                     None,
                 )),
+                activate: Vec::new(),
             }
             .is_live(),
             "SMSPool alone is enough for live number sales"
@@ -991,11 +1038,67 @@ mod tests {
         let providers = NumberProviders {
             primary: AnyNumberProvider::Stub(StubProvider),
             smspool: None,
+            activate: Vec::new(),
         };
         let check = providers.check_for("smspool", "pool-1").await;
         assert!(matches!(check, Err(ApiError::ServiceUnavailable(_))));
         let cancel = providers.cancel_for("smspool", "pool-1").await;
         assert!(matches!(cancel, Err(ApiError::ServiceUnavailable(_))));
+    }
+
+    /// An order bought from a supplier whose key is now gone must not be
+    /// checked against 5SIM: that order id belongs to someone else's
+    /// activation over there, and answering from the wrong supplier is worse
+    /// than admitting we cannot say.
+    #[tokio::test]
+    async fn an_unconfigured_supplier_never_falls_back_to_primary() {
+        let providers = NumberProviders {
+            primary: AnyNumberProvider::Stub(StubProvider),
+            smspool: None,
+            activate: Vec::new(),
+        };
+        for provider in ["smsactivate", "daisysms", "smshub", "tigersms"] {
+            assert!(
+                matches!(
+                    providers.check_for(provider, "12345").await,
+                    Err(ApiError::ServiceUnavailable(_))
+                ),
+                "{provider} check must not reach primary"
+            );
+            assert!(
+                matches!(
+                    providers.cancel_for(provider, "12345").await,
+                    Err(ApiError::ServiceUnavailable(_))
+                ),
+                "{provider} cancel must not reach primary"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_supplier_refuses_the_buy_without_charging() {
+        let providers = NumberProviders {
+            primary: AnyNumberProvider::Stub(StubProvider),
+            smspool: None,
+            activate: Vec::new(),
+        };
+        match providers.buy_source("smsactivate", "19", "wa", "any").await {
+            // Refused, and refused in a way the buy loop can move past: a
+            // supplier without a key must not fail a sale 5SIM can fill.
+            Err(PurchaseError::Rejected(err)) => assert!(
+                try_next_source(&err),
+                "an unconfigured supplier must step aside, not end the order"
+            ),
+            _ => panic!("an unconfigured supplier must refuse, not hold the money"),
+        }
+        // A name no adapter claims is bad data — end the order instead.
+        match providers.buy_source("not-a-supplier", "19", "wa", "any").await {
+            Err(PurchaseError::Rejected(err)) => assert!(
+                !try_next_source(&err),
+                "an unknown provider name must not quietly shop around"
+            ),
+            _ => panic!("an unknown provider must refuse"),
+        }
     }
 
     #[test]

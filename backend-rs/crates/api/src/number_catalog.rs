@@ -112,6 +112,11 @@ pub struct OfferSync {
     pub fivesim_api_key: Option<String>,
     pub smspool: Option<SmsPoolProvider>,
     pub smspool_pricing: Pricing,
+    /// The `handler_api.php` suppliers that have a key configured.
+    pub activate: Vec<crate::number_activate::ActivateProvider>,
+    /// Pricing per supplier currency, keyed by provider name. A supplier whose
+    /// currency we cannot convert is skipped rather than priced wrongly.
+    pub activate_pricing: std::collections::BTreeMap<String, Pricing>,
 }
 
 impl Pricing {
@@ -340,7 +345,7 @@ async fn sync_offers(
 
     number_offers::apply_provider_skus(&state.db, pricing, "stub", &[], true).await?;
 
-    if sell.fivesim_enabled {
+    if sell.fivesim_enabled() {
         match fivesim_listing(
             http_from_offers(offers),
             offers.fivesim_api_key.as_deref(),
@@ -358,7 +363,7 @@ async fn sync_offers(
         hide_provider(&state.db, pricing, "fivesim").await?;
     }
 
-    if sell.smspool_enabled {
+    if sell.smspool_enabled() {
         if let Some(pool) = &offers.smspool {
             match smspool_listing(pool).await {
                 Ok(Some(skus)) => {
@@ -381,6 +386,38 @@ async fn sync_offers(
         }
     } else {
         hide_provider(&state.db, &offers.smspool_pricing, "smspool").await?;
+    }
+
+    // The handler_api suppliers. Each is independent: one failing sweep must
+    // not hide the others, and a supplier that is off or unconfigured is
+    // zeroed so the shop cannot list stock we have no way to buy.
+    for provider in crate::number_sell::KNOWN_PROVIDERS {
+        if crate::number_activate::ActivateFlavor::parse(provider).is_none() {
+            continue;
+        }
+        let pricing = offers
+            .activate_pricing
+            .get(*provider)
+            .unwrap_or(&offers.smspool_pricing);
+        let configured = offers.activate.iter().find(|p| p.provider() == *provider);
+        match (sell.is_enabled(provider), configured) {
+            (true, Some(adapter)) => match adapter.fetch_skus().await {
+                Ok(skus) => {
+                    number_offers::apply_provider_skus(
+                        &state.db, pricing, provider, &skus, true,
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        %provider,
+                        error = ?err,
+                        "supplier offer sweep failed, keeping last rows"
+                    )
+                }
+            },
+            _ => hide_provider(&state.db, pricing, provider).await?,
+        }
     }
     Ok(())
 }
@@ -1293,6 +1330,7 @@ mod tests {
             smspool_api_key: None,
             smspool_currency: Some("USD".into()),
             smspool_base_url: "https://api.smspool.net".into(),
+            activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "http://localhost".into(),
@@ -1338,6 +1376,8 @@ mod tests {
             fivesim_api_key: None,
             smspool: None,
             smspool_pricing: pricing.clone(),
+                    activate: Vec::new(),
+            activate_pricing: Default::default(),
         };
 
         // Catalogue sync succeeded but no public fivesim SKU remained → zero missing.

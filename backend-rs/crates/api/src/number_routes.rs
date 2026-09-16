@@ -436,6 +436,21 @@ async fn create_order(
         .map(|value| Decimal::from_str(value.trim()))
         .transpose()
         .map_err(|_| ApiError::BadRequest("That expected price isn't a number.".into()))?;
+    // Real money in, invented numbers out — refuse before touching the ledger.
+    // These depend only on how the process is configured, so they belong ahead
+    // of the transaction: the answer cannot change inside it, and refusing here
+    // means the "not on sale" case never opens one at all.
+    if state.funding.is_live() && !state.numbers.primary.is_live() && body.offer_id.is_none() {
+        return Err(ApiError::ServiceUnavailable(
+            "Numbers aren't on sale yet. Nothing has been charged.".into(),
+        ));
+    }
+    if !state.numbers.is_live() && state.funding.is_live() {
+        return Err(ApiError::ServiceUnavailable(
+            "Numbers aren't on sale yet. Nothing has been charged.".into(),
+        ));
+    }
+
     // --- Reserve, under a row lock -------------------------------------------
     let mut tx = state.db.begin().await.map_err(anyhow::Error::from)?;
 
@@ -471,6 +486,11 @@ async fn create_order(
                 && (!complete || stored_expected == expected_price_ngn)
         };
         if !same {
+            // Every refusal below hands the connection back explicitly.
+            // Dropping an open `tx` only *queues* the ROLLBACK in sqlx: the
+            // connection returns to the pool still "idle in transaction",
+            // holding its locks until something else happens to acquire it.
+            tx.rollback().await.ok();
             return Err(ApiError::Conflict(
                 "That Idempotency-Key belongs to a different number purchase.".into(),
             ));
@@ -493,38 +513,39 @@ async fn create_order(
             .fetch_optional(&mut *tx)
             .await?;
             let Some((product_id, country_id, price_ngn, quantity, active)) = row else {
+                tx.rollback().await.ok();
                 return Err(ApiError::NotFound);
             };
             if !active || quantity <= 0 {
+                tx.rollback().await.ok();
                 return Err(ApiError::Conflict(
                     "That option is no longer available. Refresh and pick again.".into(),
                 ));
             }
             if price_ngn > expected {
+                tx.rollback().await.ok();
                 return Err(ApiError::PriceMoved {
                     price_ngn: price_ngn.normalize().to_string(),
                 });
             }
-            offer_sources = sqlx::query_as(
-                "SELECT provider, provider_country, provider_product, provider_operator
-                   FROM number_offer_sources
-                  WHERE offer_id = $1 AND stock > 0
-                    AND provider_success_rate > 0
-                    AND provider = ANY($2::text[])
-                  ORDER BY provider_cost ASC, stock DESC",
-            )
-            .bind(offer_id)
-            .bind(
-                crate::number_sell::load(&state.db)
-                    .await?
-                    .source_providers(!state.funding.is_live())
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect::<Vec<_>>(),
-            )
-            .fetch_all(&mut *tx)
-            .await?;
+            // Best-delivering source first, cost only as a tiebreak. Ordering
+            // by cost alone is what sent every buy through dead cheap stock.
+            offer_sources = sqlx::query_as(&crate::number_aggregator::ranked_sources_sql())
+                .bind(offer_id)
+                .bind(
+                    crate::number_sell::load(&state.db)
+                        .await?
+                        .source_providers(!state.funding.is_live())
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>(),
+                )
+                .bind(Decimal::from(crate::number_aggregator::PRIOR_WEIGHT))
+                .bind(crate::number_aggregator::WINDOW_DAYS as i32)
+                .fetch_all(&mut *tx)
+                .await?;
             if offer_sources.is_empty() {
+                tx.rollback().await.ok();
                 return Err(ApiError::Conflict(
                     "That option is no longer available. Refresh and pick again.".into(),
                 ));
@@ -569,6 +590,7 @@ async fn create_order(
             })?;
             if let Some(expected) = expected_price_ngn {
                 if price_ngn > expected {
+                    tx.rollback().await.ok();
                     return Err(ApiError::PriceMoved {
                         price_ngn: price_ngn.normalize().to_string(),
                     });
@@ -583,6 +605,7 @@ async fn create_order(
                 .await?
                 .allows_live_fivesim_catalog(state.numbers.primary.is_live())
             {
+                tx.rollback().await.ok();
                 return Err(ApiError::Conflict(
                     "That option is no longer available. Refresh and pick again.".into(),
                 ));
@@ -600,19 +623,10 @@ async fn create_order(
 
     // Catalogue buy always hits `primary`. Live Paystack plus a stub primary
     // (even if SMSPool is configured) must not sell a fake number.
-    if state.funding.is_live() && !state.numbers.primary.is_live() && offer_id.is_none() {
-        return Err(ApiError::ServiceUnavailable(
-            "Numbers aren't on sale yet. Nothing has been charged.".into(),
-        ));
-    }
-    if !state.numbers.is_live() && state.funding.is_live() {
-        return Err(ApiError::ServiceUnavailable(
-            "Numbers aren't on sale yet. Nothing has been charged.".into(),
-        ));
-    }
     if state.funding.is_live() {
         offer_sources.retain(|(provider, ..)| provider.as_str() != "stub");
         if offer_id.is_some() && offer_sources.is_empty() {
+            tx.rollback().await.ok();
             return Err(ApiError::ServiceUnavailable(
                 "Numbers aren't on sale yet. Nothing has been charged.".into(),
             ));
@@ -628,6 +642,7 @@ async fn create_order(
     .map_err(anyhow::Error::from)?;
 
     if price_ngn > AccountKind::UserNgn.user_facing_balance(raw_balance) {
+        tx.rollback().await.ok();
         return Err(ApiError::InsufficientBalance);
     }
 
@@ -725,11 +740,22 @@ async fn create_order(
                 .await
             {
                 Ok(activation) => {
-                    sqlx::query("UPDATE number_orders SET provider = $2 WHERE id = $1")
-                        .bind(order_id)
-                        .bind(provider)
-                        .execute(&state.db)
-                        .await?;
+                    // Pin the exact SKU, not just the supplier. Reliability is
+                    // an operator-level fact: "fivesim" says nothing about
+                    // which of its operators actually delivers an SMS.
+                    sqlx::query(
+                        "UPDATE number_orders
+                            SET provider = $2, source_country = $3,
+                                source_product = $4, source_operator = $5
+                          WHERE id = $1",
+                    )
+                    .bind(order_id)
+                    .bind(provider)
+                    .bind(country)
+                    .bind(product)
+                    .bind(operator)
+                    .execute(&state.db)
+                    .await?;
                     won = Some((provider.clone(), activation));
                     break;
                 }
@@ -1195,6 +1221,7 @@ mod tests {
             smspool_api_key: None,
             smspool_currency: Some("USD".into()),
             smspool_base_url: "https://api.smspool.net".into(),
+            activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
             admin_token: None,
             web_app_url: "http://localhost".into(),
@@ -2137,6 +2164,7 @@ mod tests {
                 Some("USD".into()),
                 None,
             )),
+            activate: Vec::new(),
         });
 
         let err = match create_order(

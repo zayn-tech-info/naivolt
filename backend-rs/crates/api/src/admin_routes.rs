@@ -182,8 +182,8 @@ async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
         catalogue_synced_at: catalogue_synced_at.map(|at| at.to_rfc3339()),
         operator_refunds_last24h,
         last_provider_error_category,
-        fivesim_enabled: sell.fivesim_enabled,
-        smspool_enabled: sell.smspool_enabled,
+        fivesim_enabled: sell.fivesim_enabled(),
+        smspool_enabled: sell.smspool_enabled(),
     }))
 }
 
@@ -262,6 +262,12 @@ async fn activity(
 struct SellSettingsBody {
     fivesim_enabled: bool,
     smspool_enabled: bool,
+    /// Any other supplier, by the name used in `number_offer_sources`.
+    /// Omitted suppliers keep whatever they are set to, so an older dashboard
+    /// that only knows the two original flags cannot silently switch off a
+    /// supplier it has never heard of.
+    #[serde(default)]
+    providers: std::collections::BTreeMap<String, bool>,
 }
 
 #[derive(Serialize, Debug)]
@@ -269,6 +275,7 @@ struct SellSettingsBody {
 struct SellSettingsResponse {
     fivesim_enabled: bool,
     smspool_enabled: bool,
+    providers: std::collections::BTreeMap<String, bool>,
 }
 
 async fn put_sell_settings(
@@ -277,37 +284,48 @@ async fn put_sell_settings(
     Json(body): Json<SellSettingsBody>,
 ) -> ApiResult<Json<SellSettingsResponse>> {
     let operator_id = require_operator(&state, &headers).await?;
-    if !body.fivesim_enabled && !body.smspool_enabled {
+    let before = crate::number_sell::load(&state.db).await?;
+
+    // Start from what is stored, apply the two legacy flags, then any named
+    // supplier. Unknown names are dropped rather than stored: the buy path
+    // cannot reach a supplier it has no adapter for, and a row that looks
+    // enabled but never sells is worse than no row.
+    let mut wanted = before.all().clone();
+    wanted.insert("fivesim".into(), body.fivesim_enabled);
+    wanted.insert("smspool".into(), body.smspool_enabled);
+    for (provider, enabled) in &body.providers {
+        if crate::number_sell::KNOWN_PROVIDERS.contains(&provider.as_str()) {
+            wanted.insert(provider.clone(), *enabled);
+        } else {
+            tracing::warn!(%provider, "ignoring unknown supplier in sell settings");
+        }
+    }
+    let wanted = crate::number_sell::SellSettings::from_pairs(wanted);
+    if !wanted.any_enabled() {
         return Err(ApiError::LastProvider);
     }
-    let before = crate::number_sell::load(&state.db).await?;
-    sqlx::query(
-        "UPDATE number_sell_settings
-            SET fivesim_enabled = $1, smspool_enabled = $2, updated_at = now()
-          WHERE id = 1",
-    )
-    .bind(body.fivesim_enabled)
-    .bind(body.smspool_enabled)
-    .execute(&state.db)
-    .await?;
+    crate::number_sell::store(&state.db, &wanted).await?;
     insert_audit(
         &state.db,
         operator_id,
         "sell_settings",
         crate::number_sell::AUDIT_TARGET,
         json!({
-            "fivesimEnabled": before.fivesim_enabled,
-            "smspoolEnabled": before.smspool_enabled
+            "fivesimEnabled": before.fivesim_enabled(),
+            "smspoolEnabled": before.smspool_enabled(),
+            "providers": before.all()
         }),
         json!({
-            "fivesimEnabled": body.fivesim_enabled,
-            "smspoolEnabled": body.smspool_enabled
+            "fivesimEnabled": wanted.fivesim_enabled(),
+            "smspoolEnabled": wanted.smspool_enabled(),
+            "providers": wanted.all()
         }),
     )
     .await?;
     Ok(Json(SellSettingsResponse {
-        fivesim_enabled: body.fivesim_enabled,
-        smspool_enabled: body.smspool_enabled,
+        fivesim_enabled: wanted.fivesim_enabled(),
+        smspool_enabled: wanted.smspool_enabled(),
+        providers: wanted.all().clone(),
     }))
 }
 
