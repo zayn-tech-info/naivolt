@@ -336,22 +336,41 @@ async fn products(
         .collect();
 
     let rows: Vec<(String, String, Option<Decimal>, i64)> = sqlx::query_as(
-        "SELECT p.slug, p.name, min(o.price_ngn), count(DISTINCT o.country_id)
+        // "from NGN x" has to be a price someone can actually pay, so this
+        // applies the same two floors the shop does. Without that the grid
+        // advertises a cheap country that the offers list no longer sells.
+        "WITH sellable AS (
+            SELECT o.id, o.product_id, o.country_id, o.price_ngn
+              FROM number_offers o
+              JOIN number_products p ON p.id = o.product_id AND p.active
+              JOIN number_offer_sources s ON s.offer_id = o.id
+              JOIN number_countries c ON c.id = o.country_id AND c.active
+             WHERE o.active AND s.stock > 0 AND o.success_rate > 0
+               AND s.provider_success_rate > 0
+               AND s.provider = ANY($3::text[])
+               AND (p.min_provider_cost_usd = 0
+                    OR (s.provider_cost_currency = 'USD'
+                        AND s.provider_cost >= p.min_provider_cost_usd))
+             GROUP BY o.id, o.product_id, o.country_id, o.price_ngn
+         ), tiered AS (
+            SELECT sellable.*,
+                   max(price_ngn) OVER (PARTITION BY product_id, country_id) AS top_price
+              FROM sellable
+         )
+         SELECT p.slug, p.name, min(t.price_ngn), count(DISTINCT t.country_id)
            FROM number_products p
-           JOIN number_offers o ON o.product_id = p.id AND o.active
-           JOIN number_offer_sources s ON s.offer_id = o.id AND s.stock > 0
-            AND s.provider_success_rate > 0
-            AND s.provider = ANY($3::text[])
-           JOIN number_countries c ON c.id = o.country_id AND c.active
+           JOIN tiered t ON t.product_id = p.id
+            AND t.price_ngn >= t.top_price * $4::numeric
           WHERE p.active
             AND ($1::text IS NULL OR lower(p.name) LIKE $1 OR p.slug LIKE $1)
           GROUP BY p.id, p.slug, p.name, p.sort_order
-          ORDER BY p.sort_order, count(DISTINCT o.country_id) DESC, p.name
+          ORDER BY p.sort_order, count(DISTINCT t.country_id) DESC, p.name
           LIMIT $2",
     )
     .bind(search.as_deref())
     .bind(limit)
     .bind(&providers)
+    .bind(state.numbers_min_price_fraction)
     .fetch_all(&state.db)
     .await?;
 
@@ -1787,6 +1806,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "awaiting_code");
+        database.cleanup().await;
+    }
+
+    /// "from NGN x" on the product grid must be a price the shop will actually
+    /// sell. They read the same offers table, so a floor applied to one and not
+    /// the other advertises a number nobody can buy.
+    #[tokio::test]
+    async fn the_advertised_from_price_is_one_the_shop_still_sells() {
+        let database = IsolatedDatabase::new("from_price_matches").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        // stub_skus is whatsapp/NG at NGN 400 and NGN 160; the floor hides 160.
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "stub",
+            &crate::number_offers::stub_skus(),
+            true,
+        )
+        .await
+        .unwrap();
+        let state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+
+        let summaries = products(
+            State(state.clone()),
+            Query(ProductQuery {
+                q: Some("whatsapp".into()),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let whatsapp = summaries
+            .iter()
+            .find(|p| p.slug == "whatsapp")
+            .expect("whatsapp is on the grid");
+
+        let listed = list_offers(
+            State(state),
+            Query(OfferQuery {
+                product: "whatsapp".into(),
+                country: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let cheapest_sellable = listed
+            .iter()
+            .map(|o| Decimal::from_str(&o.price_ngn).unwrap())
+            .min()
+            .expect("something is on sale");
+
+        assert_eq!(
+            whatsapp.from_price_ngn.as_deref(),
+            Some(cheapest_sellable.normalize().to_string().as_str()),
+            "the grid must quote a price the shop still sells"
+        );
+        assert_eq!(cheapest_sellable, dec!(400), "the hidden 160 tier must not be quoted");
         database.cleanup().await;
     }
 
