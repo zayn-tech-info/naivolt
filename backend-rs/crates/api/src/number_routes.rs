@@ -201,25 +201,44 @@ async fn list_offers(
         Decimal,
         DateTime<Utc>,
     )> = sqlx::query_as(
-        "SELECT o.id, p.slug, p.name, c.code, c.name, c.dial_code,
-                o.price_ngn, SUM(s.stock)::int, o.success_rate, o.success_fetched_at
-           FROM number_offers o
-           JOIN number_products p ON p.id = o.product_id
-           JOIN number_countries c ON c.id = o.country_id
-           JOIN number_offer_sources s ON s.offer_id = o.id
-          WHERE p.slug = $1 AND o.active AND s.stock > 0
-            AND o.success_rate > 0 AND s.provider_success_rate > 0
-            AND s.provider = ANY($3::text[])
-            AND ($2::text IS NULL OR c.code = $2)
-          GROUP BY o.id, p.slug, p.name, c.code, c.name, c.dial_code,
-                   o.price_ngn, o.success_rate, o.success_fetched_at
-         HAVING SUM(s.stock) > 0
-          ORDER BY o.success_rate DESC, o.price_ngn ASC, SUM(s.stock) DESC
+        // The cheap operators for an app and country are the ones that hand
+        // over a number and never deliver a code, so only the dearest tier is
+        // listed — `$4` of the top price, per app and country. Comparing
+        // against the dearest option rather than a fixed naira figure keeps it
+        // meaningful across countries, and means a country can never empty:
+        // the dearest option always clears its own floor.
+        "WITH listed AS (
+            SELECT o.id, p.slug, p.name AS product_name, c.code, c.name AS country_name,
+                   c.dial_code, o.price_ngn, SUM(s.stock)::int AS stock,
+                   o.success_rate, o.success_fetched_at, o.product_id, o.country_id
+              FROM number_offers o
+              JOIN number_products p ON p.id = o.product_id
+              JOIN number_countries c ON c.id = o.country_id
+              JOIN number_offer_sources s ON s.offer_id = o.id
+             WHERE p.slug = $1 AND o.active AND s.stock > 0
+               AND o.success_rate > 0 AND s.provider_success_rate > 0
+               AND s.provider = ANY($3::text[])
+               AND ($2::text IS NULL OR c.code = $2)
+             GROUP BY o.id, p.slug, p.name, c.code, c.name, c.dial_code,
+                      o.price_ngn, o.success_rate, o.success_fetched_at,
+                      o.product_id, o.country_id
+            HAVING SUM(s.stock) > 0
+         ), tiered AS (
+            SELECT listed.*,
+                   max(price_ngn) OVER (PARTITION BY product_id, country_id) AS top_price
+              FROM listed
+         )
+         SELECT id, slug, product_name, code, country_name, dial_code,
+                price_ngn, stock, success_rate, success_fetched_at
+           FROM tiered
+          WHERE price_ngn >= top_price * $4::numeric
+          ORDER BY success_rate DESC, price_ngn ASC, stock DESC
           LIMIT 200",
     )
     .bind(&product)
     .bind(country.as_deref())
     .bind(&providers)
+    .bind(state.numbers_min_price_fraction)
     .fetch_all(&state.db)
     .await?;
 
@@ -527,6 +546,29 @@ async fn create_order(
                 return Err(ApiError::PriceMoved {
                     price_ngn: price_ngn.normalize().to_string(),
                 });
+            }
+            // The same price floor the listing applies. Enforced again here so
+            // a stale page cannot buy a cheap tier that is no longer shown —
+            // hiding a number that does not deliver is worth nothing if the
+            // order still goes through.
+            let top_price: Option<Decimal> = sqlx::query_scalar(
+                "SELECT max(o.price_ngn)
+                   FROM number_offers o
+                   JOIN number_offer_sources s ON s.offer_id = o.id
+                  WHERE o.product_id = $1 AND o.country_id = $2
+                    AND o.active AND s.stock > 0",
+            )
+            .bind(product_id)
+            .bind(country_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if let Some(top_price) = top_price {
+                if price_ngn < top_price * state.numbers_min_price_fraction {
+                    tx.rollback().await.ok();
+                    return Err(ApiError::Conflict(
+                        "That option is no longer available. Refresh and pick again.".into(),
+                    ));
+                }
             }
             // Best-delivering source first, cost only as a tiebreak. Ordering
             // by cost alone is what sent every buy through dead cheap stock.
@@ -1226,6 +1268,7 @@ mod tests {
             admin_token: None,
             web_app_url: "http://localhost".into(),
             numbers_margin: dec!(1.25),
+            numbers_min_price_fraction: Decimal::new(6, 1),
             usd_ngn_mid: dec!(1600),
             spread_ngn_per_usd: dec!(20),
             cors_allowed_origins: vec!["http://localhost:5173".into()],
@@ -1285,6 +1328,7 @@ mod tests {
         let config = test_config();
         let state = AppState {
             db: pool.clone(),
+            numbers_min_price_fraction: rust_decimal::Decimal::new(6, 1),
             keys: Arc::new(SessionKeys::from_secret(config.jwt_secret.as_bytes()).unwrap()),
             notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
             addresses: Arc::new(AnyAddressProvider::Local(
@@ -1501,6 +1545,7 @@ mod tests {
         let config = test_config();
         AppState {
             db: pool,
+            numbers_min_price_fraction: rust_decimal::Decimal::new(6, 1),
             keys: Arc::new(SessionKeys::from_secret(config.jwt_secret.as_bytes()).unwrap()),
             notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
             addresses: Arc::new(AnyAddressProvider::Local(
@@ -1732,6 +1777,98 @@ mod tests {
         database.cleanup().await;
     }
 
+    /// Cheap operators for an app and country are the ones that hand over a
+    /// number and never deliver a code, so the cheap tier is neither listed
+    /// nor buyable — hiding it is worth nothing if a stale page can still
+    /// order it.
+    #[tokio::test]
+    async fn the_cheap_tier_is_hidden_and_cannot_be_bought() {
+        let database = IsolatedDatabase::new("offer_price_floor").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        // stub_skus is whatsapp/NG twice: $0.20 -> NGN 400 and $0.08 -> NGN 160.
+        crate::number_offers::apply_provider_skus(
+            &pool,
+            &pricing,
+            "stub",
+            &crate::number_offers::stub_skus(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let listed = list_offers(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            Query(OfferQuery {
+                product: "whatsapp".into(),
+                country: Some("NG".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed.len(), 1, "only the dearest tier is listed");
+        assert_eq!(listed[0].price_ngn, "400");
+
+        // The hidden cheap offer must refuse the buy, not merely be unlisted.
+        let cheap_id: Uuid = sqlx::query_scalar(
+            "SELECT o.id FROM number_offers o
+               JOIN number_products p ON p.id = o.product_id
+              WHERE p.slug = 'whatsapp' AND o.price_ngn = 160",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (email) VALUES ('floor@example.test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("Idempotency-Key", Uuid::new_v4().to_string().parse().unwrap());
+        let err = match create_order(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            CurrentUser {
+                id: user_id,
+                tier_at_issue: 0,
+                session_family: Uuid::new_v4(),
+            },
+            headers,
+            Json(CreateOrderBody {
+                offer_id: Some(cheap_id),
+                product_slug: String::new(),
+                country_code: String::new(),
+                expected_price_ngn: Some("160".into()),
+            }),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a hidden cheap tier must not be buyable"),
+        };
+        assert!(matches!(err, ApiError::Conflict(_)), "{err:?}");
+        let orders: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM number_orders WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(orders, 0, "a hidden tier must not create an order");
+        database.cleanup().await;
+    }
+
     #[tokio::test]
     async fn offers_list_ranks_and_warns_and_buy_pins_id() {
         let database = IsolatedDatabase::new("number_offers_api").await;
@@ -1750,11 +1887,17 @@ mod tests {
         )
         .await
         .unwrap();
+        // This case is about the low-success warning, which only exists for an
+        // offer weak enough to warrant one — so it opts out of the price floor
+        // that would otherwise hide that offer. The floor itself is covered by
+        // the_cheap_tier_is_hidden_and_cannot_be_bought.
+        let mut listing_state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        listing_state.numbers_min_price_fraction = Decimal::ZERO;
         let listed = list_offers(
-            State(test_state(
-                pool.clone(),
-                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
-            )),
+            State(listing_state),
             Query(OfferQuery {
                 product: "whatsapp".into(),
                 country: Some("NG".into()),

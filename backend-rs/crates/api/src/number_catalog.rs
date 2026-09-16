@@ -1335,6 +1335,7 @@ mod tests {
             admin_token: None,
             web_app_url: "http://localhost".into(),
             numbers_margin: dec!(1.6),
+            numbers_min_price_fraction: Decimal::new(6, 1),
             usd_ngn_mid: dec!(1530),
             spread_ngn_per_usd: dec!(20),
             cors_allowed_origins: vec!["http://localhost:5173".into()],
@@ -1345,6 +1346,7 @@ mod tests {
         };
         let state = AppState {
             db: pool.clone(),
+            numbers_min_price_fraction: rust_decimal::Decimal::new(6, 1),
             keys: Arc::new(SessionKeys::from_secret(config.jwt_secret.as_bytes()).unwrap()),
             notifier: Arc::new(AnyNotifier::Log(LogNotifier)),
             addresses: Arc::new(AnyAddressProvider::Local(

@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
         operations_alert_email: config.operations_alert_email.clone(),
         operator_totp_key: config.operator_totp_key.clone(),
         admin_refund_cap_ngn: config.admin_refund_cap_ngn,
+        numbers_min_price_fraction: config.numbers_min_price_fraction,
         totp_lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         google_allowed_emails: Arc::new(config.google_allowed_emails.clone()),
         funding: Arc::new(match &config.paystack_secret_key {

@@ -88,6 +88,22 @@ pub struct Config {
     /// stale silently: 5SIM moved US WhatsApp to $0.90 while our table still
     /// said ₦1,010, which is a loss on every sale.
     pub numbers_margin: Decimal,
+    /// Hide a number unless it costs at least this fraction of the dearest
+    /// option for the same app and country.
+    ///
+    /// On 5SIM the cheap operators for a given service are the ones that hand
+    /// over a number and then never deliver a code, or reclaim it before the
+    /// code arrives. This is a price floor rather than a delivery floor on
+    /// purpose: a delivery floor can only learn an operator is bad *after*
+    /// customers have been burned by it, and these operators churn faster than
+    /// that evidence accumulates.
+    ///
+    /// Relative to the dearest option, not an absolute naira figure, because
+    /// "expensive" only means anything within one app and country — a US number
+    /// costs multiples of a Nigerian one. 1.0 lists only the dearest tier; 0
+    /// lists everything. It can never empty a country: the dearest option is
+    /// always at least equal to itself.
+    pub numbers_min_price_fraction: Decimal,
     /// Naira per US dollar before margin. Tracks the parallel market, not the
     /// official rate — see `pricing.rs` for why that distinction matters.
     pub usd_ngn_mid: Decimal,
@@ -288,6 +304,10 @@ impl Config {
                 .trim_end_matches('/')
                 .to_owned(),
             numbers_margin: decimal_env("NUMBERS_MARGIN", Decimal::new(16, 1))?,
+            numbers_min_price_fraction: decimal_env(
+                "NUMBERS_MIN_PRICE_FRACTION",
+                Decimal::new(6, 1),
+            )?,
             usd_ngn_mid: decimal_env("USD_NGN_MID", Decimal::from(1530))?,
             spread_ngn_per_usd: decimal_env("SPREAD_NGN_PER_USD", Decimal::from(10))?,
             cors_allowed_origins: Vec::new(),
@@ -316,6 +336,18 @@ impl Config {
             bail!(
                 "NUMBERS_MARGIN is {}; at or below 1 every number sells at a loss",
                 config.numbers_margin
+            );
+        }
+
+        // Outside 0..=1 this stops being a fraction. Above 1 nothing clears the
+        // floor and every country empties; below 0 it is meaningless.
+        if config.numbers_min_price_fraction < Decimal::ZERO
+            || config.numbers_min_price_fraction > Decimal::ONE
+        {
+            bail!(
+                "NUMBERS_MIN_PRICE_FRACTION is {}; it is a fraction of the dearest \
+                 option and must be between 0 and 1",
+                config.numbers_min_price_fraction
             );
         }
 
@@ -591,6 +623,7 @@ mod tests {
             admin_token: None,
             web_app_url: "https://naivolt.com".into(),
             numbers_margin: Decimal::new(16, 1),
+            numbers_min_price_fraction: Decimal::new(6, 1),
             usd_ngn_mid: Decimal::from(1530),
             spread_ngn_per_usd: Decimal::from(10),
             cors_allowed_origins: vec![PRODUCTION_WEB_ORIGIN.to_owned()],

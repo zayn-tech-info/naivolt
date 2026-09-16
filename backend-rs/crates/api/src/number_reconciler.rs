@@ -414,6 +414,7 @@ mod tests {
             admin_token: None,
             web_app_url: "http://localhost".into(),
             numbers_margin: dec!(1.25),
+            numbers_min_price_fraction: rust_decimal::Decimal::new(6, 1),
             usd_ngn_mid: dec!(1600),
             spread_ngn_per_usd: dec!(20),
             cors_allowed_origins: vec!["http://localhost:5173".into()],
@@ -451,6 +452,7 @@ mod tests {
             operations_alert_email: None,
             operator_totp_key: None,
             admin_refund_cap_ngn: rust_decimal::Decimal::from(100_000),
+            numbers_min_price_fraction: rust_decimal::Decimal::new(6, 1),
             totp_lockouts: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             web_app_url: "http://localhost".into(),
         }

@@ -54,6 +54,7 @@ mod tests {
             rate_limits: crate::config::RateLimitQuotas::defaults(),
             operator_totp_key: Some(TOTP_KEY.to_vec()),
             admin_refund_cap_ngn: Decimal::from(100_000),
+            numbers_min_price_fraction: Decimal::new(6, 1),
         }
     }
 
@@ -81,6 +82,7 @@ mod tests {
             operations_alert_email: Some("ops@example.test".into()),
             operator_totp_key: Some(TOTP_KEY.to_vec()),
             admin_refund_cap_ngn: Decimal::from(100_000),
+            numbers_min_price_fraction: Decimal::new(6, 1),
             totp_lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             web_app_url: "http://localhost".into(),
         }
