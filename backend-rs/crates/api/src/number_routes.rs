@@ -264,6 +264,12 @@ async fn list_offers(
             success_fetched_at,
         ) = row;
         let low_success = success_rate < Decimal::from(40);
+        // The badge means "we think this one works", so it cannot sit on a row
+        // the same response is warning about. It was assigned by position
+        // alone, which put the pick on a 4.76% Facebook number for as long as
+        // that was the only row the price floor left standing. Better to badge
+        // nothing than to recommend stock we are warning about.
+        let recommended = i == 0 && !low_success;
         out.push(OfferResponse {
             id,
             product_slug,
@@ -276,7 +282,7 @@ async fn list_offers(
             quantity,
             success_rate: success_rate.normalize().to_string(),
             success_fetched_at: success_fetched_at.to_rfc3339(),
-            recommended: i == 0,
+            recommended,
             low_success,
             low_success_warning: low_success.then(|| LOW_SUCCESS_WARNING.to_owned()),
         });
@@ -1781,6 +1787,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "awaiting_code");
+        database.cleanup().await;
+    }
+
+    /// The pick badge and the low-success warning contradict each other, so
+    /// the badge yields. Position alone used to decide it, which put the pick
+    /// on a 4.76% Facebook number whenever that was all the floor left.
+    #[tokio::test]
+    async fn nothing_is_picked_when_the_best_row_is_one_we_warn_about() {
+        let database = IsolatedDatabase::new("pick_not_on_warned").await;
+        let pool = database.pool.clone();
+        let pricing = crate::number_catalog::Pricing {
+            usd_ngn: dec!(1600),
+            margin: dec!(1.25),
+            supplier_currency: Some("USD".into()),
+        };
+        // Every option below the 40% warning line, as Facebook was in production.
+        let skus = vec![crate::number_offers::OfferSku {
+            provider: "stub",
+            product_slug: "telegram".into(),
+            country_code: "NG".into(),
+            provider_product: "telegram-poor".into(),
+            provider_country: "nigeria".into(),
+            provider_operator: None,
+            cost: dec!(2.00),
+            currency: "USD".into(),
+            success_rate: dec!(4.76),
+            stock: 9,
+        }];
+        crate::number_offers::apply_provider_skus(&pool, &pricing, "stub", &skus, true)
+            .await
+            .unwrap();
+        let listed = list_offers(
+            State(test_state(
+                pool.clone(),
+                AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+            )),
+            Query(OfferQuery {
+                product: "telegram".into(),
+                country: Some("NG".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].low_success, "this row should carry the warning");
+        assert!(
+            !listed[0].recommended,
+            "a row we warn about must never be the pick"
+        );
         database.cleanup().await;
     }
 
