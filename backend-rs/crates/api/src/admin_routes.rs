@@ -1,10 +1,11 @@
 //! Operator overview, search, TOTP sessions, supplier recheck, and held refunds.
 //!
-//! Reads and enroll still use the shared `ADMIN_TOKEN`. Recheck and refund need
-//! a named operator session. Money still goes through the existing order
-//! transition. This is not the four role panel in ARCHITECTURE.md §10.4 (no IP
-//! allowlist, no extra roles). Unset `ADMIN_TOKEN` and the read routes answer
-//! 404.
+//! Every route needs a signed-in user whose *verified* email is on
+//! `ADMIN_EMAILS` (default: the owner). Recheck, refund and selling switches
+//! also need that same person's authenticator session. Money still goes through
+//! the existing order transition. This is not the four role panel in
+//! ARCHITECTURE.md §10.4 (no IP allowlist, no extra roles). Anyone else gets a
+//! 404, so the routes do not advertise themselves.
 
 use crate::error::{ApiError, ApiResult};
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
@@ -31,38 +32,42 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/orders/:id", get(order_detail))
         .route("/admin/orders/:id/recheck", post(recheck_order))
         .route("/admin/orders/:id/refund", post(refund_order))
+        .route("/admin/me", get(admin_me))
         .route("/admin/operators", post(enroll_operator))
         .route("/admin/operator/session", post(create_session).delete(delete_session))
 }
 
-/// Constant-time-ish check on the shared token.
+/// The signed-in admin's verified email, or an error.
 ///
-/// `ADMIN_TOKEN` unset means the routes are off, and off answers 404 rather than
-/// 401: a 401 tells a scanner the endpoint is real and worth guessing at.
-fn authorise(state: &AppState, headers: &HeaderMap) -> ApiResult<()> {
-    let Some(expected) = state.admin_token.as_deref() else {
+/// Checked against `identities`, never `users.email`: a user can type any
+/// address into their profile, but an identity row's email was proven by
+/// Google or by an emailed code. No bearer, or an expired one, is a 401 so the
+/// browser refreshes and retries; a valid user who is not an admin gets the same
+/// 404 as a route that does not exist.
+async fn authorise(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+    if state.admin_emails.is_empty() {
         return Err(ApiError::NotFound);
-    };
-
-    let presented = headers
-        .get("x-admin-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-
-    // Length first, then a byte-wise fold that does not stop early. Not a
-    // hardened comparison, but it does not leak the token's prefix either.
-    let matches = presented.len() == expected.len()
-        && presented
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0;
-
-    if matches {
-        Ok(())
-    } else {
-        Err(ApiError::NotFound)
     }
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")))
+        .ok_or(ApiError::Unauthorized)?;
+    let claims = state
+        .keys
+        .verify_access(token.trim())
+        .map_err(|_| ApiError::Unauthorized)?;
+    let emails: Vec<String> = sqlx::query_scalar(
+        "SELECT lower(email) FROM identities
+          WHERE user_id = $1 AND email IS NOT NULL AND verified_at IS NOT NULL",
+    )
+    .bind(claims.sub)
+    .fetch_all(&state.db)
+    .await?;
+    emails
+        .into_iter()
+        .find(|email| state.admin_emails.contains(email))
+        .ok_or(ApiError::NotFound)
 }
 
 #[derive(Serialize)]
@@ -99,7 +104,7 @@ pub struct Overview {
 }
 
 async fn overview(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Overview>> {
-    authorise(&state, &headers)?;
+    authorise(&state, &headers).await?;
 
     let row: (i64, i64, i64, i64, i64, i64, i64, i64, Decimal, Decimal, Decimal, Decimal, Decimal, i64, i64) =
         sqlx::query_as(
@@ -210,7 +215,7 @@ async fn activity(
     headers: HeaderMap,
     Query(query): Query<ActivityQuery>,
 ) -> ApiResult<Json<Vec<ActivityRow>>> {
-    authorise(&state, &headers)?;
+    authorise(&state, &headers).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
 
     // Orders and top-ups interleaved by time. Two tables, one feed: an operator

@@ -35,9 +35,12 @@ pub struct OrderDetail {
     pub settled_journal_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct EnrollBody {
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminMe {
     pub email: String,
+    /// Whether this admin has an authenticator set up yet.
+    pub operator_enrolled: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -50,7 +53,6 @@ pub struct EnrollResponse {
 
 #[derive(Deserialize)]
 pub struct SessionBody {
-    pub email: String,
     pub totp: String,
 }
 
@@ -119,9 +121,11 @@ async fn require_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<Uu
         "SELECT o.id, o.disabled_at
            FROM operator_sessions s
            JOIN operators o ON o.id = s.operator_id
-          WHERE s.token_hash = $1 AND s.expires_at > now()",
+          WHERE s.token_hash = $1 AND s.expires_at > now()
+            AND lower(o.email) = ANY($2)",
     )
     .bind(hash)
+    .bind(state.admin_emails.as_slice())
     .fetch_optional(&state.db)
     .await?;
     let Some((id, disabled_at)) = row else {
@@ -272,7 +276,7 @@ pub(crate) async fn list_orders(
     headers: HeaderMap,
     Query(query): Query<OrderSearch>,
 ) -> ApiResult<Json<Vec<OrderSummary>>> {
-    authorise(&state, &headers)?;
+    authorise(&state, &headers).await?;
     let email = query
         .email
         .as_deref()
@@ -320,20 +324,34 @@ pub(crate) async fn order_detail(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<OrderDetail>> {
-    authorise(&state, &headers)?;
+    authorise(&state, &headers).await?;
     Ok(Json(load_detail(&state.db, id).await?))
 }
 
+/// Who is signed in, and whether they still need to set up an authenticator.
+pub(crate) async fn admin_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<AdminMe>> {
+    let email = authorise(&state, &headers).await?;
+    let operator_enrolled: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM operators WHERE lower(email) = $1)")
+            .bind(&email)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(Json(AdminMe {
+        email,
+        operator_enrolled,
+    }))
+}
+
+/// Enrols the signed-in admin, and only them. Once enrolled, a second call is a
+/// 409: re-enrolling would let a stolen web session replace the authenticator.
 pub(crate) async fn enroll_operator(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<EnrollBody>,
 ) -> ApiResult<Json<EnrollResponse>> {
-    authorise(&state, &headers)?;
-    let email = body.email.trim().to_lowercase();
-    if !email.contains('@') {
-        return Err(ApiError::BadRequest("that email isn't valid".into()));
-    }
+    let email = authorise(&state, &headers).await?;
     let key = totp_key(&state)?;
     let (secret, uri) = operator::new_totp(&email)?;
     let packed = operator::encrypt_totp_secret(key, &secret)?;
@@ -360,14 +378,15 @@ pub(crate) async fn enroll_operator(
 
 pub(crate) async fn create_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SessionBody>,
 ) -> ApiResult<Json<SessionResponse>> {
-    let email = body.email.trim().to_lowercase();
+    let email = authorise(&state, &headers).await?;
     if totp_is_locked(&state, &email) {
         return Err(ApiError::TotpLocked);
     }
     let row: Option<(Uuid, Vec<u8>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT id, totp_secret, disabled_at FROM operators WHERE email = $1",
+        "SELECT id, totp_secret, disabled_at FROM operators WHERE lower(email) = $1",
     )
     .bind(&email)
     .fetch_optional(&state.db)

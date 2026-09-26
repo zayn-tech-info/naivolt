@@ -75,10 +75,10 @@ pub struct Config {
     /// which is the right default for a public product and the wrong one for a
     /// deployment taking real card payments before it has opened to anybody.
     pub google_allowed_emails: Vec<String>,
-    /// Shared secret for the read-only admin endpoints. Unset means those routes
-    /// do not exist, which is the right default: they expose customer emails and
-    /// order history to anyone holding the string.
-    pub admin_token: Option<String>,
+    /// Who may open the operations dashboard, by verified sign-in email. There
+    /// is no shared secret: a string anyone can copy is not a person, and these
+    /// routes expose customer emails and order history. Empty turns them off.
+    pub admin_emails: Vec<String>,
     /// Where the dashboard lives. Paystack sends the payer back here, so a wrong
     /// value strands someone who has already been charged on a page that cannot
     /// tell them their money arrived.
@@ -178,6 +178,20 @@ pub struct RateLimitQuotas {
 }
 
 pub const PRODUCTION_WEB_ORIGIN: &str = "https://www.naivolt.com";
+
+/// The operations dashboard's owner when `ADMIN_EMAILS` is not set.
+pub const DEFAULT_ADMIN_EMAIL: &str = "naivolt7@gmail.com";
+
+/// A comma separated list of emails, trimmed and lowercased. Unset falls back
+/// to `default`; set but empty means nobody.
+fn email_list_env(name: &str, default: &str) -> Vec<String> {
+    env::var(name)
+        .unwrap_or_else(|_| default.to_owned())
+        .split(',')
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
+}
 
 impl RateLimitQuotas {
     pub fn defaults() -> Self {
@@ -298,7 +312,7 @@ impl Config {
                 .map(|e| e.trim().to_ascii_lowercase())
                 .filter(|e| !e.is_empty())
                 .collect(),
-            admin_token: env::var("ADMIN_TOKEN").ok().filter(|s| s.len() >= 24),
+            admin_emails: email_list_env("ADMIN_EMAILS", DEFAULT_ADMIN_EMAIL),
             web_app_url: env::var("WEB_APP_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into())
                 .trim_end_matches('/')
@@ -620,7 +634,7 @@ mod tests {
             smspool_base_url: "https://api.smspool.net".into(),
             activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
-            admin_token: None,
+            admin_emails: Vec::new(),
             web_app_url: "https://naivolt.com".into(),
             numbers_margin: Decimal::new(16, 1),
             numbers_min_price_fraction: Decimal::new(6, 1),
@@ -643,15 +657,18 @@ mod tests {
     /// every successful card payment in production lands on a page that exists
     /// only on someone's laptop — money taken, balance apparently unchanged.
     #[test]
-    fn a_short_admin_token_is_no_admin_token() {
-        // A guessable shared secret is worse than none: it reads as protection
-        // while exposing every customer email to anyone who tries.
-        std::env::set_var("ADMIN_TOKEN", "letmein");
-        assert!(env::var("ADMIN_TOKEN")
-            .ok()
-            .filter(|s| s.len() >= 24)
-            .is_none());
-        std::env::remove_var("ADMIN_TOKEN");
+    fn admin_emails_default_to_the_owner_and_are_lowercased() {
+        std::env::remove_var("ADMIN_EMAILS_TEST");
+        assert_eq!(
+            email_list_env("ADMIN_EMAILS_TEST", DEFAULT_ADMIN_EMAIL),
+            vec![DEFAULT_ADMIN_EMAIL.to_owned()]
+        );
+        std::env::set_var("ADMIN_EMAILS_TEST", " Ops@Example.test , ,b@example.test");
+        assert_eq!(
+            email_list_env("ADMIN_EMAILS_TEST", DEFAULT_ADMIN_EMAIL),
+            vec!["ops@example.test".to_owned(), "b@example.test".to_owned()]
+        );
+        std::env::remove_var("ADMIN_EMAILS_TEST");
     }
 
     #[test]

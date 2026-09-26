@@ -34,8 +34,8 @@ pub struct AppState {
     pub auto_approve_kyc: bool,
     /// Who may sign in with Google. Empty means anyone.
     pub google_allowed_emails: Arc<Vec<String>>,
-    /// Shared secret for the read-only admin endpoints; None disables them.
-    pub admin_token: Option<String>,
+    /// Verified emails allowed into the operations dashboard; empty disables it.
+    pub admin_emails: Arc<Vec<String>>,
     pub operations_alert_email: Option<String>,
     pub operator_totp_key: Option<Vec<u8>>,
     pub admin_refund_cap_ngn: rust_decimal::Decimal,

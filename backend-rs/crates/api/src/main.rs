@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
         dev_otp_code: config.dev_otp_code.clone(),
         auto_approve_kyc: config.auto_approve_kyc,
         web_app_url: config.web_app_url.clone(),
-        admin_token: config.admin_token.clone(),
+        admin_emails: Arc::new(config.admin_emails.clone()),
         operations_alert_email: config.operations_alert_email.clone(),
         operator_totp_key: config.operator_totp_key.clone(),
         admin_refund_cap_ngn: config.admin_refund_cap_ngn,

@@ -17,7 +17,19 @@ mod tests {
     use sqlx::Executor;
     use std::sync::Arc;
 
-    const ADMIN: &str = "test-admin-token-please-rotate-24";
+    /// Every operator a test signs in as. Each is also an admin, because an
+    /// authenticator session only works alongside that person's web session.
+    const ADMINS: &[&str] = &[
+        "admin@example.test",
+        "operator@example.test",
+        "recheck@example.test",
+        "exhausted@example.test",
+        "claim@example.test",
+        "cap@example.test",
+        "disabled@example.test",
+        "lock@example.test",
+        "sell@example.test",
+    ];
     const TOTP_KEY: &[u8] = b"01234567890123456789012345678901";
 
     fn test_config() -> Config {
@@ -44,7 +56,7 @@ mod tests {
             smspool_base_url: "https://api.smspool.net".into(),
             activate_keys: Vec::new(),
             google_allowed_emails: Vec::new(),
-            admin_token: Some(ADMIN.into()),
+            admin_emails: ADMINS.iter().map(|e| e.to_string()).collect(),
             web_app_url: "http://localhost".into(),
             numbers_margin: dec!(1.25),
             usd_ngn_mid: dec!(1600),
@@ -78,7 +90,7 @@ mod tests {
             dev_otp_code: None,
             auto_approve_kyc: false,
             google_allowed_emails: Arc::new(Vec::new()),
-            admin_token: Some(ADMIN.into()),
+            admin_emails: Arc::new(ADMINS.iter().map(|e| e.to_string()).collect()),
             operations_alert_email: Some("ops@example.test".into()),
             operator_totp_key: Some(TOTP_KEY.to_vec()),
             admin_refund_cap_ngn: Decimal::from(100_000),
@@ -88,10 +100,50 @@ mod tests {
         }
     }
 
-    fn admin_headers() -> HeaderMap {
+    /// A bearer for a user whose verified Google identity is `email`.
+    async fn bearer_for(state: &AppState, email: &str, verified: bool) -> HeaderMap {
+        let subject = format!("google-{email}-{verified}");
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            "SELECT user_id FROM identities WHERE provider = 'google' AND subject = $1",
+        )
+        .bind(&subject)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap();
+        let user_id = match existing {
+            Some(id) => id,
+            None => {
+                // users.email is only a contact field, deliberately not `email`.
+                let id: Uuid = sqlx::query_scalar("INSERT INTO users (email) VALUES ($1) RETURNING id")
+                    .bind(format!("{}@users.example.test", Uuid::new_v4()))
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "INSERT INTO identities (user_id, provider, subject, email, verified_at)
+                     VALUES ($1, 'google', $2, $3, CASE WHEN $4 THEN now() END)",
+                )
+                .bind(id)
+                .bind(&subject)
+                .bind(email)
+                .bind(verified)
+                .execute(&state.db)
+                .await
+                .unwrap();
+                id
+            }
+        };
+        let token = state
+            .keys
+            .issue_access(user_id, Uuid::new_v4(), 0, Utc::now())
+            .unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-admin-token", ADMIN.parse().unwrap());
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
         headers
+    }
+
+    async fn admin_headers(state: &AppState) -> HeaderMap {
+        bearer_for(state, "admin@example.test", true).await
     }
 
     fn operator_headers(token: &str) -> HeaderMap {
@@ -191,15 +243,10 @@ mod tests {
     }
 
     async fn enroll_and_login(state: &AppState, email: &str) -> String {
-        let _ = enroll_operator(
-            State(state.clone()),
-            admin_headers(),
-            Json(EnrollBody {
-                email: email.into(),
-            }),
-        )
-        .await
-        .unwrap();
+        let web = bearer_for(state, email, true).await;
+        let _ = enroll_operator(State(state.clone()), web.clone())
+            .await
+            .unwrap();
         let packed: Vec<u8> =
             sqlx::query_scalar("SELECT totp_secret FROM operators WHERE email = $1")
                 .bind(email)
@@ -208,13 +255,7 @@ mod tests {
                 .unwrap();
         let secret = operator::decrypt_totp_secret(TOTP_KEY, &packed).unwrap();
         let totp = operator::totp_code(&secret, email).unwrap();
-        create_session(
-            State(state.clone()),
-            Json(SessionBody {
-                email: email.into(),
-                totp,
-            }),
-        )
+        create_session(State(state.clone()), web, Json(SessionBody { totp }))
         .await
         .unwrap()
         .0
@@ -222,24 +263,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_admin_token_is_not_found_on_search() {
-        let database = IsolatedDatabase::new("ops_token_404").await;
+    async fn only_a_verified_admin_email_gets_in() {
+        let database = IsolatedDatabase::new("ops_admin_email").await;
         let state = test_state(
             database.pool.clone(),
             AnyNumberProvider::Stub(crate::number_provider::StubProvider),
         );
-        let mut headers = HeaderMap::new();
-        headers.insert("x-admin-token", "nope".parse().unwrap());
-        let err = list_orders(
-            State(state),
-            headers,
+        let search = || {
             Query(OrderSearch {
                 reference: Some(Uuid::new_v4().to_string()),
                 email: None,
-            }),
+            })
+        };
+
+        let missing = list_orders(State(state.clone()), HeaderMap::new(), search())
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(missing).await, "UNAUTHORIZED");
+
+        let stranger = bearer_for(&state, "stranger@example.test", true).await;
+        let err = list_orders(State(state.clone()), stranger, search())
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(err).await, "NOT_FOUND");
+
+        // The admin's address on an identity nobody proved is not the admin.
+        let unverified = bearer_for(&state, "admin@example.test", false).await;
+        let err = list_orders(State(state.clone()), unverified, search())
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(err).await, "NOT_FOUND");
+
+        // Typing the admin's address into a profile proves nothing either.
+        let typed = bearer_for(&state, "stranger@example.test", true).await;
+        sqlx::query(
+            "UPDATE users SET email = 'admin@example.test'
+              WHERE id = (SELECT user_id FROM identities WHERE subject = 'google-stranger@example.test-true')",
         )
+        .execute(&state.db)
         .await
-        .unwrap_err();
+        .unwrap();
+        let err = list_orders(State(state.clone()), typed, search())
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(err).await, "NOT_FOUND");
+
+        let me = admin_me(State(state.clone()), admin_headers(&state).await)
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(me.email, "admin@example.test");
+        assert!(!me.operator_enrolled);
+        assert!(list_orders(State(state.clone()), admin_headers(&state).await, search())
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+
+        let mut off = state.clone();
+        off.admin_emails = Arc::new(Vec::new());
+        let err = list_orders(State(off), admin_headers(&state).await, search())
+            .await
+            .unwrap_err();
         assert_eq!(err_code(err).await, "NOT_FOUND");
         database.cleanup().await;
     }
@@ -257,7 +342,7 @@ mod tests {
             pool,
             AnyNumberProvider::Stub(crate::number_provider::StubProvider),
         );
-        let overview = overview(State(state), admin_headers()).await.unwrap().0;
+        let overview = overview(State(state.clone()), admin_headers(&state).await).await.unwrap().0;
         assert!(overview.oldest_open_age_seconds.is_some());
         assert!(overview.catalogue_synced_at.is_some());
         assert_eq!(overview.operator_refunds_last24h, 0);
@@ -287,7 +372,7 @@ mod tests {
             pool,
             AnyNumberProvider::Stub(crate::number_provider::StubProvider),
         );
-        let detail = order_detail(State(state), admin_headers(), Path(id))
+        let detail = order_detail(State(state.clone()), admin_headers(&state).await, Path(id))
             .await
             .unwrap()
             .0;
@@ -319,7 +404,7 @@ mod tests {
 
         let unknown = list_orders(
             State(state.clone()),
-            admin_headers(),
+            admin_headers(&state).await,
             Query(OrderSearch {
                 reference: Some(Uuid::new_v4().to_string()),
                 email: None,
@@ -332,7 +417,7 @@ mod tests {
 
         let found = list_orders(
             State(state.clone()),
-            admin_headers(),
+            admin_headers(&state).await,
             Query(OrderSearch {
                 reference: Some(id.to_string()),
                 email: Some("ops-happy@example.test".into()),
@@ -343,29 +428,18 @@ mod tests {
         .0;
         assert_eq!(found.len(), 1);
 
-        let dup = enroll_operator(
-            State(state.clone()),
-            admin_headers(),
-            Json(EnrollBody {
-                email: "operator@example.test".into(),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let operator_web = bearer_for(&state, "operator@example.test", true).await;
+        let dup = enroll_operator(State(state.clone()), operator_web)
+            .await
+            .unwrap_err();
         assert_eq!(err_code(dup).await, "CONFLICT");
 
         let mut only_session = HeaderMap::new();
         only_session.insert("x-operator-session", token.parse().unwrap());
-        let enroll_with_session_only = enroll_operator(
-            State(state.clone()),
-            only_session,
-            Json(EnrollBody {
-                email: "other@example.test".into(),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err_code(enroll_with_session_only).await, "NOT_FOUND");
+        let enroll_with_session_only = enroll_operator(State(state.clone()), only_session)
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(enroll_with_session_only).await, "UNAUTHORIZED");
 
         let rechecked = recheck_order(State(state.clone()), operator_headers(&token), Path(id))
             .await
@@ -613,20 +687,15 @@ mod tests {
             database.pool.clone(),
             AnyNumberProvider::Stub(crate::number_provider::StubProvider),
         );
-        let _ = enroll_operator(
-            State(state.clone()),
-            admin_headers(),
-            Json(EnrollBody {
-                email: "lock@example.test".into(),
-            }),
-        )
-        .await
-        .unwrap();
+        let web = bearer_for(&state, "lock@example.test", true).await;
+        let _ = enroll_operator(State(state.clone()), web.clone())
+            .await
+            .unwrap();
         for _ in 0..5 {
             let err = create_session(
                 State(state.clone()),
+                web.clone(),
                 Json(SessionBody {
-                    email: "lock@example.test".into(),
                     totp: "000000".into(),
                 }),
             )
@@ -636,8 +705,8 @@ mod tests {
         }
         let locked = create_session(
             State(state),
+            web,
             Json(SessionBody {
-                email: "lock@example.test".into(),
                 totp: "000000".into(),
             }),
         )

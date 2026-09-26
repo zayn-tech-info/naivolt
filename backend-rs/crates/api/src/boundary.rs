@@ -108,7 +108,6 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
             HeaderName::from_static("authorization"),
             HeaderName::from_static("content-type"),
             HeaderName::from_static("idempotency-key"),
-            HeaderName::from_static("x-admin-token"),
             HeaderName::from_static("x-operator-session"),
             HeaderName::from_static("cookie"),
         ])
@@ -348,7 +347,7 @@ mod tests {
                 .header("access-control-request-method", "GET")
                 .header(
                     "access-control-request-headers",
-                    "authorization,content-type,idempotency-key,x-admin-token",
+                    "authorization,content-type,idempotency-key,x-operator-session",
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -370,7 +369,6 @@ mod tests {
             "authorization",
             "content-type",
             "idempotency-key",
-            "x-admin-token",
             "x-operator-session",
             "cookie",
         ] {
