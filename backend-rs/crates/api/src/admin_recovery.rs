@@ -122,7 +122,14 @@ async fn require_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<Uu
            FROM operator_sessions s
            JOIN operators o ON o.id = s.operator_id
           WHERE s.token_hash = $1 AND s.expires_at > now()
-            AND lower(o.email) = ANY($2)",
+            AND (
+              lower(o.email) = ANY($2)
+              OR EXISTS (
+                    SELECT 1 FROM admin_members m
+                     WHERE lower(m.email) = lower(o.email)
+                       AND m.revoked_at IS NULL
+              )
+            )",
     )
     .bind(hash)
     .bind(state.admin_emails.as_slice())
@@ -440,6 +447,130 @@ pub(crate) async fn delete_session(
     if deleted.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn normalise_admin_email(raw: &str) -> ApiResult<String> {
+    let email = raw.trim().to_lowercase();
+    let (local, domain) = email.split_once('@').ok_or_else(|| {
+        ApiError::BadRequest("enter an email address".into())
+    })?;
+    if email.len() > 254
+        || local.is_empty()
+        || domain.is_empty()
+        || !domain.contains('.')
+        || email.contains(char::is_whitespace)
+    {
+        return Err(ApiError::BadRequest("enter an email address".into()));
+    }
+    Ok(email)
+}
+
+#[derive(Deserialize)]
+pub struct InviteBody {
+    pub email: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminMember {
+    pub email: String,
+    pub invited_by: String,
+    pub created_at: String,
+}
+
+/// People invited from the dashboard. Bootstrap `ADMIN_EMAILS` are not listed
+/// here; they stay on the VPS env.
+pub(crate) async fn list_members(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<AdminMember>>> {
+    require_operator(&state, &headers).await?;
+    let rows: Vec<(String, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT email, invited_by, created_at
+           FROM admin_members
+          WHERE revoked_at IS NULL
+          ORDER BY created_at ASC",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(email, invited_by, created_at)| AdminMember {
+                email,
+                invited_by,
+                created_at: created_at.to_rfc3339(),
+            })
+            .collect(),
+    ))
+}
+
+/// Lets a signed-in operator add another Google account without an env edit.
+/// The invitee still has to enrol an authenticator on first visit.
+pub(crate) async fn invite_member(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<InviteBody>,
+) -> ApiResult<Json<AdminMember>> {
+    let operator_id = require_operator(&state, &headers).await?;
+    let email = normalise_admin_email(&body.email)?;
+    let invited_by: String = sqlx::query_scalar("SELECT lower(email) FROM operators WHERE id = $1")
+        .bind(operator_id)
+        .fetch_one(&state.db)
+        .await?;
+    if state.admin_emails.contains(&email) {
+        return Err(ApiError::Conflict("that email is already an admin".into()));
+    }
+    let existing: Option<(DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT created_at, revoked_at FROM admin_members WHERE lower(email) = $1",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some((_, None)) = existing {
+        return Err(ApiError::Conflict("that email is already an admin".into()));
+    }
+    let created_at: DateTime<Utc> = sqlx::query_scalar(
+        "INSERT INTO admin_members (email, invited_by)
+         VALUES ($1, $2)
+         ON CONFLICT (email) DO UPDATE
+            SET invited_by = EXCLUDED.invited_by,
+                created_at = now(),
+                revoked_at = NULL
+         RETURNING created_at",
+    )
+    .bind(&email)
+    .bind(&invited_by)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(AdminMember {
+        email,
+        invited_by,
+        created_at: created_at.to_rfc3339(),
+    }))
+}
+
+pub(crate) async fn revoke_member(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(email): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_operator(&state, &headers).await?;
+    let email = normalise_admin_email(&email)?;
+    let updated = sqlx::query(
+        "UPDATE admin_members SET revoked_at = now()
+          WHERE lower(email) = $1 AND revoked_at IS NULL",
+    )
+    .bind(&email)
+    .execute(&state.db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    sqlx::query("DELETE FROM operator_sessions WHERE operator_id IN (SELECT id FROM operators WHERE lower(email) = $1)")
+        .bind(&email)
+        .execute(&state.db)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

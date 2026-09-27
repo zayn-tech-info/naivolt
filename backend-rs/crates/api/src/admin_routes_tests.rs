@@ -29,6 +29,7 @@ mod tests {
         "disabled@example.test",
         "lock@example.test",
         "sell@example.test",
+        "host@example.test",
     ];
     const TOTP_KEY: &[u8] = b"01234567890123456789012345678901";
 
@@ -774,6 +775,101 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(audits, 1);
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn invited_email_can_sign_in_and_enrol_without_env_edit() {
+        let database = IsolatedDatabase::new("ops_invite").await;
+        let state = test_state(
+            database.pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let teammate = "teammate@example.test";
+        let before = bearer_for(&state, teammate, true).await;
+        let denied = admin_me(State(state.clone()), before)
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(denied).await, "NOT_FOUND");
+
+        let missing = invite_member(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(InviteBody {
+                email: teammate.into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(missing).await, "NOT_FOUND");
+
+        let token = enroll_and_login(&state, "host@example.test").await;
+        let invited = invite_member(
+            State(state.clone()),
+            operator_headers(&token),
+            Json(InviteBody {
+                email: "  Teammate@Example.test ".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(invited.email, teammate);
+        assert_eq!(invited.invited_by, "host@example.test");
+
+        let again = invite_member(
+            State(state.clone()),
+            operator_headers(&token),
+            Json(InviteBody {
+                email: teammate.into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(again).await, "CONFLICT");
+
+        let listed = list_members(State(state.clone()), operator_headers(&token))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].email, teammate);
+
+        let me = admin_me(
+            State(state.clone()),
+            bearer_for(&state, teammate, true).await,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(me.email, teammate);
+        assert!(!me.operator_enrolled);
+
+        let teammate_token = enroll_and_login(&state, teammate).await;
+        let their_list = list_members(State(state.clone()), operator_headers(&teammate_token))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(their_list.len(), 1);
+
+        revoke_member(
+            State(state.clone()),
+            operator_headers(&token),
+            Path(teammate.to_string()),
+        )
+        .await
+        .unwrap();
+        let gone = admin_me(
+            State(state.clone()),
+            bearer_for(&state, teammate, true).await,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(gone).await, "NOT_FOUND");
+        let session_dead = list_members(State(state), operator_headers(&teammate_token))
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(session_dead).await, "NOT_FOUND");
         database.cleanup().await;
     }
 }
