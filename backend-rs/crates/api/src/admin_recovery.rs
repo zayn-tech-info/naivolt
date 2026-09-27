@@ -109,6 +109,10 @@ fn bad_totp() -> ApiError {
 }
 
 async fn require_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<Uuid> {
+    // The authenticator token is not an identity. It only proves that *this*
+    // signed-in admin passed TOTP. A leftover header from another account is
+    // not enough, and neither is a Google session without the matching token.
+    let email = authorise(state, headers).await?;
     let presented = headers
         .get("x-operator-session")
         .and_then(|v| v.to_str().ok())
@@ -122,8 +126,9 @@ async fn require_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<Uu
            FROM operator_sessions s
            JOIN operators o ON o.id = s.operator_id
           WHERE s.token_hash = $1 AND s.expires_at > now()
+            AND lower(o.email) = $2
             AND (
-              lower(o.email) = ANY($2)
+              lower(o.email) = ANY($3)
               OR EXISTS (
                     SELECT 1 FROM admin_members m
                      WHERE lower(m.email) = lower(o.email)
@@ -132,6 +137,7 @@ async fn require_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<Uu
             )",
     )
     .bind(hash)
+    .bind(&email)
     .bind(state.admin_emails.as_slice())
     .fetch_optional(&state.db)
     .await?;
@@ -432,18 +438,19 @@ pub(crate) async fn delete_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<StatusCode> {
+    let operator_id = require_operator(&state, &headers).await?;
     let presented = headers
         .get("x-operator-session")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    if presented.is_empty() {
-        return Err(ApiError::NotFound);
-    }
     let hash = operator::hash_session_token(presented.as_bytes());
-    let deleted = sqlx::query("DELETE FROM operator_sessions WHERE token_hash = $1")
-        .bind(hash)
-        .execute(&state.db)
-        .await?;
+    let deleted = sqlx::query(
+        "DELETE FROM operator_sessions WHERE token_hash = $1 AND operator_id = $2",
+    )
+    .bind(hash)
+    .bind(operator_id)
+    .execute(&state.db)
+    .await?;
     if deleted.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }

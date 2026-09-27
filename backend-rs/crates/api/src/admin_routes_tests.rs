@@ -147,8 +147,14 @@ mod tests {
         bearer_for(state, "admin@example.test", true).await
     }
 
-    fn operator_headers(token: &str) -> HeaderMap {
+    fn session_only_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
+        headers.insert("x-operator-session", token.parse().unwrap());
+        headers
+    }
+
+    async fn operator_headers(state: &AppState, email: &str, token: &str) -> HeaderMap {
+        let mut headers = bearer_for(state, email, true).await;
         headers.insert("x-operator-session", token.parse().unwrap());
         headers
     }
@@ -442,14 +448,19 @@ mod tests {
             .unwrap_err();
         assert_eq!(err_code(enroll_with_session_only).await, "UNAUTHORIZED");
 
-        let rechecked = recheck_order(State(state.clone()), operator_headers(&token), Path(id))
-            .await
-            .unwrap()
-            .0;
+        let rechecked = recheck_order(
+            State(state.clone()),
+            operator_headers(&state, "operator@example.test", &token).await,
+            Path(id),
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(rechecked.status, "awaiting_code");
         assert_eq!(stub.buy_calls(), 0);
 
-        let mut refund_headers = operator_headers(&token);
+        let mut refund_headers =
+            operator_headers(&state, "operator@example.test", &token).await;
         let key = Uuid::new_v4().to_string();
         refund_headers.insert("Idempotency-Key", key.parse().unwrap());
         let first = refund_order(
@@ -492,9 +503,112 @@ mod tests {
         .unwrap();
         assert_eq!(alerts, 1);
 
-        delete_session(State(state.clone()), operator_headers(&token))
-            .await
-            .unwrap();
+        delete_session(
+            State(state.clone()),
+            operator_headers(&state, "operator@example.test", &token).await,
+        )
+        .await
+        .unwrap();
+        database.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn operator_writes_bind_google_identity_to_session() {
+        let database = IsolatedDatabase::new("ops_bind_session").await;
+        let pool = database.pool.clone();
+        let id = held_order(
+            &pool,
+            "bind",
+            "awaiting_code",
+            Some("stub-bind"),
+            None,
+            None,
+        )
+        .await;
+        let state = test_state(
+            pool.clone(),
+            AnyNumberProvider::Stub(crate::number_provider::StubProvider),
+        );
+        let token_a = enroll_and_login(&state, "operator@example.test").await;
+        let token_b = enroll_and_login(&state, "host@example.test").await;
+
+        // (a) authenticator session alone is not an identity.
+        let mut only_session = session_only_headers(&token_a);
+        only_session.insert(
+            "Idempotency-Key",
+            Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        let err = refund_order(
+            State(state.clone()),
+            only_session,
+            Path(id),
+            Json(RefundBody { reason: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(err).await, "UNAUTHORIZED");
+
+        // (b) signed-in admin B cannot spend admin A's leftover TOTP session.
+        let mut mismatched =
+            operator_headers(&state, "host@example.test", &token_a).await;
+        mismatched.insert(
+            "Idempotency-Key",
+            Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        let err = refund_order(
+            State(state.clone()),
+            mismatched,
+            Path(id),
+            Json(RefundBody { reason: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err_code(err).await, "NOT_FOUND");
+        let refunded: Option<Uuid> =
+            sqlx::query_scalar("SELECT refunded_journal_id FROM number_orders WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(refunded.is_none());
+        let actor: Option<String> = sqlx::query_scalar(
+            "SELECT actor_id::text FROM audit_log WHERE action = 'number_refund' AND target = $1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert!(actor.is_none());
+
+        // (c) that same person, matching Bearer and TOTP session, can still refund.
+        let mut matched =
+            operator_headers(&state, "operator@example.test", &token_a).await;
+        matched.insert(
+            "Idempotency-Key",
+            Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        let refunded = refund_order(
+            State(state.clone()),
+            matched,
+            Path(id),
+            Json(RefundBody { reason: None }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(refunded.refunded_journal_id.is_some());
+        let actor_email: String = sqlx::query_scalar(
+            "SELECT lower(o.email)
+               FROM audit_log a
+               JOIN operators o ON o.id = a.actor_id
+              WHERE a.action = 'number_refund' AND a.target = $1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actor_email, "operator@example.test");
+        let _ = token_b;
         database.cleanup().await;
     }
 
@@ -506,7 +620,11 @@ mod tests {
         let id = held_order(&pool, "rev", "review_required", None, None, None).await;
         let state = test_state(pool, AnyNumberProvider::ScriptedStub(stub.clone()));
         let token = enroll_and_login(&state, "recheck@example.test").await;
-        let err = recheck_order(State(state), operator_headers(&token), Path(id))
+        let err = recheck_order(
+            State(state.clone()),
+            operator_headers(&state, "recheck@example.test", &token).await,
+            Path(id),
+        )
             .await
             .unwrap_err();
         assert_eq!(err_code(err).await, "RECHECK_UNAVAILABLE");
@@ -536,7 +654,11 @@ mod tests {
             .unwrap();
         let state = test_state(pool.clone(), AnyNumberProvider::ScriptedStub(stub.clone()));
         let token = enroll_and_login(&state, "exhausted@example.test").await;
-        let first = recheck_order(State(state.clone()), operator_headers(&token), Path(id))
+        let first = recheck_order(
+            State(state.clone()),
+            operator_headers(&state, "exhausted@example.test", &token).await,
+            Path(id),
+        )
             .await
             .unwrap()
             .0;
@@ -555,7 +677,8 @@ mod tests {
         assert_eq!(alerts[0].0, key);
         assert_eq!(alerts[0].1, "pending");
 
-        let _again = recheck_order(State(state), operator_headers(&token), Path(id))
+        let headers = operator_headers(&state, "exhausted@example.test", &token).await;
+        let _again = recheck_order(State(state), headers, Path(id))
             .await
             .unwrap();
         let count: i64 = sqlx::query_scalar(
@@ -597,7 +720,7 @@ mod tests {
             AnyNumberProvider::Stub(crate::number_provider::StubProvider),
         );
         let token = enroll_and_login(&state, "claim@example.test").await;
-        let mut headers = operator_headers(&token);
+        let mut headers = operator_headers(&state, "claim@example.test", &token).await;
         headers.insert(
             "Idempotency-Key",
             Uuid::new_v4().to_string().parse().unwrap(),
@@ -632,7 +755,7 @@ mod tests {
         );
         state.admin_refund_cap_ngn = Decimal::from(1);
         let token = enroll_and_login(&state, "cap@example.test").await;
-        let mut headers = operator_headers(&token);
+        let mut headers = operator_headers(&state, "cap@example.test", &token).await;
         headers.insert(
             "Idempotency-Key",
             Uuid::new_v4().to_string().parse().unwrap(),
@@ -664,7 +787,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let mut headers = operator_headers(&token);
+        let mut headers = operator_headers(&state, "disabled@example.test", &token).await;
         headers.insert(
             "Idempotency-Key",
             Uuid::new_v4().to_string().parse().unwrap(),
@@ -735,12 +858,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err_code(missing).await, "NOT_FOUND");
+        assert_eq!(err_code(missing).await, "UNAUTHORIZED");
 
         let token = enroll_and_login(&state, "sell@example.test").await;
         let both_off = put_sell_settings(
             State(state.clone()),
-            operator_headers(&token),
+            operator_headers(&state, "sell@example.test", &token).await,
             Json(SellSettingsBody {
                 fivesim_enabled: false,
                 smspool_enabled: false,
@@ -756,7 +879,7 @@ mod tests {
 
         let updated = put_sell_settings(
             State(state.clone()),
-            operator_headers(&token),
+            operator_headers(&state, "sell@example.test", &token).await,
             Json(SellSettingsBody {
                 fivesim_enabled: true,
                 smspool_enabled: true,
@@ -801,12 +924,12 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err_code(missing).await, "NOT_FOUND");
+        assert_eq!(err_code(missing).await, "UNAUTHORIZED");
 
         let token = enroll_and_login(&state, "host@example.test").await;
         let invited = invite_member(
             State(state.clone()),
-            operator_headers(&token),
+            operator_headers(&state, "host@example.test", &token).await,
             Json(InviteBody {
                 email: "  Teammate@Example.test ".into(),
             }),
@@ -819,7 +942,7 @@ mod tests {
 
         let again = invite_member(
             State(state.clone()),
-            operator_headers(&token),
+            operator_headers(&state, "host@example.test", &token).await,
             Json(InviteBody {
                 email: teammate.into(),
             }),
@@ -828,10 +951,13 @@ mod tests {
         .unwrap_err();
         assert_eq!(err_code(again).await, "CONFLICT");
 
-        let listed = list_members(State(state.clone()), operator_headers(&token))
-            .await
-            .unwrap()
-            .0;
+        let listed = list_members(
+            State(state.clone()),
+            operator_headers(&state, "host@example.test", &token).await,
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].email, teammate);
 
@@ -846,15 +972,18 @@ mod tests {
         assert!(!me.operator_enrolled);
 
         let teammate_token = enroll_and_login(&state, teammate).await;
-        let their_list = list_members(State(state.clone()), operator_headers(&teammate_token))
-            .await
-            .unwrap()
-            .0;
+        let their_list = list_members(
+            State(state.clone()),
+            operator_headers(&state, teammate, &teammate_token).await,
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(their_list.len(), 1);
 
         revoke_member(
             State(state.clone()),
-            operator_headers(&token),
+            operator_headers(&state, "host@example.test", &token).await,
             Path(teammate.to_string()),
         )
         .await
@@ -866,7 +995,8 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err_code(gone).await, "NOT_FOUND");
-        let session_dead = list_members(State(state), operator_headers(&teammate_token))
+        let leftover = operator_headers(&state, teammate, &teammate_token).await;
+        let session_dead = list_members(State(state), leftover)
             .await
             .unwrap_err();
         assert_eq!(err_code(session_dead).await, "NOT_FOUND");
