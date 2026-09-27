@@ -1,11 +1,12 @@
 //! Operator overview, search, TOTP sessions, supplier recheck, and held refunds.
 //!
 //! Every route needs a signed-in user whose *verified* email is on
-//! `ADMIN_EMAILS` (default: the owner). Recheck, refund and selling switches
-//! also need that same person's authenticator session. Money still goes through
-//! the existing order transition. This is not the four role panel in
-//! ARCHITECTURE.md §10.4 (no IP allowlist, no extra roles). Anyone else gets a
-//! 404, so the routes do not advertise themselves.
+//! `ADMIN_EMAILS` (the bootstrap owner) or on `admin_members` (people an
+//! operator invited from the dashboard). Recheck, refund, selling switches,
+//! and invites also need that same person's authenticator session. Money still
+//! goes through the existing order transition. This is not the four role panel
+//! in ARCHITECTURE.md §10.4 (no IP allowlist, no extra roles). Anyone else
+//! gets a 404, so the routes do not advertise themselves.
 
 use crate::error::{ApiError, ApiResult};
 use crate::number_order_transitions::{self, OrderTransition, RefundStatus};
@@ -35,6 +36,8 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/me", get(admin_me))
         .route("/admin/operators", post(enroll_operator))
         .route("/admin/operator/session", post(create_session).delete(delete_session))
+        .route("/admin/members", get(list_members).post(invite_member))
+        .route("/admin/members/:email", axum::routing::delete(revoke_member))
 }
 
 /// The signed-in admin's verified email, or an error.
@@ -45,9 +48,6 @@ pub fn routes() -> Router<AppState> {
 /// browser refreshes and retries; a valid user who is not an admin gets the same
 /// 404 as a route that does not exist.
 async fn authorise(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
-    if state.admin_emails.is_empty() {
-        return Err(ApiError::NotFound);
-    }
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -64,10 +64,21 @@ async fn authorise(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     .bind(claims.sub)
     .fetch_all(&state.db)
     .await?;
-    emails
-        .into_iter()
-        .find(|email| state.admin_emails.contains(email))
-        .ok_or(ApiError::NotFound)
+    if let Some(email) = emails
+        .iter()
+        .find(|email| state.admin_emails.contains(*email))
+    {
+        return Ok(email.clone());
+    }
+    let invited: Option<String> = sqlx::query_scalar(
+        "SELECT lower(email) FROM admin_members
+          WHERE revoked_at IS NULL AND lower(email) = ANY($1)
+          LIMIT 1",
+    )
+    .bind(&emails)
+    .fetch_optional(&state.db)
+    .await?;
+    invited.ok_or(ApiError::NotFound)
 }
 
 #[derive(Serialize)]
